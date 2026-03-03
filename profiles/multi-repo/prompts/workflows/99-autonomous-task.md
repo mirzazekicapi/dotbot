@@ -28,7 +28,7 @@ ToolSearch({ query: "select:mcp__dotbot__plan_get" })
 
 | research_prompt | Additional ToolSearch calls |
 |---|---|
-| `repos.md` | `select:mcp__sourcebot__search_code`, `select:mcp__sourcebot__list_repos`, `select:mcp__sourcebot__read_file`, `select:mcp__sourcebot__list_tree` |
+| `repos.md` | `select:mcp__sourcebot__search_code`, `select:mcp__sourcebot__list_repos`, `select:mcp__sourcebot__read_file`, `select:mcp__sourcebot__list_tree`, `select:mcp__sourcebot__ask_codebase` |
 | `repo-deep-dive.md` | All sourcebot tools above + `select:mcp__dotbot__repo_clone`, `select:mcp__dotbot__repo_list` |
 | `atlassian.md` | `select:mcp__dotbot__atlassian_download`, `select:mcp__atlassian__getJiraIssue`, `select:mcp__atlassian__searchJiraIssuesUsingJql`, `select:mcp__atlassian__searchConfluenceUsingCql`, `select:mcp__atlassian__getConfluencePage` |
 | `public.md` | **None** — internet research uses only built-in WebSearch and WebFetch |
