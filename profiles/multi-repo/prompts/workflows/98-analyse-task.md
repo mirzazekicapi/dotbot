@@ -115,7 +115,7 @@ These values will be substituted into the research methodology prompt.
 > **Path reference** — Initiative context is in `briefing/` but research outputs are one level up:
 > - Initiative context: `.bot/workspace/product/briefing/jira-context.md`
 > - Research outputs: `.bot/workspace/product/research-documents.md`, `research-internet.md`, `research-repos.md`
-> - Deep dive outputs: `.bot/workspace/product/research-repo-{RepoName}-summary.md`
+> - Deep dive outputs: `.bot/workspace/product/briefing/repos/{RepoName}.md`
 
 ### Research Phase 3: Load Research Methodology
 

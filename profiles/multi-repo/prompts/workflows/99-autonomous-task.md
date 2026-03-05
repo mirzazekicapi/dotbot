@@ -118,7 +118,7 @@ When the analysis mode is `research`, you are executing a research task — gath
 > **Path reference** — do not confuse `briefing/` with `product/`:
 > - Initiative context: `.bot/workspace/product/briefing/jira-context.md`
 > - Research outputs: `.bot/workspace/product/research-documents.md`, `research-internet.md`, `research-repos.md`
-> - Deep dive outputs: `.bot/workspace/product/research-repo-{RepoName}-summary.md`
+> - Deep dive outputs: `.bot/workspace/product/briefing/repos/{RepoName}.md`
 
 ### Research Exec Phase 2: Prepare Environment
 
@@ -176,7 +176,7 @@ Follow the research methodology prompt as your primary guide. The methodology de
    - For Atlassian research: `.bot/workspace/product/research-documents.md`
    - For public research: `.bot/workspace/product/research-internet.md`
    - For repo scan: `.bot/workspace/product/research-repos.md`
-   - For deep dives: `.bot/workspace/product/research-repo-{RepoName}-summary.md`
+   - For deep dives: `.bot/workspace/product/briefing/repos/{RepoName}.md`
 
 2. **Verify output quality** against the research-output standard:
    ```
