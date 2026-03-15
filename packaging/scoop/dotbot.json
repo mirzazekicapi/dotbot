@@ -1,0 +1,32 @@
+{
+    "version": "0.1.0",
+    "description": "Structured AI-assisted development framework with two-phase execution and web dashboard",
+    "homepage": "https://github.com/andresharpe/dotbot-v3",
+    "license": "MIT",
+    "url": "https://github.com/andresharpe/dotbot-v3/releases/download/v0.1.0/dotbot-v3-0.1.0.zip",
+    "hash": "",
+    "extract_dir": "dotbot-v3-0.1.0",
+    "suggest": {
+        "PowerShell 7+": "pwsh"
+    },
+    "installer": {
+        "script": [
+            "pwsh -NoProfile -ExecutionPolicy Bypass -File \"$dir\\install.ps1\""
+        ]
+    },
+    "uninstaller": {
+        "script": [
+            "Remove-Item -Path \"$env:USERPROFILE\\dotbot\" -Recurse -Force -ErrorAction SilentlyContinue"
+        ]
+    },
+    "checkver": {
+        "github": "https://github.com/andresharpe/dotbot-v3"
+    },
+    "autoupdate": {
+        "url": "https://github.com/andresharpe/dotbot-v3/releases/download/v$version/dotbot-v3-$version.zip",
+        "extract_dir": "dotbot-v3-$version",
+        "hash": {
+            "url": "$url.sha256"
+        }
+    }
+}
