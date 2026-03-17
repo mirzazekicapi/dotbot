@@ -15,7 +15,7 @@ class Dotbot < Formula
     # Create a wrapper script that delegates to pwsh
     (bin/"dotbot").write <<~EOS
       #!/bin/bash
-      exec pwsh -NoProfile -File "#{libexec}/bin/dotbot.ps1" "$@"
+      exec pwsh -NoProfile -File "$HOME/dotbot/bin/dotbot.ps1" "$@"
     EOS
   end
 
