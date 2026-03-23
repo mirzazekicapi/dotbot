@@ -193,6 +193,18 @@ try {
 $env:CLAUDE_MODEL = $claudeModelName
 $env:DOTBOT_MODEL = $claudeModelName
 
+# --- Slot affinity (used by Get-NextWorkflowTask to partition tasks across slots) ---
+$script:SlotAffinity = $Slot
+$script:TotalSlots = 1
+if ($Slot -ge 0) {
+    # Read max_concurrent from settings to determine total slot count
+    if ($settings.scoring -and $settings.scoring.max_concurrent_scores -and [int]$settings.scoring.max_concurrent_scores -gt 1) {
+        $script:TotalSlots = [int]$settings.scoring.max_concurrent_scores
+    } elseif ($settings.execution -and $settings.execution.max_concurrent -and [int]$settings.execution.max_concurrent -gt 1) {
+        $script:TotalSlots = [int]$settings.execution.max_concurrent
+    }
+}
+
 # --- Process Registry ---
 
 function New-ProcessId {
@@ -554,6 +566,11 @@ function Get-NextWorkflowTask {
     # Second priority: prefer analysed tasks (ready for execution), then todo
     $wfFilterArgs = @{ prefer_analysed = $true; verbose = $Verbose.IsPresent }
     if ($WorkflowFilter) { $wfFilterArgs['workflow_filter'] = $WorkflowFilter }
+    # Pass slot affinity from outer scope (set by launch-process.ps1)
+    if ($script:SlotAffinity -ge 0) {
+        $wfFilterArgs['slot'] = $script:SlotAffinity
+        $wfFilterArgs['total_slots'] = $script:TotalSlots
+    }
     $result = Invoke-TaskGetNext -Arguments $wfFilterArgs
     return $result
 }

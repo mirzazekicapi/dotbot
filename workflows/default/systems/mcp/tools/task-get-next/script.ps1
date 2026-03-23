@@ -16,6 +16,8 @@ function Invoke-TaskGetNext {
     $verbose = $Arguments['verbose'] -eq $true
     $preferAnalysed = $Arguments['prefer_analysed']
     $workflowFilter = $Arguments['workflow_filter']
+    $slot = if ($Arguments.ContainsKey('slot')) { [int]$Arguments['slot'] } else { -1 }
+    $totalSlots = if ($Arguments.ContainsKey('total_slots')) { [int]$Arguments['total_slots'] } else { 1 }
     
     # Default to preferring analysed tasks (can be overridden)
     if ($null -eq $preferAnalysed) {
@@ -36,7 +38,7 @@ function Invoke-TaskGetNext {
 
     if ($preferAnalysed) {
         # Check for analysed tasks first (dependency-aware)
-        $analysedResult = Get-NextAnalysedTask -WorkflowFilter $workflowFilter
+        $analysedResult = Get-NextAnalysedTask -WorkflowFilter $workflowFilter -Slot $slot -TotalSlots $totalSlots
         if ($analysedResult.Task) {
             $nextTask = $analysedResult.Task
             $taskStatus = 'analysed'
@@ -51,7 +53,7 @@ function Invoke-TaskGetNext {
     # - prefer_analysed = true  -> try analysed first, then todo
     # - prefer_analysed = false -> todo only (used by analysis phase)
     if (-not $nextTask) {
-        $nextTask = Get-NextTask -WorkflowFilter $workflowFilter
+        $nextTask = Get-NextTask -WorkflowFilter $workflowFilter -Slot $slot -TotalSlots $totalSlots
         if ($nextTask) {
             $taskStatus = 'todo'
         }

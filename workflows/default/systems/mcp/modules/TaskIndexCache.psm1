@@ -721,7 +721,7 @@ function Test-AllDependenciesMet {
 }
 
 function Get-NextTask {
-    param([string]$WorkflowFilter)
+    param([string]$WorkflowFilter, [int]$Slot = -1, [int]$TotalSlots = 1)
     $index = Get-TaskIndex
     $doneNames = $index.DoneNames
     $doneSlugs = $index.DoneSlugs
@@ -739,12 +739,17 @@ function Get-NextTask {
         $eligible = @($eligible | Where-Object { $_.workflow -eq $WorkflowFilter })
     }
 
+    # Slot affinity: each slot only sees tasks assigned to it by hash
+    if ($Slot -ge 0 -and $TotalSlots -gt 1) {
+        $eligible = @($eligible | Where-Object { ([Math]::Abs($_.id.GetHashCode()) % $TotalSlots) -eq $Slot })
+    }
+
     # Return highest priority (lowest number)
     return $eligible | Sort-Object priority | Select-Object -First 1
 }
 
 function Get-NextAnalysedTask {
-    param([string]$WorkflowFilter)
+    param([string]$WorkflowFilter, [int]$Slot = -1, [int]$TotalSlots = 1)
     $index = Get-TaskIndex
     $doneNames = $index.DoneNames
     $doneSlugs = $index.DoneSlugs
@@ -764,6 +769,11 @@ function Get-NextAnalysedTask {
 
     $total = @($index.Analysed.Values).Count
     $blockedCount = $total - @($eligible).Count
+
+    # Slot affinity: each slot only sees tasks assigned to it by hash
+    if ($Slot -ge 0 -and $TotalSlots -gt 1) {
+        $eligible = @($eligible | Where-Object { ([Math]::Abs($_.id.GetHashCode()) % $TotalSlots) -eq $Slot })
+    }
 
     # Return highest priority (lowest number) + blocked count for reporting
     $next = $eligible | Sort-Object priority | Select-Object -First 1
