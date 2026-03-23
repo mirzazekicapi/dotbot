@@ -65,7 +65,7 @@ param(
     [int]$Slot = -1       # concurrent slot index (-1 = single instance, 0..N = multi-slot)
 )
 
-Set-StrictMode -Version 3.0
+Set-StrictMode -Version 1.0
 
 # Validate TaskId format when provided
 if ($TaskId -and $TaskId -notmatch '^[a-f0-9]{8}$') {
@@ -432,7 +432,9 @@ function Get-NextTodoTask {
         if ($candidate.file_path -and (Test-Path $candidate.file_path)) {
             try {
                 $content = Get-Content -Path $candidate.file_path -Raw | ConvertFrom-Json
-                if ($content.questions_resolved -and $content.questions_resolved.Count -gt 0 -and -not $content.pending_question) {
+                $hasQR = $content.PSObject.Properties['questions_resolved'] -and $content.questions_resolved -and $content.questions_resolved.Count -gt 0
+                $hasPQ = $content.PSObject.Properties['pending_question'] -and $content.pending_question
+                if ($hasQR -and -not $hasPQ) {
                     Write-Status "Found resumed task (question answered): $($candidate.name)" -Type Info
                     $taskObj = @{
                         id = $content.id
@@ -456,12 +458,12 @@ function Get-NextTodoTask {
                         $taskObj.applicable_agents = $content.applicable_agents
                         $taskObj.applicable_standards = $content.applicable_standards
                         $taskObj.file_path = $candidate.file_path
-                        $taskObj.questions_resolved = $content.questions_resolved
-                        $taskObj.claude_session_id = $content.claude_session_id
-                        $taskObj.needs_interview = $content.needs_interview
-                        $taskObj.working_dir = $content.working_dir
-                        $taskObj.external_repo = $content.external_repo
-                        $taskObj.research_prompt = $content.research_prompt
+                        $taskObj.questions_resolved = if ($content.PSObject.Properties['questions_resolved']) { $content.questions_resolved } else { $null }
+                        $taskObj.claude_session_id = if ($content.PSObject.Properties['claude_session_id']) { $content.claude_session_id } else { $null }
+                        $taskObj.needs_interview = if ($content.PSObject.Properties['needs_interview']) { $content.needs_interview } else { $null }
+                        $taskObj.working_dir = if ($content.PSObject.Properties['working_dir']) { $content.working_dir } else { $null }
+                        $taskObj.external_repo = if ($content.PSObject.Properties['external_repo']) { $content.external_repo } else { $null }
+                        $taskObj.research_prompt = if ($content.PSObject.Properties['research_prompt']) { $content.research_prompt } else { $null }
                     }
                     return @{
                         success = $true
@@ -502,7 +504,9 @@ function Get-NextWorkflowTask {
         if ($candidate.file_path -and (Test-Path $candidate.file_path)) {
             try {
                 $content = Get-Content -Path $candidate.file_path -Raw | ConvertFrom-Json
-                if ($content.questions_resolved -and $content.questions_resolved.Count -gt 0 -and -not $content.pending_question) {
+                $hasQR = $content.PSObject.Properties['questions_resolved'] -and $content.questions_resolved -and $content.questions_resolved.Count -gt 0
+                $hasPQ = $content.PSObject.Properties['pending_question'] -and $content.pending_question
+                if ($hasQR -and -not $hasPQ) {
                     Write-Status "Found resumed task (question answered): $($candidate.name)" -Type Info
                     $taskObj = @{
                         id = $content.id
@@ -528,12 +532,12 @@ function Get-NextWorkflowTask {
                         $taskObj.applicable_agents = $content.applicable_agents
                         $taskObj.applicable_standards = $content.applicable_standards
                         $taskObj.file_path = $candidate.file_path
-                        $taskObj.questions_resolved = $content.questions_resolved
-                        $taskObj.claude_session_id = $content.claude_session_id
-                        $taskObj.needs_interview = $content.needs_interview
-                        $taskObj.working_dir = $content.working_dir
-                        $taskObj.external_repo = $content.external_repo
-                        $taskObj.research_prompt = $content.research_prompt
+                        $taskObj.questions_resolved = if ($content.PSObject.Properties['questions_resolved']) { $content.questions_resolved } else { $null }
+                        $taskObj.claude_session_id = if ($content.PSObject.Properties['claude_session_id']) { $content.claude_session_id } else { $null }
+                        $taskObj.needs_interview = if ($content.PSObject.Properties['needs_interview']) { $content.needs_interview } else { $null }
+                        $taskObj.working_dir = if ($content.PSObject.Properties['working_dir']) { $content.working_dir } else { $null }
+                        $taskObj.external_repo = if ($content.PSObject.Properties['external_repo']) { $content.external_repo } else { $null }
+                        $taskObj.research_prompt = if ($content.PSObject.Properties['research_prompt']) { $content.research_prompt } else { $null }
                     }
                     return @{
                         success = $true
@@ -1231,10 +1235,11 @@ Work on this task autonomously. When complete, ensure you call task_mark_done vi
                 # Build resolved questions context for resumed tasks
                 $isResumedTask = $task.status -eq 'analysing'
                 $resolvedQuestionsContext = ""
-                if ($isResumedTask -and $task.questions_resolved) {
+                $taskQR = if ($task.PSObject.Properties['questions_resolved']) { $task.questions_resolved } else { $null }
+                if ($isResumedTask -and $taskQR) {
                     $resolvedQuestionsContext = "`n## Previously Resolved Questions`n`n"
                     $resolvedQuestionsContext += "This task was previously paused for human input. The following questions have been answered:`n`n"
-                    foreach ($q in $task.questions_resolved) {
+                    foreach ($q in $taskQR) {
                         $resolvedQuestionsContext += "**Q:** $($q.question)`n"
                         $resolvedQuestionsContext += "**A:** $($q.answer)`n`n"
                     }
@@ -1721,10 +1726,19 @@ elseif ($Type -eq 'workflow') {
                 for ($claimAttempt = 0; $claimAttempt -lt 5; $claimAttempt++) {
                     try {
                         $claimStatus = if ($task.skip_analysis -eq $true -or $task.status -eq 'analysed') { 'in-progress' } else { 'analysing' }
+                        $claimResult = $null
                         if ($claimStatus -eq 'in-progress' -and $task.status -ne 'in-progress') {
-                            Invoke-TaskMarkInProgress -Arguments @{ task_id = $task.id } | Out-Null
+                            $claimResult = Invoke-TaskMarkInProgress -Arguments @{ task_id = $task.id }
                         } elseif ($claimStatus -eq 'analysing' -and $task.status -notin @('analysing', 'analysed')) {
-                            Invoke-TaskMarkAnalysing -Arguments @{ task_id = $task.id } | Out-Null
+                            $claimResult = Invoke-TaskMarkAnalysing -Arguments @{ task_id = $task.id }
+                        }
+                        # Detect if another slot already claimed this task
+                        if ($claimResult -and $claimResult.already_completed) {
+                            throw "Task already completed"
+                        }
+                        if ($claimResult -and -not $claimResult.old_status) {
+                            # No old_status means task was already in the target state (claimed by another slot)
+                            throw "Task already claimed"
                         }
                         $claimOk = $true
                         break
@@ -1946,17 +1960,18 @@ elseif ($Type -eq 'workflow') {
             # Build resolved questions context for resumed tasks
             $isResumedTask = $task.status -eq 'analysing'
             $resolvedQuestionsContext = ""
-            if ($isResumedTask -and $task.questions_resolved) {
+            $taskQR = if ($task.PSObject.Properties['questions_resolved']) { $task.questions_resolved } else { $null }
+            if ($isResumedTask -and $taskQR) {
                 $resolvedQuestionsContext = "`n## Previously Resolved Questions`n`n"
                 $resolvedQuestionsContext += "This task was previously paused for human input. The following questions have been answered:`n`n"
-                foreach ($q in $task.questions_resolved) {
+                foreach ($q in $taskQR) {
                     $resolvedQuestionsContext += "**Q:** $($q.question)`n"
                     $resolvedQuestionsContext += "**A:** $($q.answer)`n`n"
                 }
                 $resolvedQuestionsContext += "Use these answers to guide your analysis. The task is already in ``analysing`` status - do NOT call ``task_mark_analysing`` again.`n"
             }
 
-            # Use task-level model override > analysis model from settings > default
+            # Use task-level model override
             $analysisModel = if ($task.model) { $task.model }
                 elseif ($settings.analysis?.model) { $settings.analysis.model }
                 else { 'Opus' }

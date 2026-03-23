@@ -22,7 +22,7 @@ param(
     [switch]$AutoPort
 )
 
-Set-StrictMode -Version 3.0
+Set-StrictMode -Version 1.0
 
 # ---------------------------------------------------------------------------
 # Port availability helper
@@ -691,7 +691,7 @@ try {
                     $contentType = "application/json; charset=utf-8"
                     if ($method -eq "GET") {
                         $result = Get-Theme
-                        if ($result._statusCode) { $statusCode = $result._statusCode; $result.Remove('_statusCode') }
+                        if ($result -is [hashtable] -and $result.ContainsKey('_statusCode')) { $statusCode = $result._statusCode; $result.Remove('_statusCode') }
                         $content = $result | ConvertTo-Json -Depth 5 -Compress
                     }
                     elseif ($method -eq "POST") {
@@ -700,7 +700,7 @@ try {
                             $body = $reader.ReadToEnd() | ConvertFrom-Json
                             $reader.Close()
                             $result = Set-Theme -Body $body
-                            if ($result._statusCode) { $statusCode = $result._statusCode; $result.Remove('_statusCode') }
+                            if ($result -is [hashtable] -and $result.ContainsKey('_statusCode')) { $statusCode = $result._statusCode; $result.Remove('_statusCode') }
                             $content = $result | ConvertTo-Json -Depth 5 -Compress
                         } catch {
                             $statusCode = 500
@@ -741,7 +741,7 @@ try {
                     $contentType = "application/json; charset=utf-8"
                     if ($method -eq "GET") {
                         $result = Get-ProviderList
-                        if ($result._statusCode) { $statusCode = $result._statusCode; $result.Remove('_statusCode') }
+                        if ($result -is [hashtable] -and $result.ContainsKey('_statusCode')) { $statusCode = $result._statusCode; $result.Remove('_statusCode') }
                         $content = $result | ConvertTo-Json -Depth 5 -Compress
                     }
                     elseif ($method -eq "POST") {
@@ -750,7 +750,7 @@ try {
                             $body = $reader.ReadToEnd() | ConvertFrom-Json
                             $reader.Close()
                             $result = Set-ActiveProvider -Body $body
-                            if ($result._statusCode) { $statusCode = $result._statusCode; $result.Remove('_statusCode') }
+                            if ($result -is [hashtable] -and $result.ContainsKey('_statusCode')) { $statusCode = $result._statusCode; $result.Remove('_statusCode') }
                             $content = $result | ConvertTo-Json -Depth 5 -Compress
                         } catch {
                             $statusCode = 500
@@ -768,7 +768,7 @@ try {
                     $contentType = "application/json; charset=utf-8"
                     if ($method -eq "GET") {
                         $result = Get-AnalysisConfig
-                        if ($result._statusCode) { $statusCode = $result._statusCode; $result.Remove('_statusCode') }
+                        if ($result -is [hashtable] -and $result.ContainsKey('_statusCode')) { $statusCode = $result._statusCode; $result.Remove('_statusCode') }
                         $content = $result | ConvertTo-Json -Depth 5 -Compress
                     }
                     elseif ($method -eq "POST") {
@@ -794,7 +794,7 @@ try {
                     $contentType = "application/json; charset=utf-8"
                     if ($method -eq "GET") {
                         $result = Get-CostConfig
-                        if ($result._statusCode) { $statusCode = $result._statusCode; $result.Remove('_statusCode') }
+                        if ($result -is [hashtable] -and $result.ContainsKey('_statusCode')) { $statusCode = $result._statusCode; $result.Remove('_statusCode') }
                         $content = $result | ConvertTo-Json -Depth 5 -Compress
                     }
                     elseif ($method -eq "POST") {
@@ -820,7 +820,7 @@ try {
                     $contentType = "application/json; charset=utf-8"
                     if ($method -eq "GET") {
                         $result = Get-EditorConfig
-                        if ($result._statusCode) { $statusCode = $result._statusCode; $result.Remove('_statusCode') }
+                        if ($result -is [hashtable] -and $result.ContainsKey('_statusCode')) { $statusCode = $result._statusCode; $result.Remove('_statusCode') }
                         $content = $result | ConvertTo-Json -Depth 5 -Compress
                     }
                     elseif ($method -eq "POST") {
@@ -861,7 +861,7 @@ try {
                     if ($method -eq "POST") {
                         try {
                             $result = Invoke-OpenEditor -ProjectRoot $projectRoot
-                            if ($result._statusCode) { $statusCode = $result._statusCode; $result.Remove('_statusCode') }
+                            if ($result -is [hashtable] -and $result.ContainsKey('_statusCode')) { $statusCode = $result._statusCode; $result.Remove('_statusCode') }
                             $content = $result | ConvertTo-Json -Depth 5 -Compress
                         } catch {
                             $statusCode = 500
@@ -879,7 +879,7 @@ try {
                     $contentType = "application/json; charset=utf-8"
                     if ($method -eq "GET") {
                         $result = Get-MothershipConfig
-                        if ($result._statusCode) { $statusCode = $result._statusCode; $result.Remove('_statusCode') }
+                        if ($result -is [hashtable] -and $result.ContainsKey('_statusCode')) { $statusCode = $result._statusCode; $result.Remove('_statusCode') }
                         $content = $result | ConvertTo-Json -Depth 5 -Compress
                     }
                     elseif ($method -eq "POST") {
@@ -888,7 +888,7 @@ try {
                             $body = $reader.ReadToEnd() | ConvertFrom-Json
                             $reader.Close()
                             $result = Set-MothershipConfig -Body $body
-                            if ($result._statusCode) { $statusCode = $result._statusCode; $result.Remove('_statusCode') }
+                            if ($result -is [hashtable] -and $result.ContainsKey('_statusCode')) { $statusCode = $result._statusCode; $result.Remove('_statusCode') }
                             $content = $result | ConvertTo-Json -Depth 5 -Compress
                         } catch {
                             $statusCode = 500
@@ -924,7 +924,7 @@ try {
                     $contentType = "application/json; charset=utf-8"
                     if ($method -eq "GET") {
                         $result = Get-VerificationConfig
-                        if ($result._statusCode) { $statusCode = $result._statusCode; $result.Remove('_statusCode') }
+                        if ($result -is [hashtable] -and $result.ContainsKey('_statusCode')) { $statusCode = $result._statusCode; $result.Remove('_statusCode') }
                         $content = $result | ConvertTo-Json -Depth 5 -Compress
                     }
                     elseif ($method -eq "POST") {
@@ -933,7 +933,7 @@ try {
                             $body = $reader.ReadToEnd() | ConvertFrom-Json
                             $reader.Close()
                             $result = Set-VerificationConfig -Body $body
-                            if ($result._statusCode) { $statusCode = $result._statusCode; $result.Remove('_statusCode') }
+                            if ($result -is [hashtable] -and $result.ContainsKey('_statusCode')) { $statusCode = $result._statusCode; $result.Remove('_statusCode') }
                             $content = $result | ConvertTo-Json -Depth 5 -Compress
                         } catch {
                             $statusCode = 500
@@ -1012,7 +1012,7 @@ try {
                                 $content = @{ success = $false; error = "Missing required 'prompt' field" } | ConvertTo-Json -Compress
                             } else {
                                 $result = Start-ProductKickstart -UserPrompt $body.prompt -Files @($body.files) -NeedsInterview ($body.needs_interview -eq $true) -AutoWorkflow ($body.auto_workflow -eq $true) -SkipPhases @($body.skip_phases)
-                                if ($result._statusCode) { $statusCode = $result._statusCode; $result.Remove('_statusCode') }
+                                if ($result -is [hashtable] -and $result.ContainsKey('_statusCode')) { $statusCode = $result._statusCode; $result.Remove('_statusCode') }
                                 $content = $result | ConvertTo-Json -Compress
                             }
                         } catch {
@@ -1038,7 +1038,7 @@ try {
                         $contentType = "application/json; charset=utf-8"
                         try {
                             $result = Resume-ProductKickstart
-                            if ($result._statusCode) { $statusCode = $result._statusCode; $result.Remove('_statusCode') }
+                            if ($result -is [hashtable] -and $result.ContainsKey('_statusCode')) { $statusCode = $result._statusCode; $result.Remove('_statusCode') }
                             $content = $result | ConvertTo-Json -Compress
                         } catch {
                             $statusCode = 500
@@ -1067,7 +1067,7 @@ try {
                             $reader.Close()
 
                             $result = Start-ProductAnalyse -UserPrompt $body.prompt -Model $(if ($body.model) { $body.model } else { "Sonnet" })
-                            if ($result._statusCode) { $statusCode = $result._statusCode; $result.Remove('_statusCode') }
+                            if ($result -is [hashtable] -and $result.ContainsKey('_statusCode')) { $statusCode = $result._statusCode; $result.Remove('_statusCode') }
                             $content = $result | ConvertTo-Json -Compress
                         } catch {
                             $statusCode = 500
@@ -1085,7 +1085,7 @@ try {
                     if ($method -eq "POST") {
                         try {
                             $result = Start-RoadmapPlanning
-                            if ($result._statusCode) { $statusCode = $result._statusCode; $result.Remove('_statusCode') }
+                            if ($result -is [hashtable] -and $result.ContainsKey('_statusCode')) { $statusCode = $result._statusCode; $result.Remove('_statusCode') }
                             $content = $result | ConvertTo-Json -Compress
                         } catch {
                             $statusCode = 500
@@ -1102,7 +1102,7 @@ try {
                     $contentType = "application/json; charset=utf-8"
                     $docName = $url -replace "^/api/product/", ""
                     $result = Get-ProductDocument -Name $docName
-                    if ($result._statusCode) { $statusCode = $result._statusCode; $result.Remove('_statusCode') }
+                    if ($result -is [hashtable] -and $result.ContainsKey('_statusCode')) { $statusCode = $result._statusCode; $result.Remove('_statusCode') }
                     $content = $result | ConvertTo-Json -Depth 5 -Compress
                     break
                 }
@@ -1297,7 +1297,7 @@ try {
                     $contentType = "application/json; charset=utf-8"
                     $taskId = [System.Web.HttpUtility]::UrlDecode(($url -replace "^/api/plan/", ""))
                     $result = Get-TaskPlan -TaskId $taskId
-                    if ($result._statusCode) { $statusCode = $result._statusCode; $result.Remove('_statusCode') }
+                    if ($result -is [hashtable] -and $result.ContainsKey('_statusCode')) { $statusCode = $result._statusCode; $result.Remove('_statusCode') }
                     $content = $result | ConvertTo-Json -Depth 5 -Compress
                     break
                 }
@@ -1317,11 +1317,45 @@ try {
                         $body = $reader.ReadToEnd() | ConvertFrom-Json
                         $reader.Close()
 
-                        if (-not $body.type) {
+                        $bType = if ($body.PSObject.Properties['type']) { $body.type } else { $null }
+                        if (-not $bType) {
                             $content = @{ success = $false; error = "type is required" } | ConvertTo-Json -Compress
                         } else {
-                            $result = Start-ProcessLaunch -Type $body.type -TaskId $body.task_id -Prompt $body.prompt -Continue ($body.continue -eq $true) -Description $body.description -Model $body.model
-                            $content = $result | ConvertTo-Json -Compress
+                            $bTaskId = if ($body.PSObject.Properties['task_id']) { $body.task_id } else { $null }
+                            $bPrompt = if ($body.PSObject.Properties['prompt']) { $body.prompt } else { $null }
+                            $bContinue = if ($body.PSObject.Properties['continue']) { $body.continue -eq $true } else { $false }
+                            $bDescription = if ($body.PSObject.Properties['description']) { $body.description } else { $null }
+                            $bModel = if ($body.PSObject.Properties['model']) { $body.model } else { $null }
+
+                            # For workflow type, check max_concurrent and launch multiple slots if > 1
+                            $maxConcurrent = 1
+                            if ($bType -eq 'workflow') {
+                                $settingsPath = Join-Path $botRoot "defaults\settings.default.json"
+                                $controlSettingsPath = Join-Path $controlDir "settings.json"
+                                foreach ($sp in @($controlSettingsPath, $settingsPath)) {
+                                    if (Test-Path $sp) {
+                                        try {
+                                            $s = Get-Content $sp -Raw | ConvertFrom-Json
+                                            if ($s.execution -and $s.execution.max_concurrent) {
+                                                $maxConcurrent = [int]$s.execution.max_concurrent
+                                                break
+                                            }
+                                        } catch { Write-Verbose "Failed to parse max_concurrent setting: $_" }
+                                    }
+                                }
+                            }
+
+                            if ($maxConcurrent -gt 1 -and $bType -eq 'workflow') {
+                                $wfName = if ($body.PSObject.Properties['workflow']) { $body.workflow } else { $null }
+                                $result = Start-ConcurrentWorkflow -WorkflowName $wfName -Description $bDescription -MaxConcurrent $maxConcurrent
+                                $content = @{
+                                    success = $true
+                                    slots_launched = $result.slots_launched
+                                } | ConvertTo-Json -Compress
+                            } else {
+                                $result = Start-ProcessLaunch -Type $bType -TaskId $bTaskId -Prompt $bPrompt -Continue $bContinue -Description $bDescription -Model $bModel
+                                $content = $result | ConvertTo-Json -Compress
+                            }
                         }
                     } else {
                         $statusCode = 405
@@ -1436,7 +1470,7 @@ try {
                         $contentType = "application/json; charset=utf-8"
                         $procId = ($url -replace "^/api/process/", "" -replace "/kill$", "")
                         $result = Stop-ManagedProcessById -ProcessId $procId
-                        if ($result._statusCode) { $statusCode = $result._statusCode; $result.Remove('_statusCode') }
+                        if ($result -is [hashtable] -and $result.ContainsKey('_statusCode')) { $statusCode = $result._statusCode; $result.Remove('_statusCode') }
                         $content = $result | ConvertTo-Json -Compress
                     } else {
                         $statusCode = 405
@@ -1464,7 +1498,7 @@ try {
                     $contentType = "application/json; charset=utf-8"
                     $procId = $url -replace "^/api/process/", ""
                     $result = Get-ProcessDetail -ProcessId $procId
-                    if ($result._statusCode) { $statusCode = $result._statusCode; $result.Remove('_statusCode') }
+                    if ($result -is [hashtable] -and $result.ContainsKey('_statusCode')) { $statusCode = $result._statusCode; $result.Remove('_statusCode') }
                     $content = $result | ConvertTo-Json -Depth 10 -Compress
                     break
                 }
@@ -1612,20 +1646,20 @@ try {
                             }
 
                             $installedList += @{
-                                name = $manifest.name
+                                name = "$($manifest.name)"
                                 description = "$($manifest.description)"
-                                icon = "$($manifest.icon)"
-                                version = "$($manifest.version)"
-                                author = $manifest.author
-                                rerun = "$($manifest.rerun)"
-                                license = "$($manifest.license)"
-                                tags = @($manifest.tags | Where-Object { $_ })
-                                categories = @($manifest.categories | Where-Object { $_ })
-                                repository = "$($manifest.repository)"
-                                homepage = "$($manifest.homepage)"
-                                agents = @($manifest.agents | Where-Object { $_ })
-                                skills = @($manifest.skills | Where-Object { $_ })
-                                tools = @($manifest.tools | Where-Object { $_ })
+                                icon = if ($manifest.PSObject.Properties['icon']) { "$($manifest.icon)" } else { '' }
+                                version = if ($manifest.PSObject.Properties['version']) { "$($manifest.version)" } else { '' }
+                                author = if ($manifest.PSObject.Properties['author']) { $manifest.author } else { @{} }
+                                rerun = if ($manifest.PSObject.Properties['rerun']) { "$($manifest.rerun)" } else { '' }
+                                license = if ($manifest.PSObject.Properties['license']) { "$($manifest.license)" } else { '' }
+                                tags = if ($manifest.PSObject.Properties['tags']) { @($manifest.tags | Where-Object { $_ }) } else { @() }
+                                categories = if ($manifest.PSObject.Properties['categories']) { @($manifest.categories | Where-Object { $_ }) } else { @() }
+                                repository = if ($manifest.PSObject.Properties['repository']) { "$($manifest.repository)" } else { '' }
+                                homepage = if ($manifest.PSObject.Properties['homepage']) { "$($manifest.homepage)" } else { '' }
+                                agents = if ($manifest.PSObject.Properties['agents']) { @($manifest.agents | Where-Object { $_ }) } else { @() }
+                                skills = if ($manifest.PSObject.Properties['skills']) { @($manifest.skills | Where-Object { $_ }) } else { @() }
+                                tools = if ($manifest.PSObject.Properties['tools']) { @($manifest.tools | Where-Object { $_ }) } else { @() }
                                 status = if ($hasRunning) { 'running' } else { 'idle' }
                                 tasks = $wfTasks
                                 has_running_process = [bool]$hasRunning
@@ -1821,7 +1855,7 @@ try {
                     if ($method -eq "GET") {
                         $statusFilter = $request.QueryString['status']
                         $result = Get-DecisionList -StatusFilter $statusFilter
-                        if ($result._statusCode) { $statusCode = $result._statusCode; $result.Remove('_statusCode') }
+                        if ($result -is [hashtable] -and $result.ContainsKey('_statusCode')) { $statusCode = $result._statusCode; $result.Remove('_statusCode') }
                         $content = $result | ConvertTo-Json -Depth 10 -Compress
                     } elseif ($method -eq "POST") {
                         try {
@@ -1829,7 +1863,7 @@ try {
                             $body = $reader.ReadToEnd() | ConvertFrom-Json -AsHashtable
                             $reader.Close()
                             $result = New-Decision -Body $body
-                            if ($result._statusCode) { $statusCode = $result._statusCode; $result.Remove('_statusCode') }
+                            if ($result -is [hashtable] -and $result.ContainsKey('_statusCode')) { $statusCode = $result._statusCode; $result.Remove('_statusCode') }
                             $content = $result | ConvertTo-Json -Depth 5 -Compress
                         } catch {
                             $statusCode = 500
@@ -1847,7 +1881,7 @@ try {
                     $decisionId = ($url -replace "^/api/decisions/", "").Trim('/')
                     if ($method -eq "GET") {
                         $result = Get-DecisionDetail -DecisionId $decisionId
-                        if ($result._statusCode) { $statusCode = $result._statusCode; $result.Remove('_statusCode') }
+                        if ($result -is [hashtable] -and $result.ContainsKey('_statusCode')) { $statusCode = $result._statusCode; $result.Remove('_statusCode') }
                         $content = $result | ConvertTo-Json -Depth 10 -Compress
                     } elseif ($method -eq "PUT" -or $method -eq "PATCH") {
                         try {
@@ -1855,7 +1889,7 @@ try {
                             $body = $reader.ReadToEnd() | ConvertFrom-Json -AsHashtable
                             $reader.Close()
                             $result = Update-Decision -DecisionId $decisionId -Body $body
-                            if ($result._statusCode) { $statusCode = $result._statusCode; $result.Remove('_statusCode') }
+                            if ($result -is [hashtable] -and $result.ContainsKey('_statusCode')) { $statusCode = $result._statusCode; $result.Remove('_statusCode') }
                             $content = $result | ConvertTo-Json -Depth 5 -Compress
                         } catch {
                             $statusCode = 500
@@ -1884,7 +1918,7 @@ try {
                                 $content = @{ success = $false; error = "Missing 'status' field" } | ConvertTo-Json -Compress
                             } else {
                                 $result = Set-DecisionStatus -DecisionId $decisionId -NewStatus $newStatus -SupersededBy $supersededBy -Reason $reason
-                                if ($result._statusCode) { $statusCode = $result._statusCode; $result.Remove('_statusCode') }
+                                if ($result -is [hashtable] -and $result.ContainsKey('_statusCode')) { $statusCode = $result._statusCode; $result.Remove('_statusCode') }
                                 $content = $result | ConvertTo-Json -Depth 5 -Compress
                             }
                         } catch {

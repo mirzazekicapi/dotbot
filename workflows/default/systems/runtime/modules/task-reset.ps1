@@ -29,7 +29,7 @@ function Reset-InProgressTasks {
         return $resetTasks
     }
     
-    $inProgressTasks = Get-ChildItem -Path $inProgressDir -Filter "*.json" -File -ErrorAction SilentlyContinue
+    $inProgressTasks = @(Get-ChildItem -Path $inProgressDir -Filter "*.json" -File -ErrorAction SilentlyContinue)
     
     if ($inProgressTasks.Count -eq 0) {
         return $resetTasks
@@ -115,7 +115,7 @@ function Reset-SkippedTasks {
         return $resetTasks
     }
     
-    $skippedTasks = Get-ChildItem -Path $skippedDir -Filter "*.json" -File -ErrorAction SilentlyContinue
+    $skippedTasks = @(Get-ChildItem -Path $skippedDir -Filter "*.json" -File -ErrorAction SilentlyContinue)
     
     if ($skippedTasks.Count -eq 0) {
         return $resetTasks
@@ -209,7 +209,7 @@ function Reset-AnalysingTasks {
         return $resetTasks
     }
 
-    $analysingTasks = Get-ChildItem -Path $analysingDir -Filter "*.json" -File -ErrorAction SilentlyContinue
+    $analysingTasks = @(Get-ChildItem -Path $analysingDir -Filter "*.json" -File -ErrorAction SilentlyContinue)
 
     if ($analysingTasks.Count -eq 0) {
         return $resetTasks
