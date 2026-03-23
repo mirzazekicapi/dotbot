@@ -1670,6 +1670,17 @@ elseif ($Type -eq 'workflow') {
             }
 
             # ===== Pick next task =====
+            # Stagger task pulls: each slot waits (slot * 15s) before pulling.
+            # This ensures slots pick different tasks without complex locking.
+            if ($Slot -gt 0) {
+                $staggerSec = $Slot * 15
+                Write-Status "Slot ${Slot}: stagger wait ${staggerSec}s..." -Type Info
+                for ($sw = 0; $sw -lt $staggerSec; $sw++) {
+                    Start-Sleep -Seconds 1
+                    if (Test-ProcessStopSignal -Id $procId) { break }
+                }
+            }
+
             Write-Status "Fetching next task..." -Type Process
             Reset-TaskIndex
 
