@@ -1731,9 +1731,8 @@ elseif ($Type -eq 'workflow') {
             # --- Multi-slot claim guard ---
             # When running with -Slot (concurrent workflow processes), another slot may
             # have claimed this task between our Get-NextWorkflowTask and this point.
-            # Attempt to claim by marking analysing/in-progress; if it throws (file moved
-            # by another slot), retry with a fresh task pickup.
-            if ($Slot -ge 0) {
+            # Only needed for prompt tasks — non-prompt tasks are guarded by the slot 0 check above.
+            if ($Slot -ge 0 -and $taskTypeCheck -eq 'prompt') {
                 $claimOk = $false
                 for ($claimAttempt = 0; $claimAttempt -lt 5; $claimAttempt++) {
                     try {
