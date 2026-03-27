@@ -3176,6 +3176,31 @@
     letter-spacing: 0.03em;
 }
 
+.qa-progress-clickable {
+    cursor: pointer;
+}
+
+.qa-progress-clickable:hover .qa-progress-label {
+    text-decoration: underline;
+    text-decoration-style: dotted;
+}
+
+.qa-progress-detail {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    padding: 4px 0 4px 8px;
+    width: 100%;
+}
+
+.qa-progress-detail-item {
+    font-size: 9px;
+    color: var(--color-text-dim);
+    display: flex;
+    align-items: center;
+    gap: 4px;
+}
+
 .qa-detail-title {
     font-size: 12px;
     font-weight: 600;

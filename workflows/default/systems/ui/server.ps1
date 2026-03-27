@@ -1601,7 +1601,15 @@ try {
                             current_stage = "starting"
                             stages = @(
                                 @{ id = "jira"; label = "Gathering Jira context"; done = (Test-Path (Join-Path $runOutputDir "jira-context.json")) }
-                                @{ id = "systems"; label = "Detecting systems"; done = (Test-Path (Join-Path $runOutputDir "systems.json")) }
+                                @{ id = "systems"; label = "Detecting systems"; done = (Test-Path (Join-Path $runOutputDir "systems.json")); detail = $(
+                                    $sysJsonPath = Join-Path $runOutputDir "systems.json"
+                                    if (Test-Path $sysJsonPath) {
+                                        try {
+                                            $sysInfo = Get-Content $sysJsonPath -Raw | ConvertFrom-Json
+                                            @($sysInfo.systems | ForEach-Object { @{ id = $_.id; name = $_.name; jira_project = $_.jira_project } })
+                                        } catch { @() }
+                                    } else { @() }
+                                ) }
                                 @{ id = "test-plan"; label = "Generating test plan"; done = [bool]$testPlan }
                                 @{ id = "system-plans"; label = "Generating per-system plans"; done = ($systems | Where-Object { $_.test_plan }) -is [array] -and ($systems | Where-Object { $_.test_plan }).Count -gt 0 }
                                 @{ id = "test-cases"; label = "Generating test cases"; done = ($testCases.Count -gt 0) -or (($systems | ForEach-Object { $_.test_cases.Count }) | Measure-Object -Sum).Sum -gt 0 }

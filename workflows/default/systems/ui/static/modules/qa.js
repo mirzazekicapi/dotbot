@@ -31,11 +31,9 @@ async function initQATab() {
         generateBtn.addEventListener('click', handleQAGenerate);
     }
 
-    // Wire up Back button
+    // Back button is wired dynamically via onclick in showRunDetail/showRunDocument
     const backBtn = document.getElementById('qa-back-btn');
-    if (backBtn) {
-        backBtn.addEventListener('click', showRunList);
-    }
+    if (backBtn) backBtn.onclick = () => showRunList();
 
     // Load existing runs
     await loadQARuns();
@@ -559,7 +557,7 @@ function renderArtifactCards(data) {
     if (!hasAnyContent) {
         const isProcessing = data.status === 'processing';
         if (isProcessing) {
-            html += '<div class="qa-empty-state"><div class="qa-empty-text">No artifacts yet</div><div class="qa-empty-hint">Switch to Logs to see live progress</div></div>';
+            html += '<div class="qa-empty-state"><div class="qa-empty-text">No artifacts yet</div><div class="qa-empty-hint">Check the Processes tab for detailed logs</div></div>';
         } else {
             html += '<div class="qa-empty-state"><div class="qa-empty-text">No documents</div><div class="qa-empty-hint">This run did not produce any output</div></div>';
         }
@@ -691,12 +689,34 @@ function renderProgress(progress, isProcessing) {
         const isCurrent = stage.id === progress.current_stage;
         const stateClass = stage.done ? 'done' : isCurrent ? 'active' : 'pending';
         const icon = stage.done ? '&#10003;' : isCurrent ? '&#9679;' : '&#9675;';
-        html += `<div class="qa-progress-step ${stateClass}">
+        const hasDetail = stage.id === 'systems' && stage.done && stage.detail && stage.detail.length > 0;
+        const clickClass = hasDetail ? ' qa-progress-clickable' : '';
+
+        html += `<div class="qa-progress-step ${stateClass}${clickClass}" ${hasDetail ? 'data-expandable="true"' : ''}>
             <span class="qa-progress-icon">${icon}</span>
-            <span class="qa-progress-label">${escapeHtml(stage.label)}</span>
+            <span class="qa-progress-label">${escapeHtml(stage.label)}${hasDetail ? ` (${stage.detail.length})` : ''}</span>
         </div>`;
+
+        if (hasDetail) {
+            html += '<div class="qa-progress-detail" style="display:none">';
+            for (const sys of stage.detail) {
+                const badge = sys.jira_project ? `<span class="qa-system-badge">${escapeHtml(sys.jira_project)}</span>` : '';
+                html += `<div class="qa-progress-detail-item">${badge} ${escapeHtml(sys.name)}</div>`;
+            }
+            html += '</div>';
+        }
     }
     stepsEl.innerHTML = html;
+
+    // Wire expandable steps
+    stepsEl.querySelectorAll('[data-expandable]').forEach(step => {
+        step.addEventListener('click', () => {
+            const detail = step.nextElementSibling;
+            if (detail && detail.classList.contains('qa-progress-detail')) {
+                detail.style.display = detail.style.display === 'none' ? '' : 'none';
+            }
+        });
+    });
 }
 
 /**
