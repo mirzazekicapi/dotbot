@@ -188,6 +188,9 @@ function Get-ProductDocument {
 }
 
 function Get-PreflightResults {
+    param(
+        [string]$Section = "kickstart"
+    )
     $botRoot = $script:Config.BotRoot
     $projectRoot = Split-Path -Parent $botRoot
 
@@ -207,8 +210,9 @@ function Get-PreflightResults {
         if (Test-Path $settingsFile) {
             try {
                 $settingsData = Get-Content $settingsFile -Raw | ConvertFrom-Json
-                if ($settingsData.kickstart -and $settingsData.kickstart.preflight) {
-                    $preflightChecks = @($settingsData.kickstart.preflight)
+                $sectionData = $settingsData.$Section
+                if ($sectionData -and $sectionData.preflight) {
+                    $preflightChecks = @($sectionData.preflight)
                 }
             } catch {
                 Write-Verbose "Pre-flight settings parse error: $_"

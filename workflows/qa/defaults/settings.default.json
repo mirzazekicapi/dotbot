@@ -1,0 +1,64 @@
+{
+  "qa": {
+    "test_repo_path": "",
+    "test_framework_presets": {
+      "playwright-ts": {
+        "language": "typescript",
+        "test_runner": "npx playwright test",
+        "file_pattern": "*.spec.ts",
+        "base_dir": "tests"
+      },
+      "selenium-csharp": {
+        "language": "csharp",
+        "test_runner": "dotnet test",
+        "file_pattern": "*Tests.cs",
+        "base_dir": "Tests"
+      },
+      "selenium-java": {
+        "language": "java",
+        "test_runner": "mvn test",
+        "file_pattern": "*Test.java",
+        "base_dir": "src/test/java"
+      },
+      "cypress": {
+        "language": "typescript",
+        "test_runner": "npx cypress run",
+        "file_pattern": "*.cy.ts",
+        "base_dir": "cypress/e2e"
+      },
+      "api-supertest": {
+        "language": "typescript",
+        "test_runner": "npx jest",
+        "file_pattern": "*.test.ts",
+        "base_dir": "tests/api"
+      },
+      "api-rest-assured": {
+        "language": "java",
+        "test_runner": "mvn test",
+        "file_pattern": "*ApiTest.java",
+        "base_dir": "src/test/java"
+      },
+      "appium-java": {
+        "language": "java",
+        "test_runner": "mvn test",
+        "file_pattern": "*MobileTest.java",
+        "base_dir": "src/test/java"
+      },
+      "custom": {
+        "language": "",
+        "test_runner": "",
+        "file_pattern": "",
+        "base_dir": ""
+      }
+    },
+    "preflight": [
+      {
+        "type": "mcp_server",
+        "name": "atlassian",
+        "message": "Atlassian MCP server must be registered for Jira/Confluence access",
+        "hint": "Run 'claude mcp add atlassian' to register it"
+      }
+    ]
+  },
+  "task_categories": ["qa-test-case", "qa-automation"]
+}

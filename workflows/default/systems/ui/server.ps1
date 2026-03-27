@@ -476,6 +476,7 @@ try {
                         project_root = $projectRoot
                         full_path = $projectRoot
                         executive_summary = $executiveSummary
+                        has_qa = [bool]$settingsData.qa
                         workflow = $workflowName
                         kickstart_dialog = $kickstartDialog
                         kickstart_phases = $kickstartPhases
@@ -1307,6 +1308,437 @@ try {
                 "/api/processes" {
                     $contentType = "application/json; charset=utf-8"
                     $content = Get-ProcessList -FilterType $request.QueryString["type"] -FilterStatus $request.QueryString["status"] | ConvertTo-Json -Depth 10 -Compress
+                    break
+                }
+
+                # --- QA Endpoints ---
+
+                "/api/qa/preflight" {
+                    $contentType = "application/json; charset=utf-8"
+                    $result = Get-PreflightResults -Section "qa"
+                    $content = $result | ConvertTo-Json -Depth 5 -Compress
+                    break
+                }
+
+                "/api/qa/generate" {
+                    if ($method -eq "POST") {
+                        $contentType = "application/json; charset=utf-8"
+                        $reader = New-Object System.IO.StreamReader($request.InputStream)
+                        $body = $reader.ReadToEnd() | ConvertFrom-Json
+                        $reader.Close()
+
+                        $jiraKeys = if ($body.jira_keys) { $body.jira_keys } else { "" }
+                        if (-not $jiraKeys) {
+                            $content = @{ success = $false; error = "jira_keys is required" } | ConvertTo-Json -Compress
+                        } else {
+                            # Create run ID and directory
+                            $runId = "qa-run-" + (Get-Date -Format "yyyyMMdd-HHmmss")
+                            $qaRunsDir = Join-Path $botRoot ".control\qa-runs"
+                            if (-not (Test-Path $qaRunsDir)) {
+                                New-Item -Path $qaRunsDir -ItemType Directory -Force | Out-Null
+                            }
+
+                            # Create output directory for this run
+                            $runOutputDir = Join-Path $botRoot "workspace\product\qa-runs\$runId"
+                            if (-not (Test-Path $runOutputDir)) {
+                                New-Item -Path $runOutputDir -ItemType Directory -Force | Out-Null
+                                New-Item -Path (Join-Path $runOutputDir "test-cases") -ItemType Directory -Force | Out-Null
+                            }
+
+                            # Build QA pipeline prompt
+                            $qaPrompt = "Run the QA pipeline workflow. Read the workflow file from .bot/prompts/workflows/04-qa-pipeline.md and follow its instructions exactly.`n`n"
+                            $qaPrompt += "## QA Generation Input`n`n"
+                            $qaPrompt += "### Run ID`n$runId`n`n"
+                            $qaPrompt += "### Output Directory`n.bot/workspace/product/qa-runs/$runId/`n`n"
+                            $qaPrompt += "### Jira Tickets (required)`n$jiraKeys`n`n"
+
+                            if ($body.confluence_urls) {
+                                $qaPrompt += "### Confluence Pages`n$($body.confluence_urls)`n`n"
+                            }
+                            if ($body.instructions) {
+                                $qaPrompt += "### Additional Instructions`n$($body.instructions)`n`n"
+                            }
+
+                            $result = Start-ProcessLaunch -Type 'planning' -Prompt $qaPrompt -Description "QA: $jiraKeys"
+
+                            # Save run metadata (store both process_id and pid for kill support)
+                            $runMeta = @{
+                                id = $runId
+                                jira_keys = $jiraKeys
+                                confluence_urls = if ($body.confluence_urls) { $body.confluence_urls } else { "" }
+                                instructions = if ($body.instructions) { $body.instructions } else { "" }
+                                status = "processing"
+                                process_id = $result.process_id
+                                pid = $result.pid
+                                created_at = (Get-Date -Format "o")
+                                completed_at = $null
+                                scenario_count = 0
+                                test_case_count = 0
+                            }
+                            $runMeta | ConvertTo-Json -Depth 3 | Set-Content (Join-Path $qaRunsDir "$runId.json") -Encoding UTF8
+
+                            $content = @{ success = $true; run_id = $runId; process_id = $result.process_id; pid = $result.pid } | ConvertTo-Json -Compress
+                        }
+                    } else {
+                        $statusCode = 405
+                        $content = @{ success = $false; error = "Method not allowed" } | ConvertTo-Json -Compress
+                    }
+                    break
+                }
+
+                "/api/qa/runs" {
+                    $contentType = "application/json; charset=utf-8"
+                    $qaRunsDir = Join-Path $botRoot ".control\qa-runs"
+                    $runs = @()
+
+                    if (Test-Path $qaRunsDir) {
+                        Get-ChildItem -Path $qaRunsDir -Filter "*.json" -ErrorAction SilentlyContinue | ForEach-Object {
+                            try {
+                                $runMeta = Get-Content $_.FullName -Raw | ConvertFrom-Json
+
+                                $runOutputDir = Join-Path $botRoot "workspace\product\qa-runs\$($runMeta.id)"
+
+                                # Read Jira context (ticket summaries) if available
+                                $jiraContextPath = Join-Path $runOutputDir "jira-context.json"
+                                if ((Test-Path $jiraContextPath) -and -not $runMeta.jira_summary) {
+                                    try {
+                                        $jiraCtx = Get-Content $jiraContextPath -Raw | ConvertFrom-Json
+                                        if ($jiraCtx.issues) {
+                                            $summary = ($jiraCtx.issues | ForEach-Object { "$($_.key): $($_.summary)" }) -join " | "
+                                            $runMeta | Add-Member -NotePropertyName "jira_summary" -NotePropertyValue $summary -Force
+                                            $runMeta | ConvertTo-Json -Depth 3 | Set-Content $_.FullName -Encoding UTF8
+                                        }
+                                    } catch {}
+                                }
+
+                                # Resolve process_id if null (race condition in Start-ProcessLaunch)
+                                if ($runMeta.status -eq "processing" -and -not $runMeta.process_id -and $runMeta.pid) {
+                                    $processesDir = Join-Path $botRoot ".control\processes"
+                                    if (Test-Path $processesDir) {
+                                        Get-ChildItem -Path $processesDir -Filter "*.json" -ErrorAction SilentlyContinue | ForEach-Object {
+                                            try {
+                                                $pData = Get-Content $_.FullName -Raw | ConvertFrom-Json
+                                                if ($pData.pid -eq $runMeta.pid) {
+                                                    $runMeta | Add-Member -NotePropertyName "process_id" -NotePropertyValue $pData.id -Force
+                                                    $runMeta | ConvertTo-Json -Depth 3 | Set-Content (Join-Path $qaRunsDir "$($runMeta.id).json") -Encoding UTF8
+                                                }
+                                            } catch {}
+                                        }
+                                    }
+                                }
+
+                                # Detect current stage for processing runs (shown on run cards)
+                                if ($runMeta.status -eq "processing") {
+                                    $stage = "Gathering Jira context..."
+                                    if (Test-Path (Join-Path $runOutputDir "jira-context.json")) { $stage = "Detecting systems..." }
+                                    if (Test-Path (Join-Path $runOutputDir "systems.json")) { $stage = "Generating test plan..." }
+                                    if (Test-Path (Join-Path $runOutputDir "test-plan.md")) { $stage = "Generating per-system plans..." }
+                                    $sysDir = Join-Path $runOutputDir "systems"
+                                    if ((Test-Path $sysDir) -and (Get-ChildItem -Path $sysDir -Filter "test-plan.md" -Recurse -ErrorAction SilentlyContinue)) { $stage = "Generating test cases..." }
+                                    $runMeta | Add-Member -NotePropertyName "current_stage" -NotePropertyValue $stage -Force
+                                }
+
+                                # Check if a processing run has completed
+                                # Require pipeline-complete.json to mark as completed (written as last step)
+                                if ($runMeta.status -eq "processing") {
+                                    $testPlanPath = Join-Path $runOutputDir "test-plan.md"
+                                    $pipelineCompletePath = Join-Path $runOutputDir "pipeline-complete.json"
+                                    if (Test-Path $pipelineCompletePath) {
+                                        $runMeta.status = "completed"
+                                        $runMeta.completed_at = (Get-Date -Format "o")
+
+                                        # Count scenarios and test cases
+                                        $planContent = Get-Content $testPlanPath -Raw
+                                        $scenarioMatches = [regex]::Matches($planContent, '\b(I-\d+|E-\d+|UAT-\d+)\b')
+                                        $runMeta.scenario_count = ($scenarioMatches | ForEach-Object { $_.Value } | Sort-Object -Unique).Count
+
+                                        $tcDir = Join-Path $runOutputDir "test-cases"
+                                        if (Test-Path $tcDir) {
+                                            $tcFiles = @(Get-ChildItem -Path $tcDir -Filter "*.md" -ErrorAction SilentlyContinue)
+                                            $tcCount = 0
+                                            foreach ($f in $tcFiles) {
+                                                $tcContent = Get-Content $f.FullName -Raw
+                                                $tcCount += ([regex]::Matches($tcContent, '\bTC-(I|E|UAT)-\d+')).Count
+                                            }
+                                            $runMeta.test_case_count = $tcCount
+                                        }
+
+                                        # Read counts from pipeline-complete.json
+                                        try {
+                                            $pipelineData = Get-Content $pipelineCompletePath -Raw | ConvertFrom-Json
+                                            if ($pipelineData.systems_count) {
+                                                $runMeta | Add-Member -NotePropertyName "system_count" -NotePropertyValue $pipelineData.systems_count -Force
+                                            }
+                                            if ($pipelineData.test_case_count) {
+                                                $runMeta.test_case_count = $pipelineData.test_case_count
+                                            }
+                                            if ($pipelineData.scenario_count) {
+                                                $runMeta.scenario_count = $pipelineData.scenario_count
+                                            }
+                                        } catch {}
+
+                                        # Save updated metadata
+                                        $runMeta | ConvertTo-Json -Depth 3 | Set-Content $_.FullName -Encoding UTF8
+                                    }
+                                }
+
+                                $runs += $runMeta
+                            } catch {}
+                        }
+                    }
+
+                    $content = @{ runs = $runs } | ConvertTo-Json -Depth 5 -Compress
+                    break
+                }
+
+                "/api/qa/results" {
+                    $contentType = "application/json; charset=utf-8"
+                    $runId = $request.QueryString["run"]
+
+                    if (-not $runId) {
+                        $content = @{ error = "run parameter required" } | ConvertTo-Json -Compress
+                    } else {
+                        $runOutputDir = Join-Path $botRoot "workspace\product\qa-runs\$runId"
+                        $testPlanPath = Join-Path $runOutputDir "test-plan.md"
+                        $testCasesDir = Join-Path $runOutputDir "test-cases"
+
+                        $testPlan = $null
+                        $testCases = @()
+                        $jiraKeys = ""
+
+                        # Read run metadata for jira_keys
+                        $runMetaPath = Join-Path $botRoot ".control\qa-runs\$runId.json"
+                        if (Test-Path $runMetaPath) {
+                            $meta = Get-Content $runMetaPath -Raw | ConvertFrom-Json
+                            $jiraKeys = $meta.jira_keys
+                        }
+
+                        $uatPlan = $null
+
+                        if (Test-Path $testPlanPath) {
+                            $testPlan = Get-Content $testPlanPath -Raw
+                        }
+
+                        $uatPlanPath = Join-Path $runOutputDir "uat-plan.md"
+                        if (Test-Path $uatPlanPath) {
+                            $uatPlan = Get-Content $uatPlanPath -Raw
+                        }
+
+                        if (Test-Path $testCasesDir) {
+                            Get-ChildItem -Path $testCasesDir -Filter "*.md" -ErrorAction SilentlyContinue | ForEach-Object {
+                                $testCases += @{
+                                    name = $_.BaseName
+                                    content = (Get-Content $_.FullName -Raw)
+                                }
+                            }
+                        }
+
+                        $runStatus = if ($meta) { $meta.status } else { "unknown" }
+                        $processId = if ($meta) { $meta.process_id } else { $null }
+
+                        # Resolve process_id if null (race condition in Start-ProcessLaunch)
+                        if ($meta -and -not $processId -and $meta.pid) {
+                            $processesDir = Join-Path $botRoot ".control\processes"
+                            if (Test-Path $processesDir) {
+                                Get-ChildItem -Path $processesDir -Filter "*.json" -ErrorAction SilentlyContinue | ForEach-Object {
+                                    try {
+                                        $pData = Get-Content $_.FullName -Raw | ConvertFrom-Json
+                                        if ($pData.pid -eq $meta.pid) {
+                                            $processId = $pData.id
+                                            $meta | Add-Member -NotePropertyName "process_id" -NotePropertyValue $pData.id -Force
+                                            $meta | ConvertTo-Json -Depth 3 | Set-Content $runMetaPath -Encoding UTF8
+                                        }
+                                    } catch {}
+                                }
+                            }
+                        }
+                        # Read per-system data if systems.json exists
+                        $systems = @()
+                        $systemsJsonPath = Join-Path $runOutputDir "systems.json"
+                        if (Test-Path $systemsJsonPath) {
+                            try {
+                                $systemsData = Get-Content $systemsJsonPath -Raw | ConvertFrom-Json
+                                foreach ($sys in $systemsData.systems) {
+                                    $sysDir = Join-Path $runOutputDir "systems\$($sys.id)"
+                                    $sysPlan = $null
+                                    $sysCases = @()
+
+                                    $sysPlanPath = Join-Path $sysDir "test-plan.md"
+                                    if (Test-Path $sysPlanPath) {
+                                        $sysPlan = Get-Content $sysPlanPath -Raw
+                                    }
+
+                                    $sysUatPlan = $null
+                                    $sysUatPath = Join-Path $sysDir "uat-plan.md"
+                                    if (Test-Path $sysUatPath) {
+                                        $sysUatPlan = Get-Content $sysUatPath -Raw
+                                    }
+
+                                    $sysCasesDir = Join-Path $sysDir "test-cases"
+                                    if (Test-Path $sysCasesDir) {
+                                        Get-ChildItem -Path $sysCasesDir -Filter "*.md" -ErrorAction SilentlyContinue | ForEach-Object {
+                                            $sysCases += @{
+                                                name = $_.BaseName
+                                                content = (Get-Content $_.FullName -Raw)
+                                            }
+                                        }
+                                    }
+
+                                    $systems += @{
+                                        id = $sys.id
+                                        name = $sys.name
+                                        jira_project = $sys.jira_project
+                                        test_plan = $sysPlan
+                                        uat_plan = $sysUatPlan
+                                        test_cases = $sysCases
+                                    }
+                                }
+                            } catch {}
+                        }
+
+                        # Detect pipeline progress from files
+                        $progress = @{
+                            current_stage = "starting"
+                            stages = @(
+                                @{ id = "jira"; label = "Gathering Jira context"; done = (Test-Path (Join-Path $runOutputDir "jira-context.json")) }
+                                @{ id = "systems"; label = "Detecting systems"; done = (Test-Path (Join-Path $runOutputDir "systems.json")) }
+                                @{ id = "test-plan"; label = "Generating test plan"; done = [bool]$testPlan }
+                                @{ id = "system-plans"; label = "Generating per-system plans"; done = ($systems | Where-Object { $_.test_plan }) -is [array] -and ($systems | Where-Object { $_.test_plan }).Count -gt 0 }
+                                @{ id = "test-cases"; label = "Generating test cases"; done = ($testCases.Count -gt 0) -or (($systems | ForEach-Object { $_.test_cases.Count }) | Measure-Object -Sum).Sum -gt 0 }
+                                @{ id = "complete"; label = "Complete"; done = (Test-Path (Join-Path $runOutputDir "pipeline-complete.json")) }
+                            )
+                        }
+                        # Determine current stage (first non-done stage)
+                        foreach ($stage in $progress.stages) {
+                            if (-not $stage.done) {
+                                $progress.current_stage = $stage.id
+                                break
+                            }
+                            $progress.current_stage = "complete"
+                        }
+
+                        $content = @{
+                            jira_keys = $jiraKeys
+                            status = $runStatus
+                            process_id = $processId
+                            test_plan = $testPlan
+                            uat_plan = $uatPlan
+                            test_cases = $testCases
+                            systems = $systems
+                            progress = $progress
+                        } | ConvertTo-Json -Depth 6 -Compress
+                    }
+                    break
+                }
+
+                "/api/qa/kill" {
+                    $contentType = "application/json; charset=utf-8"
+                    if ($method -eq "POST") {
+                        $runId = $request.QueryString["run"]
+                        if (-not $runId) {
+                            $content = @{ success = $false; error = "run parameter required" } | ConvertTo-Json -Compress
+                        } else {
+                            $runMetaPath = Join-Path $botRoot ".control\qa-runs\$runId.json"
+                            if (Test-Path $runMetaPath) {
+                                $meta = Get-Content $runMetaPath -Raw | ConvertFrom-Json
+                                $killed = $false
+
+                                # Try to kill by PID
+                                if ($meta.pid) {
+                                    try {
+                                        $proc = Get-Process -Id $meta.pid -ErrorAction SilentlyContinue
+                                        if ($proc) {
+                                            $proc | Stop-Process -Force
+                                            $killed = $true
+                                        }
+                                    } catch {}
+                                }
+
+                                # Update status
+                                $meta.status = "failed"
+                                $meta.completed_at = (Get-Date -Format "o")
+                                $meta | ConvertTo-Json -Depth 3 | Set-Content $runMetaPath -Encoding UTF8
+
+                                $content = @{ success = $true; killed = $killed } | ConvertTo-Json -Compress
+                            } else {
+                                $content = @{ success = $false; error = "Run not found: $runId" } | ConvertTo-Json -Compress
+                            }
+                        }
+                    } else {
+                        $statusCode = 405
+                        $content = @{ success = $false; error = "Method not allowed" } | ConvertTo-Json -Compress
+                    }
+                    break
+                }
+
+                "/api/qa/download" {
+                    $runId = $request.QueryString["run"]
+                    if (-not $runId) {
+                        $statusCode = 400
+                        $contentType = "text/plain"
+                        $content = "run parameter required"
+                    } else {
+                        $safeRunId = $runId -replace '[^a-zA-Z0-9\-]', ''
+                        $runOutputDir = Join-Path $botRoot "workspace\product\qa-runs\$safeRunId"
+                        if (Test-Path $runOutputDir) {
+                            $tempZip = Join-Path ([System.IO.Path]::GetTempPath()) "$safeRunId.zip"
+                            if (Test-Path $tempZip) { Remove-Item $tempZip -Force }
+                            Compress-Archive -Path "$runOutputDir\*" -DestinationPath $tempZip -Force
+                            $contentType = "application/zip"
+                            $zipBytes = [System.IO.File]::ReadAllBytes($tempZip)
+                            $response.ContentType = $contentType
+                            $response.AddHeader("Content-Disposition", "attachment; filename=$safeRunId.zip")
+                            $response.ContentLength64 = $zipBytes.Length
+                            $response.OutputStream.Write($zipBytes, 0, $zipBytes.Length)
+                            $response.OutputStream.Close()
+                            Remove-Item $tempZip -Force -ErrorAction SilentlyContinue
+                            continue
+                        } else {
+                            $statusCode = 404
+                            $contentType = "text/plain"
+                            $content = "Run not found: $runId"
+                        }
+                    }
+                    break
+                }
+
+                "/api/qa/delete" {
+                    $contentType = "application/json; charset=utf-8"
+                    if ($method -eq "POST") {
+                        $runId = $request.QueryString["run"]
+                        if (-not $runId) {
+                            $content = @{ success = $false; error = "run parameter required" } | ConvertTo-Json -Compress
+                        } else {
+                            # Sanitize runId to prevent path traversal
+                            $safeRunId = $runId -replace '[^a-zA-Z0-9\-]', ''
+                            $runMetaPath = Join-Path $botRoot ".control\qa-runs\$safeRunId.json"
+                            $runOutputDir = Join-Path $botRoot "workspace\product\qa-runs\$safeRunId"
+
+                            $deleted = $false
+                            if (Test-Path $runMetaPath) {
+                                # If still processing, kill first
+                                try {
+                                    $meta = Get-Content $runMetaPath -Raw | ConvertFrom-Json
+                                    if ($meta.status -eq "processing" -and $meta.pid) {
+                                        $proc = Get-Process -Id $meta.pid -ErrorAction SilentlyContinue
+                                        if ($proc) { $proc | Stop-Process -Force }
+                                    }
+                                } catch {}
+
+                                Remove-Item $runMetaPath -Force
+                                $deleted = $true
+                            }
+                            if (Test-Path $runOutputDir) {
+                                Remove-Item $runOutputDir -Recurse -Force
+                                $deleted = $true
+                            }
+
+                            $content = @{ success = $deleted; run_id = $runId } | ConvertTo-Json -Compress
+                        }
+                    } else {
+                        $statusCode = 405
+                        $content = @{ success = $false; error = "Method not allowed" } | ConvertTo-Json -Compress
+                    }
                     break
                 }
 

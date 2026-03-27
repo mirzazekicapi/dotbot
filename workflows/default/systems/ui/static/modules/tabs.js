@@ -88,6 +88,13 @@ function switchContextPanel(tabId) {
         initThemeSelector();
         initSettingsNav();
     }
+
+    // Reset QA view to run list when tab is clicked
+    if (tabId === 'qa') {
+        if (typeof showRunList === 'function') showRunList();
+        const qaPane = document.getElementById('tab-qa');
+        if (qaPane) qaPane.scrollTop = 0;
+    }
 }
 
 /**

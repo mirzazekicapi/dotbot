@@ -1,0 +1,28 @@
+name: qa_sync_test_repo
+description: Manage the external test repository — check status, pull latest, auto-detect test framework, or validate configuration
+version: 1.0.0
+category: qa-workflow
+
+inputSchema:
+  type: object
+  properties:
+    action:
+      type: string
+      enum: [status, pull, detect, validate]
+      description: "Action to perform: status (check repo state), pull (git pull latest), detect (auto-detect test framework from repo contents), validate (verify framework dirs and runner)"
+      default: status
+  required: []
+  additionalProperties: false
+
+examples:
+  - description: Check test repo status
+    input: {}
+  - description: Pull latest changes
+    input:
+      action: pull
+  - description: Auto-detect test framework
+    input:
+      action: detect
+  - description: Validate framework configuration
+    input:
+      action: validate

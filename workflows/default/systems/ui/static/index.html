@@ -60,6 +60,7 @@
                     <button class="tab" data-tab="processes">Processes</button>
                     <button class="tab" data-tab="decisions">Decisions</button>
                     <button class="tab" data-tab="workflow">Workflow</button>
+                    <button class="tab" data-tab="qa" id="qa-tab-btn" style="display:none">QA</button>
                     <button class="tab" data-tab="settings">Settings</button>
                 </div>
                 <button class="editor-btn dimmed" id="editor-btn" title="Configure editor" aria-label="Configure editor">
@@ -382,6 +383,32 @@
                                 <div class="settings-nav-item" data-settings-section="editor">Editor</div>
                                 <div class="settings-nav-item" data-settings-section="mothership">Mothership</div>
                                 <div class="settings-nav-item" data-settings-section="aether" id="aetherNavItem" style="display:none">Aether</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div class="context-panel hidden" data-context="qa">
+                    <div class="sidebar-section">
+                        <div class="sidebar-header">
+                            <span class="sidebar-title">&#9672; New QA Run</span>
+                        </div>
+                        <div class="sidebar-content qa-sidebar-form">
+                            <div class="qa-field">
+                                <label class="qa-label">Jira Tickets <span class="qa-required">*</span></label>
+                                <input type="text" id="qa-jira-keys" class="qa-input" placeholder="PROJ-123, PROJ-456" />
+                                <span class="qa-hint">Comma-separated issue keys</span>
+                            </div>
+                            <div class="qa-field">
+                                <label class="qa-label">Confluence</label>
+                                <textarea id="qa-confluence-urls" class="qa-textarea" rows="2" placeholder="Page URLs, one per line"></textarea>
+                            </div>
+                            <div class="qa-field">
+                                <label class="qa-label">Instructions</label>
+                                <textarea id="qa-instructions" class="qa-textarea" rows="3" placeholder="Additional guidance for QA plan..."></textarea>
+                            </div>
+                            <div class="qa-sidebar-actions">
+                                <button class="ctrl-btn primary" id="qa-generate-btn" style="width:100%">Generate QA Plan</button>
+                                <div class="qa-status" id="qa-status"></div>
                             </div>
                         </div>
                     </div>
@@ -710,6 +737,82 @@
                             <div class="product-content full-width">
                                 <div class="doc-viewer" id="doc-viewer">
                                     <div class="doc-placeholder">Select a document from the left panel</div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- QA Tab -->
+                    <div class="tab-pane" id="tab-qa">
+                        <div class="qa-runs-container">
+                            <!-- Preflight overlay (shown during checks) -->
+                            <div id="qa-preflight-overlay" style="display:none">
+                                <div class="qa-preflight-content">
+                                    <div class="qa-preflight-title" id="qa-preflight-title">Running preflight checks...</div>
+                                    <div class="qa-preflight-checks" id="qa-preflight-checks"></div>
+                                </div>
+                            </div>
+                            <!-- Run list view (default) -->
+                            <div id="qa-run-list">
+                                <div class="qa-empty-state" id="qa-empty">
+                                    <div class="qa-onboarding">
+                                        <div class="qa-onboarding-title">QA Plan Generator</div>
+                                        <div class="qa-onboarding-steps">
+                                            <div class="qa-onboarding-step">
+                                                <div class="qa-onboarding-num">1</div>
+                                                <div class="qa-onboarding-info">
+                                                    <div class="qa-onboarding-label">Enter Jira tickets</div>
+                                                    <div class="qa-onboarding-desc">Paste ticket keys or full URLs in the left panel</div>
+                                                </div>
+                                            </div>
+                                            <div class="qa-onboarding-step">
+                                                <div class="qa-onboarding-num">2</div>
+                                                <div class="qa-onboarding-info">
+                                                    <div class="qa-onboarding-label">Generate QA Plan</div>
+                                                    <div class="qa-onboarding-desc">Agent fetches Jira data, detects systems, and creates test plans</div>
+                                                </div>
+                                            </div>
+                                            <div class="qa-onboarding-step">
+                                                <div class="qa-onboarding-num">3</div>
+                                                <div class="qa-onboarding-info">
+                                                    <div class="qa-onboarding-label">Review artifacts</div>
+                                                    <div class="qa-onboarding-desc">Test plans and cases per system, ready to copy or download</div>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                                <!-- Run cards appended here by JS -->
+                            </div>
+                            <!-- Detail view (shown when a run is clicked) -->
+                            <div id="qa-run-detail" style="display:none">
+                                <div class="qa-detail-header" id="qa-detail-header">
+                                    <button class="ctrl-btn-xs" id="qa-back-btn">&#8592; Back</button>
+                                    <span class="qa-detail-title" id="qa-detail-title"></span>
+                                    <div class="qa-detail-actions">
+                                        <div class="qa-search-box" id="qa-search-box" style="display:none">
+                                            <input type="text" id="qa-search-input" class="qa-search-input" placeholder="Search..." />
+                                            <span class="qa-search-count" id="qa-search-count"></span>
+                                            <button class="qa-search-nav" id="qa-search-prev" title="Previous">&#9650;</button>
+                                            <button class="qa-search-nav" id="qa-search-next" title="Next">&#9660;</button>
+                                        </div>
+                                        <button class="ctrl-btn-xs" id="qa-copy-btn" style="display:none" title="Copy markdown to clipboard">Copy</button>
+                                        <button class="ctrl-btn-xs" id="qa-download-btn" style="display:none" title="Download all artifacts as ZIP">Download</button>
+                                        <button class="ctrl-btn-xs" id="qa-rerun-btn" style="display:none" title="Re-run with same inputs">Re-run</button>
+                                    </div>
+                                </div>
+                                <div class="qa-coverage-bar" id="qa-coverage-bar" style="display:none"></div>
+                                <div class="qa-progress-bar" id="qa-progress-bar" style="display:none">
+                                    <div class="qa-progress-steps" id="qa-progress-steps"></div>
+                                </div>
+                                <div class="qa-detail-body">
+                                    <div class="qa-detail-content" id="qa-detail-content">
+                                        <!-- Sub-cards or document view -->
+                                    </div>
+                                    <div class="qa-toc" id="qa-toc" style="display:none">
+                                        <div class="qa-toc-title">Contents</div>
+                                        <div class="qa-toc-list" id="qa-toc-list"></div>
+                                    </div>
                                 </div>
                             </div>
                         </div>
@@ -1590,6 +1693,7 @@
     <script src="modules/processes.js"></script>
     <script src="modules/editor.js"></script>
     <script src="modules/controls.js"></script>
+    <script src="modules/qa.js"></script>
     <script src="modules/activity.js"></script>
     <script src="modules/polling.js"></script>
     <script src="modules/ui-updates.js"></script>
