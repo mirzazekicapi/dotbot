@@ -30,7 +30,10 @@ public class ItemsController : ControllerBase
     public async Task<IActionResult> GetItem(Guid id)
     {
         var result = await _mediator.Send(new GetItemQuery(id));
-        return result is null ? NotFound() : Ok(result);
+        if (result.IsFailure)
+            return NotFound();
+
+        return Ok(result.Value);
     }
 
     [HttpPost]

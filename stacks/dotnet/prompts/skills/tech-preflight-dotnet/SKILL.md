@@ -10,7 +10,7 @@ Validate the local .NET environment against the solution's requirements before a
 
 ## Workflow
 
-1. **Check SDK/runtime compatibility** — run `dotnet --list-sdks`, compare against `<TargetFramework>` in all `.csproj` files, flag gaps
+1. **Check SDK/runtime compatibility** — run `dotnet --list-sdks`, compare against `<TargetFramework>` and `<TargetFrameworks>` (plural, for multi-targeting) in all `.csproj` files, flag gaps
 2. **Map the dependency graph** — run `dotnet list {solution}.sln reference`, identify layering violations
 3. **Run baseline build** — run `dotnet build {solution}.sln`, record error/warning counts for later comparison
 
@@ -18,7 +18,7 @@ Validate the local .NET environment against the solution's requirements before a
 
 ```bash
 dotnet --list-sdks
-# Compare output against <TargetFramework> values in *.csproj
+# Compare output against <TargetFramework> and <TargetFrameworks> values in *.csproj
 ```
 
 - Flag any target framework without a matching SDK (e.g., `net7.0` targeted but only `net8.0` installed)
