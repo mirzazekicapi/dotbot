@@ -208,17 +208,19 @@ After writing the test plan:
 
 ### Step 7b — Generate UAT plan
 
-Apply the `write-uat-plan` skill using the overall test plan:
-- Extract UAT-xx scenarios from the test plan
-- Rewrite entirely in business-friendly language for non-technical testers
-- If the test plan has no UAT scenarios, derive them from E2E scenarios
+The UAT plan is the **only document** that contains UAT scenarios. The technical test plan (Step 6) and technical test cases (Step 9) do NOT include UAT content.
+
+Apply the `write-uat-plan` skill using the Jira requirements and the overall test plan as context:
+- Derive user-facing test scenarios from acceptance criteria and E2E scenarios
+- Write entirely in business-friendly language for non-technical testers
+- Include complete step-by-step instructions with expected results (these ARE the UAT test cases — no separate UAT test case file is needed)
 
 Write to:
 ```
 {output_directory}/uat-plan.md
 ```
 
-This UAT plan is a standalone document — a business user should be able to execute it without reading the technical test plan.
+This UAT plan is a standalone document — a business user should be able to execute it without reading the technical test plan or test cases.
 
 ### Step 8 — Generate per-system test plans (multi-system only)
 
@@ -309,11 +311,12 @@ Do NOT split into multiple files for single-system tickets. One consolidated fil
 
 ### Step 10 — Validate traceability
 
-After writing all test cases:
+After writing all test cases and the UAT plan:
 
-1. List all scenario IDs from the overall test plan (I-xx, E-xx, UAT-xx)
-2. Check each ID is referenced in at least one test case (either per-system or cross-system E2E)
-3. Report any gaps
+1. List all scenario IDs from the overall test plan (I-xx, E-xx)
+2. Check each I-xx and E-xx is referenced in at least one technical test case (per-system or cross-system E2E)
+3. Verify the UAT plan covers all user-facing acceptance criteria from Jira
+4. Report any gaps
 
 ### Step 11 — Report summary
 

@@ -1,12 +1,12 @@
 ---
 name: write-test-plan
-description: Generate a comprehensive QA/UAT test plan from product specifications, Jira requirements, and task definitions. Covers business context, assumptions, environment setup, test scenarios, and open questions. Unit tests are out of scope.
+description: Generate a comprehensive technical QA test plan from product specifications, Jira requirements, and task definitions. Covers business context, assumptions, environment setup, integration and E2E scenarios, and open questions. UAT scenarios are in the separate UAT Plan. Unit tests are out of scope.
 auto_invoke: false
 ---
 
 # Write Test Plan
 
-Guide for producing a complete QA/UAT test plan that gives the testing team everything they need to understand the change, prepare their environment, and execute testing. The plan must stand alone — a QA engineer reading it with no prior context should understand what's changing, why, what to test, and what they need.
+Guide for producing a technical QA test plan (integration + E2E) that gives the QA team everything they need to understand the change, prepare their environment, and execute testing. The plan must stand alone — a QA engineer reading it with no prior context should understand what's changing, why, what to test, and what they need.
 
 ## Prerequisites
 
@@ -146,10 +146,11 @@ Include:
 |-------|---------------|---------|-----|
 | Integration | Multi-component flows, API contracts, DB state | (from tech-stack or requirements) | QA |
 | E2E / Acceptance | Full user journeys from UI to persistence | (from tech-stack or requirements) | QA |
-| UAT | Business scenarios validated against real requirements | Manual | Product owner / stakeholders |
 | Exploratory | Edge cases, UX, error recovery, accessibility | Manual | QA |
 
 Fill the tooling column from available context. If no E2E tool is specified, mark as `Manual`.
+
+> **Note:** UAT (User Acceptance Testing) scenarios are NOT included in this test plan. They are covered in the separate **UAT Plan** document, which is written in business-friendly language for non-technical testers.
 
 #### 11. Test Scenarios
 
@@ -171,22 +172,17 @@ For each feature area or task group, produce a scenario block:
 |----|----------|-------|---------------|
 | E-01 | ... | ... | ... |
 
-**UAT scenarios:**
-| ID | Business scenario | Actor | Pass condition |
-|----|------------------|-------|---------------|
-| UAT-01 | ... | ... | ... |
-
 **Exploratory notes:**
 - Areas to probe manually: <list edge cases, error paths, UX concerns>
 ```
 
 Rules:
-- Every acceptance criterion from every Jira issue/task must map to at least one scenario ID
-- Scenario IDs are globally unique: I-01…I-nn, E-01…E-nn, UAT-01…UAT-nn
+- Every acceptance criterion from every Jira issue/task must map to at least one I-xx or E-xx scenario
+- Scenario IDs are globally unique: I-01…I-nn, E-01…E-nn
 - Integration scenarios: specify what's real vs. stubbed
 - E2E scenarios: written as observable user steps with a clear pass/fail condition
-- UAT scenarios: written in business language — stakeholders must understand them without developer help
 - Exploratory notes: list areas QA should probe freely, not scripted steps
+- Do NOT include UAT scenarios (UAT-xx) — those belong in the separate UAT Plan document
 
 #### 12. Regression Scope
 
@@ -219,7 +215,7 @@ If there are no open questions, write: "No open questions — all requirements a
 **Exit** (testing is complete when):
 - [ ] All integration scenarios pass
 - [ ] All E2E / acceptance scenarios pass
-- [ ] All UAT scenarios signed off by product owner
+- [ ] UAT plan signed off by product owner (separate document)
 - [ ] Regression scenarios from Section 12 pass
 - [ ] No open critical or high-severity defects
 - [ ] All acceptance criteria are covered by at least one passing scenario
@@ -233,7 +229,7 @@ If there are no open questions, write: "No open questions — all requirements a
 - Jira components/labels → Section 7 (Dependencies)
 
 ### From acceptance criteria → test scenarios
-Each criterion becomes ≥1 integration or E2E scenario. Criteria describing user-visible behaviour also need a UAT scenario in plain business language.
+Each criterion becomes ≥1 integration or E2E scenario. Criteria describing user-visible behaviour will also be covered in the separate UAT Plan document.
 
 ### From entity model → integration scenarios
 Every entity relationship with a constraint (FK, unique, cascade delete) needs at least one integration scenario validating the constraint end-to-end.
@@ -261,7 +257,7 @@ High-risk areas get additional exploratory notes and explicit regression scenari
 - [ ] Dependencies list includes ordering
 - [ ] Regression scope identifies at-risk existing features
 - [ ] Open questions are specific with identified owner
-- [ ] UAT scenarios use business language (no code references)
-- [ ] Scenario IDs are globally unique and sequential
+- [ ] No UAT scenarios in this document (those belong in the UAT Plan)
+- [ ] Scenario IDs are globally unique and sequential (I-xx, E-xx only)
 - [ ] No absolute local paths in the document
 - [ ] No secrets, tokens, or real PII in test data examples
