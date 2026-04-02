@@ -123,9 +123,9 @@ public class ReminderEscalationService : BackgroundService
                 await foreach (var response in responseStorage.ListResponsesAsync(
                     instance.ProjectId, instance.QuestionId, instance.InstanceId))
                 {
-                    // Match on AAD object ID (exact) or email (case-insensitive).
-                    // Both are checked independently so a Teams response (AAD ID)
-                    // can match a recipient that only has an email, and vice-versa.
+                    // Match on AAD object ID (exact), email (case-insensitive), or Slack user ID.
+                    // Slack magic links are issued with the Slack user ID as the email claim,
+                    // so ResponderEmail will equal the SlackUserId for Slack responses.
                     bool match =
                         (!string.IsNullOrEmpty(response.ResponderAadObjectId) &&
                          !string.IsNullOrEmpty(recipient.AadObjectId) &&
@@ -133,7 +133,11 @@ public class ReminderEscalationService : BackgroundService
                         ||
                         (!string.IsNullOrEmpty(response.ResponderEmail) &&
                          !string.IsNullOrEmpty(recipient.Email) &&
-                         string.Equals(response.ResponderEmail, recipient.Email, StringComparison.OrdinalIgnoreCase));
+                         string.Equals(response.ResponderEmail, recipient.Email, StringComparison.OrdinalIgnoreCase))
+                        ||
+                        (!string.IsNullOrEmpty(response.ResponderEmail) &&
+                         !string.IsNullOrEmpty(recipient.SlackUserId) &&
+                         string.Equals(response.ResponderEmail, recipient.SlackUserId, StringComparison.OrdinalIgnoreCase));
 
                     if (match)
                     {

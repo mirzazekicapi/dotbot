@@ -128,6 +128,12 @@ try
         builder.Services.AddSingleton<IQuestionDeliveryProvider, JiraDeliveryProvider>();
     }
 
+    var slackEnabled = builder.Configuration.GetValue<bool>("DeliveryChannels:Slack:Enabled");
+    if (slackEnabled)
+    {
+        builder.Services.AddSingleton<IQuestionDeliveryProvider, SlackDeliveryProvider>();
+    }
+
     builder.Services.AddSingleton<DeliveryOrchestrator>();
 
     // Reminder/escalation background service
@@ -261,10 +267,11 @@ try
         // Validate recipients
         var allEmails = req.Recipients?.Emails ?? [];
         var allObjectIds = req.Recipients?.UserObjectIds ?? [];
-        if (allEmails.Count == 0 && allObjectIds.Count == 0)
+        var allSlackUserIds = req.Recipients?.SlackUserIds ?? [];
+        if (allEmails.Count == 0 && allObjectIds.Count == 0 && allSlackUserIds.Count == 0)
         {
             logger.LogWarning("Instance creation rejected: no recipients specified");
-            return Results.BadRequest(new { error = "At least one email or userObjectId is required in recipients" });
+            return Results.BadRequest(new { error = "At least one email, userObjectId, or slackUserId is required in recipients" });
         }
 
         var invalidEmails = allEmails
@@ -380,11 +387,13 @@ try
                     (!string.IsNullOrEmpty(resp.ResponderAadObjectId) && !string.IsNullOrEmpty(r.AadObjectId)
                         && string.Equals(resp.ResponderAadObjectId, r.AadObjectId, StringComparison.OrdinalIgnoreCase))
                     || (!string.IsNullOrEmpty(resp.ResponderEmail) && !string.IsNullOrEmpty(r.Email)
-                        && string.Equals(resp.ResponderEmail, r.Email, StringComparison.OrdinalIgnoreCase)));
+                        && string.Equals(resp.ResponderEmail, r.Email, StringComparison.OrdinalIgnoreCase))
+                    || (!string.IsNullOrEmpty(resp.ResponderEmail) && !string.IsNullOrEmpty(r.SlackUserId)
+                        && string.Equals(resp.ResponderEmail, r.SlackUserId, StringComparison.OrdinalIgnoreCase)));
 
                 return new
                 {
-                    email = r.Email,
+                    email = r.Email ?? r.SlackUserId,
                     aadObjectId = r.AadObjectId,
                     channel = r.Channel,
                     status = r.Status,

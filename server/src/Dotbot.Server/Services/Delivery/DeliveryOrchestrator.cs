@@ -142,6 +142,46 @@ public class DeliveryOrchestrator
             }
         }
 
+        // Handle Slack user ID recipients
+        var slackUserIds = request.Recipients?.SlackUserIds ?? [];
+        if (channel == "slack")
+        {
+            foreach (var slackUserId in slackUserIds)
+            {
+                var recipientInfo = new RecipientInfo { Email = slackUserId, SlackUserId = slackUserId };
+
+                try
+                {
+                    var magicLinkUrl = await _magicLinkService.GenerateMagicLinkAsync(
+                        slackUserId, instance.InstanceId, instance.ProjectId, baseUrl);
+
+                    var deliveryContext = new DeliveryContext
+                    {
+                        Instance = instance,
+                        Template = template,
+                        Recipient = recipientInfo,
+                        MagicLinkUrl = magicLinkUrl,
+                        JiraIssueKey = request.JiraIssueKey
+                    };
+
+                    var result = await provider.DeliverAsync(deliveryContext, ct);
+
+                    recipients.Add(new InstanceRecipient
+                    {
+                        SlackUserId = slackUserId,
+                        Channel = channel,
+                        SentAt = result.Success ? DateTime.UtcNow : null,
+                        Status = result.Success ? "sent" : "failed"
+                    });
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "Failed to deliver to Slack user {SlackUserId}", slackUserId);
+                    recipients.Add(new InstanceRecipient { SlackUserId = slackUserId, Channel = channel, Status = "failed" });
+                }
+            }
+        }
+
         // Handle raw object ID recipients (Teams only)
         foreach (var userId in objectIdRecipients)
         {
@@ -214,7 +254,7 @@ public class DeliveryOrchestrator
         var channel = recipient.Channel ?? "teams";
 
         // Business hours check — defer reminder if outside hours
-        var userKey = recipient.AadObjectId ?? recipient.Email ?? "";
+        var userKey = recipient.AadObjectId ?? recipient.Email ?? recipient.SlackUserId ?? "";
         if (!await _businessHours.IsWithinBusinessHoursAsync(userKey, channel))
         {
             _logger.LogDebug("Deferring reminder for {Recipient} — outside business hours",
@@ -237,14 +277,15 @@ public class DeliveryOrchestrator
         }
 
         var baseUrl = GetBaseUrl();
-        var email = recipient.Email ?? recipient.AadObjectId ?? "";
+        var email = recipient.SlackUserId ?? recipient.Email ?? recipient.AadObjectId ?? "";
         var magicLinkUrl = await _magicLinkService.GenerateMagicLinkAsync(
             email, instance.InstanceId, instance.ProjectId, baseUrl);
 
         var recipientInfo = new RecipientInfo
         {
             Email = email,
-            AadObjectId = recipient.AadObjectId
+            AadObjectId = recipient.AadObjectId,
+            SlackUserId = recipient.SlackUserId
         };
 
         // Resolve display name for email channel (non-critical)
@@ -285,7 +326,7 @@ public class DeliveryOrchestrator
         var channel = recipient.Channel ?? "teams";
 
         // Business hours check — still outside hours?
-        var userKey = recipient.AadObjectId ?? recipient.Email ?? "";
+        var userKey = recipient.AadObjectId ?? recipient.Email ?? recipient.SlackUserId ?? "";
         if (!await _businessHours.IsWithinBusinessHoursAsync(userKey, channel))
             return false;
 
@@ -296,12 +337,13 @@ public class DeliveryOrchestrator
         }
 
         var baseUrl = GetBaseUrl();
-        var email = recipient.Email ?? recipient.AadObjectId ?? "";
+        var email = recipient.SlackUserId ?? recipient.Email ?? recipient.AadObjectId ?? "";
 
         var recipientInfo = new RecipientInfo
         {
             Email = email,
-            AadObjectId = recipient.AadObjectId
+            AadObjectId = recipient.AadObjectId,
+            SlackUserId = recipient.SlackUserId
         };
 
         // Resolve display name for email channel (non-critical)
