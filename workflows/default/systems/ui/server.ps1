@@ -1331,8 +1331,10 @@ try {
                         if (-not $jiraKeys) {
                             $content = @{ success = $false; error = "jira_keys is required" } | ConvertTo-Json -Compress
                         } else {
-                            # Create run ID and directory
-                            $runId = "qa-run-" + (Get-Date -Format "yyyyMMdd-HHmmss")
+                            # Create run ID — include first Jira key for easy identification
+                            $firstKey = ($jiraKeys -split '[,\s]+' | Select-Object -First 1).Trim()
+                            $safeKey = $firstKey -replace '[^a-zA-Z0-9\-]', ''
+                            $runId = "qa-$safeKey-" + (Get-Date -Format "HHmmss")
                             $qaRunsDir = Join-Path $botRoot ".control\qa-runs"
                             if (-not (Test-Path $qaRunsDir)) {
                                 New-Item -Path $qaRunsDir -ItemType Directory -Force | Out-Null
@@ -1345,43 +1347,164 @@ try {
                                 New-Item -Path (Join-Path $runOutputDir "test-cases") -ItemType Directory -Force | Out-Null
                             }
 
-                            # Build QA pipeline prompt
-                            $qaPrompt = "Run the QA pipeline workflow. Read the workflow file from .bot/prompts/workflows/04-qa-pipeline.md and follow its instructions exactly.`n`n"
-                            $qaPrompt += "## QA Generation Input`n`n"
-                            $qaPrompt += "### Run ID`n$runId`n`n"
-                            $qaPrompt += "### Output Directory`n.bot/workspace/product/qa-runs/$runId/`n`n"
-                            $qaPrompt += "### Jira Tickets (required)`n$jiraKeys`n`n"
+                            # Dynamic workflow name for run isolation
+                            $wfName = $runId
+                            $outputDir = ".bot/workspace/product/qa-runs/$runId"
+                            $confluenceUrls = if ($body.confluence_urls) { $body.confluence_urls } else { "" }
+                            $instructions = if ($body.instructions) { $body.instructions } else { "" }
 
-                            if ($body.confluence_urls) {
-                                $qaPrompt += "### Confluence Pages`n$($body.confluence_urls)`n`n"
+                            # Common context block injected into every task description
+                            $contextBlock = "## QA Run Context`n`nRun ID: $runId`nOutput Directory: $outputDir/`nJira Tickets: $jiraKeys"
+                            if ($confluenceUrls) { $contextBlock += "`nConfluence Pages: $confluenceUrls" }
+                            if ($instructions) { $contextBlock += "`nAdditional Instructions: $instructions" }
+                            $contextBlock += "`n"
+
+                            # Create 7 native tasks with dynamic workflow name
+                            $qaTaskDefs = @(
+                                @{
+                                    name = "Fetch Jira Context [$runId]"
+                                    type = "prompt_template"
+                                    prompt = "prompts/workflows/01-fetch-jira-context.md"
+                                    description = "Fetch Jira requirements, Confluence docs, and local product context for QA plan generation.`n`n$contextBlock"
+                                    priority = 1
+                                    on_failure = "halt"
+                                    skip_analysis = $true
+                                    skip_worktree = $true
+                                    outputs = @("$outputDir/jira-context.json")
+                                }
+                                @{
+                                    name = "Detect Systems [$runId]"
+                                    type = "prompt_template"
+                                    prompt = "prompts/workflows/02-detect-systems.md"
+                                    description = "Identify affected systems from Jira data.`n`n$contextBlock"
+                                    priority = 2
+                                    on_failure = "halt"
+                                    skip_analysis = $true
+                                    skip_worktree = $true
+                                    depends_on = @("Fetch Jira Context [$runId]")
+                                    outputs = @("$outputDir/systems.json")
+                                }
+                                @{
+                                    name = "Generate Test Plan [$runId]"
+                                    type = "prompt_template"
+                                    prompt = "prompts/workflows/03-generate-test-plan.md"
+                                    description = "Generate the overall technical test plan with 14 sections.`n`n$contextBlock"
+                                    priority = 3
+                                    skip_analysis = $true
+                                    skip_worktree = $true
+                                    depends_on = @("Detect Systems [$runId]")
+                                    outputs = @("$outputDir/test-plan.md")
+                                }
+                                @{
+                                    name = "Generate UAT Plan [$runId]"
+                                    type = "prompt_template"
+                                    prompt = "prompts/workflows/04-generate-uat-plan.md"
+                                    description = "Generate UAT plan in business-friendly language for non-technical testers.`n`n$contextBlock"
+                                    priority = 4
+                                    skip_analysis = $true
+                                    skip_worktree = $true
+                                    depends_on = @("Generate Test Plan [$runId]")
+                                    outputs = @("$outputDir/uat-plan.md")
+                                }
+                                @{
+                                    name = "Generate Per-System Plans [$runId]"
+                                    type = "prompt_template"
+                                    prompt = "prompts/workflows/05-generate-system-plans.md"
+                                    description = "Generate per-system test plans for multi-system tickets. Skip if single system.`n`n$contextBlock"
+                                    priority = 5
+                                    skip_analysis = $true
+                                    skip_worktree = $true
+                                    depends_on = @("Generate Test Plan [$runId]")
+                                    condition = "$outputDir/systems.json"
+                                }
+                                @{
+                                    name = "Generate Test Cases [$runId]"
+                                    type = "prompt_template"
+                                    prompt = "prompts/workflows/06-generate-test-cases.md"
+                                    description = "Generate detailed technical test cases per system.`n`n$contextBlock"
+                                    priority = 6
+                                    skip_analysis = $true
+                                    skip_worktree = $true
+                                    depends_on = @("Generate Per-System Plans [$runId]", "Generate UAT Plan [$runId]")
+                                }
+                                @{
+                                    name = "Validate Coverage [$runId]"
+                                    type = "prompt_template"
+                                    prompt = "prompts/workflows/07-validate-coverage.md"
+                                    description = "Validate traceability and write completion marker.`n`n$contextBlock"
+                                    priority = 7
+                                    skip_analysis = $true
+                                    skip_worktree = $true
+                                    depends_on = @("Generate Test Cases [$runId]")
+                                    outputs = @("$outputDir/pipeline-complete.json")
+                                }
+                            )
+
+                            # Create tasks via New-WorkflowTask
+                            $createdTasks = @()
+                            foreach ($td in $qaTaskDefs) {
+                                $result = New-WorkflowTask -ProjectBotDir $botRoot -WorkflowName $wfName -TaskDef $td
+                                $createdTasks += $result
                             }
-                            if ($body.instructions) {
-                                $qaPrompt += "### Additional Instructions`n$($body.instructions)`n`n"
-                            }
 
-                            $result = Start-ProcessLaunch -Type 'planning' -Prompt $qaPrompt -Description "QA: $jiraKeys"
+                            # Launch workflow execution for this run
+                            $launchResult = Start-ProcessLaunch -Type 'workflow' -WorkflowName $wfName -Continue $true -Description "QA: $jiraKeys"
 
-                            # Save run metadata (store both process_id and pid for kill support)
+                            # Save run metadata
                             $runMeta = @{
                                 id = $runId
                                 jira_keys = $jiraKeys
-                                confluence_urls = if ($body.confluence_urls) { $body.confluence_urls } else { "" }
-                                instructions = if ($body.instructions) { $body.instructions } else { "" }
+                                confluence_urls = $confluenceUrls
+                                instructions = $instructions
                                 status = "processing"
-                                process_id = $result.process_id
-                                pid = $result.pid
+                                workflow_name = $wfName
+                                process_id = $launchResult.process_id
+                                pid = $launchResult.pid
                                 created_at = (Get-Date -Format "o")
                                 completed_at = $null
                                 scenario_count = 0
                                 test_case_count = 0
+                                task_count = $createdTasks.Count
                             }
                             $runMeta | ConvertTo-Json -Depth 3 | Set-Content (Join-Path $qaRunsDir "$runId.json") -Encoding UTF8
 
-                            $content = @{ success = $true; run_id = $runId; process_id = $result.process_id; pid = $result.pid } | ConvertTo-Json -Compress
+                            $content = @{ success = $true; run_id = $runId; process_id = $launchResult.process_id; pid = $launchResult.pid; tasks_created = $createdTasks.Count } | ConvertTo-Json -Compress
                         }
                     } else {
                         $statusCode = 405
                         $content = @{ success = $false; error = "Method not allowed" } | ConvertTo-Json -Compress
+                    }
+                    break
+                }
+
+                "/api/qa/run-tasks" {
+                    $contentType = "application/json; charset=utf-8"
+                    $runId = $request.QueryString["run"]
+                    if (-not $runId) {
+                        $content = @{ error = "run parameter required" } | ConvertTo-Json -Compress
+                    } else {
+                        $tasks = @()
+                        $taskDirs = @("todo", "in-progress", "done", "skipped", "cancelled")
+                        foreach ($dir in $taskDirs) {
+                            $taskDir = Join-Path $botRoot "workspace\tasks\$dir"
+                            if (Test-Path $taskDir) {
+                                Get-ChildItem -Path $taskDir -Filter "*.json" -ErrorAction SilentlyContinue | ForEach-Object {
+                                    try {
+                                        $t = Get-Content $_.FullName -Raw | ConvertFrom-Json
+                                        if ($t.workflow -eq $runId) {
+                                            $tasks += @{
+                                                id = $t.id
+                                                name = $t.name -replace "\s*\[.*\]$", ""
+                                                status = $dir
+                                                priority = $t.priority
+                                            }
+                                        }
+                                    } catch {}
+                                }
+                            }
+                        }
+                        $tasks = @($tasks | Sort-Object { $_.priority })
+                        $content = @{ tasks = $tasks } | ConvertTo-Json -Depth 3 -Compress
                     }
                     break
                 }
@@ -1427,15 +1550,48 @@ try {
                                     }
                                 }
 
-                                # Detect current stage for processing runs (shown on run cards)
+                                # Detect current stage from tasks (if workflow_name exists) or files
                                 if ($runMeta.status -eq "processing") {
-                                    $stage = "Gathering Jira context..."
-                                    if (Test-Path (Join-Path $runOutputDir "jira-context.json")) { $stage = "Detecting systems..." }
-                                    if (Test-Path (Join-Path $runOutputDir "systems.json")) { $stage = "Generating test plan..." }
-                                    if (Test-Path (Join-Path $runOutputDir "test-plan.md")) { $stage = "Generating per-system plans..." }
-                                    $sysDir = Join-Path $runOutputDir "systems"
-                                    if ((Test-Path $sysDir) -and (Get-ChildItem -Path $sysDir -Filter "test-plan.md" -Recurse -ErrorAction SilentlyContinue)) { $stage = "Generating test cases..." }
-                                    $runMeta | Add-Member -NotePropertyName "current_stage" -NotePropertyValue $stage -Force
+                                    $wfn = if ($runMeta.workflow_name) { $runMeta.workflow_name } else { $null }
+                                    if ($wfn) {
+                                        # Task-based stage detection
+                                        $taskDirs = @("todo", "in-progress", "done", "skipped", "cancelled")
+                                        $runTasks = @()
+                                        foreach ($tDir in $taskDirs) {
+                                            $tPath = Join-Path $botRoot "workspace\tasks\$tDir"
+                                            if (Test-Path $tPath) {
+                                                Get-ChildItem -Path $tPath -Filter "*.json" -ErrorAction SilentlyContinue | ForEach-Object {
+                                                    try {
+                                                        $tData = Get-Content $_.FullName -Raw | ConvertFrom-Json
+                                                        if ($tData.workflow -eq $wfn) {
+                                                            $runTasks += @{ name = ($tData.name -replace "\s*\[.*\]$", ""); status = $tDir; priority = $tData.priority }
+                                                        }
+                                                    } catch {}
+                                                }
+                                            }
+                                        }
+                                        $runTasks = @($runTasks | Sort-Object { $_.priority })
+                                        # Find current stage: first non-done task
+                                        $stage = "Processing..."
+                                        foreach ($rt in $runTasks) {
+                                            if ($rt.status -eq "in-progress") { $stage = $rt.name + "..."; break }
+                                            if ($rt.status -eq "todo") { $stage = "Waiting: " + $rt.name; break }
+                                        }
+                                        # Check if all done
+                                        $allDone = ($runTasks | Where-Object { $_.status -eq "done" }).Count -eq $runTasks.Count -and $runTasks.Count -gt 0
+                                        $anyFailed = ($runTasks | Where-Object { $_.status -eq "cancelled" }).Count -gt 0
+                                        if ($allDone) { $stage = "Completing..." }
+                                        $runMeta | Add-Member -NotePropertyName "current_stage" -NotePropertyValue $stage -Force
+                                    } else {
+                                        # File-based stage detection (legacy/fallback)
+                                        $stage = "Gathering Jira context..."
+                                        if (Test-Path (Join-Path $runOutputDir "jira-context.json")) { $stage = "Detecting systems..." }
+                                        if (Test-Path (Join-Path $runOutputDir "systems.json")) { $stage = "Generating test plan..." }
+                                        if (Test-Path (Join-Path $runOutputDir "test-plan.md")) { $stage = "Generating per-system plans..." }
+                                        $sysDir = Join-Path $runOutputDir "systems"
+                                        if ((Test-Path $sysDir) -and (Get-ChildItem -Path $sysDir -Filter "test-plan.md" -Recurse -ErrorAction SilentlyContinue)) { $stage = "Generating test cases..." }
+                                        $runMeta | Add-Member -NotePropertyName "current_stage" -NotePropertyValue $stage -Force
+                                    }
                                 }
 
                                 # Check if a processing run has completed
@@ -1507,6 +1663,7 @@ try {
                         $jiraKeys = ""
 
                         # Read run metadata for jira_keys
+                        $meta = $null
                         $runMetaPath = Join-Path $botRoot ".control\qa-runs\$runId.json"
                         if (Test-Path $runMetaPath) {
                             $meta = Get-Content $runMetaPath -Raw | ConvertFrom-Json
@@ -1732,6 +1889,24 @@ try {
                                         if ($proc) { $proc | Stop-Process -Force }
                                     }
                                 } catch {}
+
+                                # Clean up tasks for this run's workflow name
+                                if ($meta.workflow_name) {
+                                    $taskDirs = @("todo", "in-progress", "done", "skipped", "cancelled")
+                                    foreach ($tDir in $taskDirs) {
+                                        $tPath = Join-Path $botRoot "workspace\tasks\$tDir"
+                                        if (Test-Path $tPath) {
+                                            Get-ChildItem -Path $tPath -Filter "*.json" -ErrorAction SilentlyContinue | ForEach-Object {
+                                                try {
+                                                    $tData = Get-Content $_.FullName -Raw | ConvertFrom-Json
+                                                    if ($tData.workflow -eq $meta.workflow_name) {
+                                                        Remove-Item $_.FullName -Force
+                                                    }
+                                                } catch {}
+                                            }
+                                        }
+                                    }
+                                }
 
                                 Remove-Item $runMetaPath -Force
                                 $deleted = $true

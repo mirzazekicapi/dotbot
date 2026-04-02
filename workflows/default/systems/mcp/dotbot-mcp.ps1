@@ -80,10 +80,10 @@ foreach ($toolDirItem in $toolDirs) {
         try {
             # Load tool script
             . $scriptPath
-            
+
             # Load tool metadata
             $toolMetadata = Get-Content $metadataPath -Raw | ConvertFrom-Yaml
-            
+
             # Store tool info
             $tools[$toolMetadata.name] = @{
                 metadata = $toolMetadata

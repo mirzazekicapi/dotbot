@@ -398,8 +398,12 @@ async function showRunDetail(runId) {
         const searchInput = document.getElementById('qa-search-input');
         if (searchInput) searchInput.value = '';
 
-        // Show/hide progress bar
-        renderProgress(data.progress, isProcessing);
+        // Show/hide progress bar (task-based or file-based)
+        if (isProcessing) {
+            renderTaskProgress(currentRunId);
+        } else {
+            renderProgress(null, false);
+        }
 
         // Show/hide coverage bar
         renderCoverage(data);
@@ -671,7 +675,49 @@ async function rerunQA(runData) {
 }
 
 /**
- * Render the pipeline progress bar
+ * Render task-based progress from /api/qa/run-tasks
+ */
+async function renderTaskProgress(runId) {
+    const progressBar = document.getElementById('qa-progress-bar');
+    const stepsEl = document.getElementById('qa-progress-steps');
+    if (!progressBar || !stepsEl) return;
+
+    try {
+        const res = await fetch(`${API_BASE}/api/qa/run-tasks?run=${encodeURIComponent(runId)}`);
+        const data = await res.json();
+
+        if (!data.tasks || data.tasks.length === 0) {
+            // Fallback to file-based progress if no tasks found
+            progressBar.style.display = 'none';
+            return;
+        }
+
+        progressBar.style.display = '';
+        let html = '';
+        for (const task of data.tasks) {
+            const stateClass = task.status === 'done' ? 'done'
+                : task.status === 'in-progress' ? 'active'
+                : task.status === 'cancelled' ? 'fail'
+                : 'pending';
+            const icon = task.status === 'done' ? '&#10003;'
+                : task.status === 'in-progress' ? '&#9679;'
+                : task.status === 'cancelled' ? '&#10007;'
+                : '&#9675;';
+
+            html += `<div class="qa-progress-step ${stateClass}">
+                <span class="qa-progress-icon">${icon}</span>
+                <span class="qa-progress-label">${escapeHtml(task.name)}</span>
+            </div>`;
+        }
+        stepsEl.innerHTML = html;
+    } catch (e) {
+        // If task endpoint fails, hide progress bar
+        progressBar.style.display = 'none';
+    }
+}
+
+/**
+ * Render the pipeline progress bar (file-based, legacy fallback)
  */
 function renderProgress(progress, isProcessing) {
     const progressBar = document.getElementById('qa-progress-bar');
@@ -735,8 +781,12 @@ function startQAProgressPoll(runId) {
             const res = await fetch(`${API_BASE}/api/qa/results?run=${encodeURIComponent(runId)}`);
             const data = await res.json();
 
-            // Update progress bar
-            renderProgress(data.progress, data.status === 'processing');
+            // Update progress bar (task-based)
+            if (data.status === 'processing') {
+                renderTaskProgress(runId);
+            } else {
+                renderProgress(null, false);
+            }
 
             // Refresh artifact cards if new content appeared
             const hadPlan = currentRunData && currentRunData.test_plan;

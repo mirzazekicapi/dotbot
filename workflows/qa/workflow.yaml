@@ -1,0 +1,115 @@
+name: qa
+version: "1.0"
+description: >-
+  QA test planning workflow. Fetches Jira requirements, detects affected systems,
+  generates test plans (overall + per-system), UAT plans, and test cases with
+  full traceability to acceptance criteria.
+icon: clipboard-check
+min_dotbot_version: "3.5"
+
+mcp_servers:
+  atlassian:
+    type: http
+    url: https://mcp.atlassian.com/v1/mcp
+
+remove_mcp_servers:
+  - context7
+  - playwright
+  - serena
+
+requires:
+  mcp_servers:
+    - name: atlassian
+      message: "Atlassian MCP server is required for Jira/Confluence access"
+      hint: "Run 'claude mcp add atlassian' to register it"
+    - name: dotbot
+      message: "Dotbot MCP server is required for task management"
+      hint: "Run 'dotbot init --force' to re-register it"
+  cli_tools:
+    - name: git
+      message: "git CLI is required"
+      hint: "Install from https://git-scm.com/"
+
+form:
+  modes:
+    - id: generate_qa
+      label: "Generate QA Plan"
+      description: "Generate QA test plans and test cases from Jira requirements."
+      button: "GENERATE QA PLAN"
+      prompt_placeholder: "Enter Jira ticket keys (e.g., PROJ-123, PROJ-456) or paste full URLs"
+      show_interview: false
+      show_files: false
+
+domain:
+  task_categories: ["qa-test-plan", "qa-test-cases", "qa-uat", "qa-automation"]
+
+tasks:
+  - name: "Fetch Jira Context"
+    type: prompt
+    workflow: "01-fetch-jira-context.md"
+    outputs: ["qa-runs/jira-context.json"]
+    commit:
+      paths: ["workspace/product/qa-runs/"]
+      message: "chore(qa): fetch jira context"
+    priority: 1
+    on_failure: halt
+
+  - name: "Detect Systems"
+    type: prompt
+    workflow: "02-detect-systems.md"
+    depends_on: ["Fetch Jira Context"]
+    outputs: ["qa-runs/systems.json"]
+    commit:
+      paths: ["workspace/product/qa-runs/"]
+      message: "chore(qa): detect affected systems"
+    priority: 2
+    on_failure: halt
+
+  - name: "Generate Test Plan"
+    type: prompt
+    workflow: "03-generate-test-plan.md"
+    depends_on: ["Detect Systems"]
+    outputs: ["qa-runs/test-plan.md"]
+    commit:
+      paths: ["workspace/product/qa-runs/"]
+      message: "chore(qa): generate overall test plan"
+    priority: 3
+
+  - name: "Generate UAT Plan"
+    type: prompt
+    workflow: "04-generate-uat-plan.md"
+    depends_on: ["Generate Test Plan"]
+    outputs: ["qa-runs/uat-plan.md"]
+    commit:
+      paths: ["workspace/product/qa-runs/"]
+      message: "chore(qa): generate UAT plan"
+    priority: 4
+
+  - name: "Generate Per-System Plans"
+    type: prompt
+    workflow: "05-generate-system-plans.md"
+    depends_on: ["Generate Test Plan"]
+    condition: ".bot/workspace/product/qa-runs/systems.json"
+    commit:
+      paths: ["workspace/product/qa-runs/"]
+      message: "chore(qa): generate per-system test plans"
+    priority: 5
+
+  - name: "Generate Test Cases"
+    type: prompt
+    workflow: "06-generate-test-cases.md"
+    depends_on: ["Generate Per-System Plans", "Generate UAT Plan"]
+    commit:
+      paths: ["workspace/product/qa-runs/"]
+      message: "chore(qa): generate test cases"
+    priority: 6
+
+  - name: "Validate Coverage"
+    type: prompt
+    workflow: "07-validate-coverage.md"
+    depends_on: ["Generate Test Cases"]
+    outputs: ["qa-runs/pipeline-complete.json"]
+    commit:
+      paths: ["workspace/product/qa-runs/"]
+      message: "chore(qa): validate traceability and coverage"
+    priority: 7

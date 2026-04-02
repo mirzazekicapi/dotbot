@@ -408,12 +408,14 @@ function updatePipelineView(tasks) {
     // Apply workflow filter if set
     if (pipelineWorkflowFilter) {
         const wf = pipelineWorkflowFilter;
-        upcoming = upcoming.filter(t => t.workflow === wf);
-        completed = completed.filter(t => t.workflow === wf);
-        analysing = analysing.filter(t => t.workflow === wf);
-        needsInput = needsInput.filter(t => t.workflow === wf);
-        analysed = analysed.filter(t => t.workflow === wf);
-        inProgress = inProgress.filter(t => t.workflow === wf);
+        // Match exact workflow name OR dynamic run names (e.g., "qa" matches "qa-PAPI-79115-150953")
+        const matchesFilter = (t) => t.workflow === wf || (t.workflow && t.workflow.startsWith(wf + '-'));
+        upcoming = upcoming.filter(matchesFilter);
+        completed = completed.filter(matchesFilter);
+        analysing = analysing.filter(matchesFilter);
+        needsInput = needsInput.filter(matchesFilter);
+        analysed = analysed.filter(matchesFilter);
+        inProgress = inProgress.filter(matchesFilter);
     }
 
     // Update filter dropdown options from state.workflows
@@ -804,6 +806,10 @@ function updateExecutiveSummary() {
         container.style.display = 'block';
     } else if (typeof isNewProject !== 'undefined' && isNewProject) {
         // New project: show kickstart CTA in this slot
+        renderKickstartCTA(container);
+        container.style.display = 'block';
+    } else if (installedWorkflows && installedWorkflows.length > 0) {
+        // Installed workflows: show workflow section (QA gets custom section)
         renderKickstartCTA(container);
         container.style.display = 'block';
     } else {

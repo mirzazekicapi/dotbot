@@ -276,6 +276,12 @@ function renderWorkflowCardGrid(container) {
         return;
     }
 
+    // Hide workflow card grid when QA is the only workflow (QA has its own section)
+    if (names.length === 1 && names[0] === 'qa') {
+        renderQAOverviewSection(container);
+        return;
+    }
+
     let html = '<div class="module-header" style="margin-bottom: 12px;"><span class="module-title">◈ Workflows</span></div><div class="workflow-card-grid">';
     names.forEach(name => {
         const wf = workflows[name] || { todo: 0, in_progress: 0, done: 0, total: 0 };
@@ -1171,6 +1177,103 @@ function renderOverviewKickstartPhases(data) {
         panelHeader.dataset.bound = '1';
         panelHeader.addEventListener('click', () => {
             sidePanel.classList.toggle('collapsed');
+        });
+    }
+}
+
+/**
+ * Render QA-specific section on the Overview page (replaces generic workflow cards)
+ */
+function renderQAOverviewSection(container) {
+    container.innerHTML = `
+        <div class="qa-overview-section">
+            <div class="qa-overview-header">
+                <span class="qa-overview-title">QA Plan Generator</span>
+            </div>
+            <div class="qa-overview-desc">Generate test plans and test cases from Jira requirements</div>
+            <button class="kickstart-btn" id="qa-overview-btn" style="margin-top: 1rem">GENERATE QA PLAN</button>
+        </div>
+    `;
+    container.style.display = 'block';
+
+    const btn = document.getElementById('qa-overview-btn');
+    if (btn) {
+        btn.addEventListener('click', () => {
+            const modal = document.getElementById('qa-generate-modal');
+            if (modal) modal.classList.add('visible');
+        });
+    }
+}
+
+/**
+ * Initialize QA generate modal (called from app.js)
+ */
+function initQAGenerateModal() {
+    const modal = document.getElementById('qa-generate-modal');
+    if (!modal) return;
+
+    const closeBtn = modal.querySelector('.modal-close');
+    const cancelBtn = document.getElementById('qa-modal-cancel');
+    const submitBtn = document.getElementById('qa-modal-submit');
+
+    const close = () => modal.classList.remove('visible');
+    if (closeBtn) closeBtn.addEventListener('click', close);
+    if (cancelBtn) cancelBtn.addEventListener('click', close);
+
+    if (submitBtn) {
+        submitBtn.addEventListener('click', async () => {
+            const jiraInput = document.getElementById('qa-modal-jira');
+            const confluenceInput = document.getElementById('qa-modal-confluence');
+            const instructionsInput = document.getElementById('qa-modal-instructions');
+            const statusEl = document.getElementById('qa-modal-status');
+
+            const jiraRaw = jiraInput ? jiraInput.value.trim() : '';
+            if (!jiraRaw) {
+                if (statusEl) { statusEl.textContent = 'Jira tickets required'; statusEl.style.color = 'var(--color-accent)'; }
+                return;
+            }
+
+            // Parse Jira keys (reuse parseJiraInput if available)
+            const jiraKeys = typeof parseJiraInput === 'function' ? parseJiraInput(jiraRaw) : jiraRaw;
+            if (!jiraKeys) {
+                if (statusEl) { statusEl.textContent = 'No valid Jira keys found'; statusEl.style.color = 'var(--color-accent)'; }
+                return;
+            }
+
+            submitBtn.disabled = true;
+            submitBtn.querySelector('.btn-text').textContent = 'Generating...';
+            if (statusEl) { statusEl.textContent = 'Launching QA pipeline...'; statusEl.style.color = ''; }
+
+            try {
+                const response = await fetch(`${API_BASE}/api/qa/generate`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        jira_keys: jiraKeys,
+                        confluence_urls: confluenceInput ? confluenceInput.value.trim() : '',
+                        instructions: instructionsInput ? instructionsInput.value.trim() : ''
+                    })
+                });
+                const data = await response.json();
+                if (data.success) {
+                    if (typeof showToast === 'function') showToast('QA pipeline launched', 'success');
+                    close();
+                    // Clear form
+                    if (jiraInput) jiraInput.value = '';
+                    if (confluenceInput) confluenceInput.value = '';
+                    if (instructionsInput) instructionsInput.value = '';
+                    // Switch to QA tab to see the run
+                    if (typeof switchToTab === 'function') switchToTab('qa');
+                    if (typeof loadQARuns === 'function') await loadQARuns();
+                } else {
+                    if (statusEl) { statusEl.textContent = data.error || 'Launch failed'; statusEl.style.color = 'var(--color-accent)'; }
+                }
+            } catch (err) {
+                if (statusEl) { statusEl.textContent = err.message; statusEl.style.color = 'var(--color-accent)'; }
+            } finally {
+                submitBtn.disabled = false;
+                submitBtn.querySelector('.btn-text').textContent = 'Generate';
+            }
         });
     }
 }

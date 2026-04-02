@@ -3166,6 +3166,10 @@
     opacity: 0.4;
 }
 
+.qa-progress-step.fail {
+    color: var(--color-accent, #ff4444);
+}
+
 .qa-progress-icon {
     font-size: 10px;
     line-height: 1;
@@ -3588,3 +3592,26 @@
 }
 
 
+
+/* QA Overview section on Overview page */
+.qa-overview-section {
+    text-align: center;
+    padding: 30px 20px;
+}
+
+.qa-overview-header {
+    margin-bottom: 8px;
+}
+
+.qa-overview-title {
+    font-size: 14px;
+    font-weight: 700;
+    color: var(--color-primary);
+    letter-spacing: 0.05em;
+    font-family: var(--font-ui);
+}
+
+.qa-overview-desc {
+    font-size: 12px;
+    color: var(--color-text-dim);
+}

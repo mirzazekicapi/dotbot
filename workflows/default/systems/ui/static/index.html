@@ -1634,6 +1634,43 @@
         </div>
     </div>
 
+    <!-- QA Generate Modal -->
+    <div class="modal-overlay" id="qa-generate-modal">
+        <div class="modal">
+            <div class="modal-header">
+                <h2 class="modal-title">Generate QA Plan</h2>
+                <button class="modal-close"><!-- Close --></button>
+            </div>
+            <div class="modal-body">
+                <div class="task-create-form">
+                    <div class="form-group">
+                        <label class="form-label">Jira Tickets <span style="color: var(--color-accent)">*</span></label>
+                        <input type="text" class="form-input" id="qa-modal-jira" placeholder="PROJ-123, PROJ-456 or paste full URLs" />
+                        <div class="form-hint">Enter one or more Jira issue keys, comma-separated (required)</div>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Confluence Pages</label>
+                        <textarea class="form-textarea" id="qa-modal-confluence" rows="2" placeholder="https://site.atlassian.net/wiki/spaces/..."></textarea>
+                        <div class="form-hint">Enter Confluence page URLs, one per line (optional)</div>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Additional Instructions</label>
+                        <textarea class="form-textarea" id="qa-modal-instructions" rows="3" placeholder="Focus on API validation, include negative test cases..."></textarea>
+                        <div class="form-hint">Free-text guidance for the QA plan generation (optional)</div>
+                    </div>
+                    <div class="form-hint" id="qa-modal-status" style="min-height: 16px;"></div>
+                </div>
+            </div>
+            <div class="modal-footer task-create-footer">
+                <button class="ctrl-btn" id="qa-modal-cancel">Cancel</button>
+                <button class="ctrl-btn primary" id="qa-modal-submit">
+                    <span class="btn-text">Generate</span>
+                    <span class="btn-loading" style="display: none;">Launching...</span>
+                </button>
+            </div>
+        </div>
+    </div>
+
     <!-- Analyse Project Modal -->
     <div class="modal-overlay" id="analyse-modal">
         <div class="modal modal-wide">

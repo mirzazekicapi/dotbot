@@ -887,6 +887,36 @@ if (Test-Path $mcpJsonPath) {
     Write-Success "Created .mcp.json"
 }
 
+# Merge MCP servers declared by installed workflows into .mcp.json
+$wfDir = Join-Path $BotDir "workflows"
+if (Test-Path $wfDir) {
+    Get-ChildItem $wfDir -Directory | ForEach-Object {
+        $wfManifest = Read-WorkflowManifest -WorkflowDir $_.FullName
+        if ($wfManifest.mcp_servers -and ($wfManifest.mcp_servers.Count -gt 0 -or ($wfManifest.mcp_servers.PSObject -and $wfManifest.mcp_servers.PSObject.Properties.Count -gt 0))) {
+            $added = Merge-McpServers -McpJsonPath $mcpJsonPath -WorkflowServers $wfManifest.mcp_servers
+            if ($added -gt 0) {
+                Write-Host "    Merged $added MCP server(s) from $($_.Name) into .mcp.json" -ForegroundColor Gray
+            }
+        }
+        # Remove MCP servers the workflow declares as unused
+        $toRemove = if ($wfManifest -is [System.Collections.IDictionary]) { $wfManifest['remove_mcp_servers'] } else { $wfManifest.remove_mcp_servers }
+        if ($toRemove -and $toRemove.Count -gt 0) {
+            $mcpCfg = Get-Content $mcpJsonPath -Raw | ConvertFrom-Json
+            $removedCount = 0
+            foreach ($name in @($toRemove)) {
+                if ($mcpCfg.mcpServers.PSObject.Properties.Name -contains $name) {
+                    $mcpCfg.mcpServers.PSObject.Properties.Remove($name)
+                    $removedCount++
+                }
+            }
+            if ($removedCount -gt 0) {
+                $mcpCfg | ConvertTo-Json -Depth 5 | Set-Content -Path $mcpJsonPath -Encoding UTF8
+                Write-Host "    Removed $removedCount unused MCP server(s) per $($_.Name) workflow" -ForegroundColor Gray
+            }
+        }
+    }
+}
+
 # ---------------------------------------------------------------------------
 # Set up MCP for Codex and Gemini CLIs (if installed)
 # ---------------------------------------------------------------------------

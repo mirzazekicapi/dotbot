@@ -514,6 +514,7 @@ function Get-NextWorkflowTask {
                         skip_worktree = $content.skip_worktree
                         workflow = $content.workflow
                         model = $content.model
+                        prompt = $content.prompt
                     }
                     if ($Verbose.IsPresent) {
                         $taskObj.description = $content.description
