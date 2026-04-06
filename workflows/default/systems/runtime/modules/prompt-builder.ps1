@@ -138,6 +138,28 @@ function Build-TaskPrompt {
     }
     $prompt = $prompt -replace '\{\{QUESTIONS_RESOLVED\}\}', $questionsResolved
 
+    # Replace {output_directory} with the workflow run output path
+    $outputDir = ""
+    if ($Task.workflow) {
+        $outputDir = ".bot/workspace/product/qa-runs/$($Task.workflow)"
+    }
+    $prompt = $prompt -replace '\{output_directory\}', $outputDir
+
+    # Replace {knowledge_base_path} from QA settings
+    $kbPath = ""
+    if ($global:DotbotProjectRoot) {
+        $kbSettingsPath = Join-Path $global:DotbotProjectRoot ".bot\defaults\settings.default.json"
+        if (Test-Path $kbSettingsPath) {
+            try {
+                $kbSettings = Get-Content $kbSettingsPath -Raw | ConvertFrom-Json
+                if ($kbSettings.qa -and $kbSettings.qa.knowledge_base_path) {
+                    $kbPath = $kbSettings.qa.knowledge_base_path
+                }
+            } catch {}
+        }
+    }
+    $prompt = $prompt -replace '\{knowledge_base_path\}', $kbPath
+
     # Add steering protocol include
     $steeringProtocolPath = Join-Path $PSScriptRoot "..\..\prompts\workflows\92-steering-protocol.include.md"
     $steeringProtocol = ""

@@ -25,12 +25,6 @@ async function initQATab() {
         return;
     }
 
-    // Wire up Generate button
-    const generateBtn = document.getElementById('qa-generate-btn');
-    if (generateBtn) {
-        generateBtn.addEventListener('click', handleQAGenerate);
-    }
-
     // Back button is wired dynamically via onclick in showRunDetail/showRunDocument
     const backBtn = document.getElementById('qa-back-btn');
     if (backBtn) backBtn.onclick = () => showRunList();
@@ -68,6 +62,9 @@ async function loadQARuns() {
             runList.appendChild(card);
         }
 
+        // Render knowledge base in sidebar
+        renderKBSidebar(data.knowledge_base);
+
         // Start polling if any run is processing
         const hasActive = runs.some(r => r.status === 'processing');
         if (hasActive) {
@@ -76,6 +73,138 @@ async function loadQARuns() {
     } catch (e) {
         console.error('Failed to load QA runs:', e);
     }
+}
+
+/**
+ * Render knowledge base overview in sidebar
+ */
+let cachedKBData = null;
+
+function renderKBSidebar(kb) {
+    cachedKBData = kb;
+    const sidebar = document.getElementById('qa-sidebar-content');
+    if (!sidebar) return;
+
+    let html = '<div class="qa-kb-sidebar">';
+    html += '<div class="qa-subcards-section-header">Knowledge Base</div>';
+
+    if (!kb || !kb.configured) {
+        html += '<div class="qa-kb-status dim"><span class="qa-kb-dot dim"></span> Not configured</div>';
+        html += '</div>';
+        sidebar.innerHTML = html;
+        return;
+    }
+
+    if (!kb.valid) {
+        html += '<div class="qa-kb-status warn"><span class="qa-kb-dot warn"></span> Path not found</div>';
+        html += '</div>';
+        sidebar.innerHTML = html;
+        return;
+    }
+
+    html += `<div class="qa-kb-status ok"><span class="qa-kb-dot ok"></span> Connected &middot; ${kb.project_count} project${kb.project_count !== 1 ? 's' : ''}</div>`;
+
+    // Per-project rows
+    for (const p of (kb.projects || [])) {
+        const checks = [];
+        if (p.has_knowledge) checks.push('Knowledge');
+        if (p.skill_count > 0) checks.push(`${p.skill_count} Skills`);
+        if (p.has_agent) checks.push('Agent');
+        const histLabel = `${p.history_count} History`;
+
+        html += `<div class="qa-kb-project" data-project-id="${p.id}">`;
+        html += `<div class="qa-kb-project-name">${p.id}</div>`;
+        html += `<div class="qa-kb-project-meta">`;
+        for (const c of checks) {
+            html += `<span class="qa-kb-check ok">${c}</span>`;
+        }
+        html += `<span class="qa-kb-check ${p.history_count > 0 ? 'ok' : 'dim'}">${histLabel}</span>`;
+        html += `</div></div>`;
+    }
+
+    // Shared
+    const sh = kb.shared || {};
+    if (sh.standards_count > 0 || sh.templates_count > 0) {
+        const parts = [];
+        if (sh.standards_count > 0) parts.push(`${sh.standards_count} standard${sh.standards_count !== 1 ? 's' : ''}`);
+        if (sh.templates_count > 0) parts.push(`${sh.templates_count} template${sh.templates_count !== 1 ? 's' : ''}`);
+        html += `<div class="qa-kb-shared">Shared: ${parts.join(' &middot; ')}</div>`;
+    }
+
+    html += '</div>';
+    sidebar.innerHTML = html;
+
+    // Wire project clicks to modal
+    sidebar.querySelectorAll('.qa-kb-project').forEach(el => {
+        el.addEventListener('click', () => {
+            const projectId = el.dataset.projectId;
+            const project = (kb.projects || []).find(p => p.id === projectId);
+            if (project) showKBProjectModal(project, kb.path);
+        });
+    });
+}
+
+/**
+ * Show modal with full project details from knowledge base
+ */
+function showKBProjectModal(project, kbPath) {
+    // Remove existing modal
+    const existing = document.getElementById('qa-kb-modal');
+    if (existing) existing.remove();
+
+    const modal = document.createElement('div');
+    modal.id = 'qa-kb-modal';
+    modal.className = 'qa-kb-modal-overlay';
+
+    let html = '<div class="qa-kb-modal">';
+    html += `<div class="qa-kb-modal-header">`;
+    html += `<span class="qa-kb-modal-title">${project.id}</span>`;
+    html += `<button class="qa-kb-modal-close">&times;</button>`;
+    html += `</div>`;
+    html += '<div class="qa-kb-modal-body">';
+
+    // Knowledge
+    html += '<div class="qa-kb-modal-section">';
+    html += `<div class="qa-kb-modal-label">Application Knowledge</div>`;
+    html += `<div class="qa-kb-modal-value">${project.has_knowledge ? '<span class="ok">&#10003; Populated</span>' : '<span class="dim">Not populated</span>'}</div>`;
+    html += `<div class="qa-kb-modal-path">projects/${project.id}/knowledge/application-summary.md</div>`;
+    html += '</div>';
+
+    // Skills
+    html += '<div class="qa-kb-modal-section">';
+    html += `<div class="qa-kb-modal-label">Skills (${project.skill_count})</div>`;
+    for (const skill of (project.skills || [])) {
+        html += `<div class="qa-kb-modal-value">&#10003; ${skill}</div>`;
+        html += `<div class="qa-kb-modal-path">projects/${project.id}/skills/${skill}/SKILL.md</div>`;
+    }
+    html += '</div>';
+
+    // Agent
+    html += '<div class="qa-kb-modal-section">';
+    html += `<div class="qa-kb-modal-label">Agent</div>`;
+    html += `<div class="qa-kb-modal-value">${project.has_agent ? '<span class="ok">&#10003; Defined</span>' : '<span class="dim">Not defined</span>'}</div>`;
+    html += `<div class="qa-kb-modal-path">projects/${project.id}/agents/qa-tester.md</div>`;
+    html += '</div>';
+
+    // History
+    html += '<div class="qa-kb-modal-section">';
+    html += `<div class="qa-kb-modal-label">Historical Test Cases (${project.history_count})</div>`;
+    if (project.history_count === 0) {
+        html += `<div class="qa-kb-modal-value dim">No historical test cases yet</div>`;
+    } else {
+        html += `<div class="qa-kb-modal-value">${project.history_count} file${project.history_count !== 1 ? 's' : ''}</div>`;
+    }
+    html += `<div class="qa-kb-modal-path">projects/${project.id}/history/</div>`;
+    html += '</div>';
+
+    html += '</div></div>';
+    modal.innerHTML = html;
+
+    document.body.appendChild(modal);
+
+    // Close handlers
+    modal.querySelector('.qa-kb-modal-close').addEventListener('click', () => modal.remove());
+    modal.addEventListener('click', (e) => { if (e.target === modal) modal.remove(); });
 }
 
 /**
@@ -90,10 +219,6 @@ function createRunCard(run) {
         : run.status === 'completed' ? 'Completed'
         : run.status === 'failed' ? 'Failed'
         : run.status;
-
-    const statsText = run.status === 'completed'
-        ? ` · ${run.scenario_count || '?'} scenarios · ${run.test_case_count || '?'} cases`
-        : '';
 
     const timeText = formatTimeAgo(run.created_at);
 
@@ -115,7 +240,6 @@ function createRunCard(run) {
         </div>
         <div class="qa-run-meta">
             <span class="qa-run-status ${run.status}">${statusLabel}</span>
-            <span class="qa-run-stats">${statsText}</span>
             <span class="qa-run-time">${timeText}</span>
         </div>
     `;
@@ -516,10 +640,22 @@ function renderArtifactCards(data) {
             if (!hasPlan && !hasCases) continue;
 
             const badge = sys.jira_project ? ` <span class="qa-system-badge">${escapeHtml(sys.jira_project)}</span>` : '';
-            const tcCount = hasCases ? sys.test_cases.length : 0;
-            const tcBadge = tcCount > 0 ? `<span class="qa-system-tc-count">${tcCount} TC</span>` : '';
+            // Count scenarios from test plan and test cases from test case content
+            let sysScCount = 0;
+            let sysTcCount = 0;
+            if (sys.test_plan) {
+                const scMatches = sys.test_plan.match(/\b(I-\d+|E-\d+|UAT-\d+)\b/g);
+                if (scMatches) sysScCount = [...new Set(scMatches)].length;
+            }
+            if (hasCases) {
+                for (const tc of sys.test_cases) {
+                    const tcMatches = tc.content.match(/\bTC-(I|E|UAT)-\d+/g);
+                    if (tcMatches) sysTcCount += new Set(tcMatches).size;
+                }
+            }
+            const countBadge = (sysScCount > 0 || sysTcCount > 0) ? `<span class="qa-system-tc-count">${sysScCount} SC / ${sysTcCount} TC</span>` : '';
             html += '<div class="qa-system-group">';
-            html += `<div class="qa-system-header"><span class="qa-system-collapse">&#9660;</span><span class="qa-system-name">${escapeHtml(sys.name)}</span>${badge}${tcBadge}</div>`;
+            html += `<div class="qa-system-header"><span class="qa-system-collapse">&#9660;</span><span class="qa-system-name">${escapeHtml(sys.name)}</span>${badge}${countBadge}</div>`;
 
             if (hasPlan) {
                 html += `<div class="qa-subcard" data-doc="sys:${escapeHtml(sys.id)}:test-plan">
@@ -585,6 +721,18 @@ function renderArtifactCards(data) {
             if (group) group.classList.toggle('collapsed');
         });
     });
+
+    // Render Actions in sidebar
+    const sidebar = document.getElementById('qa-sidebar-content');
+    if (sidebar) {
+        let actionsHtml = '<div class="qa-subcards">';
+        actionsHtml += '<div class="qa-subcards-section-header">Actions</div>';
+        actionsHtml += '<div class="qa-subcard qa-subcard-disabled"><div class="qa-subcard-icon qa-icon-action">&#x1F4CB;</div><div class="qa-subcard-info"><div class="qa-subcard-title">Add Test Plans to Jira</div><div class="qa-subcard-desc">Coming soon</div></div></div>';
+        actionsHtml += '<div class="qa-subcard qa-subcard-disabled"><div class="qa-subcard-icon qa-icon-action">&#x2B06;</div><div class="qa-subcard-info"><div class="qa-subcard-title">Export Test Cases to Jira</div><div class="qa-subcard-desc">Coming soon</div></div></div>';
+        actionsHtml += '<div class="qa-subcard qa-subcard-disabled"><div class="qa-subcard-icon qa-icon-action">&#x2699;</div><div class="qa-subcard-info"><div class="qa-subcard-title">Generate Test Automation</div><div class="qa-subcard-desc">Coming soon</div></div></div>';
+        actionsHtml += '</div>';
+        sidebar.innerHTML = actionsHtml;
+    }
 }
 
 /**
@@ -637,7 +785,8 @@ function renderCoverage(data) {
     html += `<div class="qa-coverage-track"><div class="qa-coverage-fill ${quality}" style="width:${pct}%"></div></div>`;
     html += `<span class="qa-coverage-value ${quality}">${scenarioCount} scenarios · ${testCaseCount} cases</span>`;
     if (systemCount > 0) {
-        html += `<span class="qa-coverage-label" style="margin-left:8px">${systemCount} systems</span>`;
+        const systemNames = (data.systems || []).filter(s => s.test_plan).map(s => s.name).join(', ');
+        html += `<span class="qa-coverage-label" style="margin-left:8px">${systemCount} systems: ${systemNames}</span>`;
     }
 
     bar.innerHTML = html;
@@ -652,26 +801,35 @@ async function rerunQA(runData) {
     const jiraKeys = runData.jira_keys;
     if (!jiraKeys) return;
 
-    // Pre-fill the sidebar form
-    const jiraInput = document.getElementById('qa-jira-keys');
-    const confluenceInput = document.getElementById('qa-confluence-urls');
-    const instructionsInput = document.getElementById('qa-instructions');
-
-    if (jiraInput) jiraInput.value = jiraKeys;
-    // Fetch run metadata for confluence_urls and instructions
+    // Re-run directly via API with same inputs
     try {
+        let confluenceUrls = '';
+        let instructions = '';
         const res = await fetch(`${API_BASE}/api/qa/runs`);
         const data = await res.json();
         const run = (data.runs || []).find(r => r.jira_keys === jiraKeys);
         if (run) {
-            if (confluenceInput && run.confluence_urls) confluenceInput.value = run.confluence_urls;
-            if (instructionsInput && run.instructions) instructionsInput.value = run.instructions;
+            confluenceUrls = run.confluence_urls || '';
+            instructions = run.instructions || '';
         }
-    } catch (e) {}
 
-    // Switch back to run list and trigger generation
-    showRunList();
-    handleQAGenerate();
+        const response = await fetch(`${API_BASE}/api/qa/generate`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ jira_keys: jiraKeys, confluence_urls: confluenceUrls, instructions: instructions })
+        });
+        const result = await response.json();
+        if (result.success) {
+            showToast('QA pipeline re-launched', 'success');
+            showRunList();
+            await loadQARuns();
+            startQAPoll();
+        } else {
+            showToast(result.error || 'Re-run failed', 'error');
+        }
+    } catch (error) {
+        showToast(error.message, 'error');
+    }
 }
 
 /**
@@ -911,7 +1069,7 @@ function showRunDocument(docKey) {
         detailContent.scrollTop = 0;
     }
 
-    // Update back button to return to sub-card overview
+    // Update back button to return to sub-card overview (restores Actions in sidebar)
     backBtn.onclick = (e) => {
         e.preventDefault();
         if (currentRunId) {
@@ -933,9 +1091,13 @@ function showRunList() {
     const runList = document.getElementById('qa-run-list');
     const runDetail = document.getElementById('qa-run-detail');
     const backBtn = document.getElementById('qa-back-btn');
+    const sidebar = document.getElementById('qa-sidebar-content');
 
     if (runList) runList.style.display = '';
     if (runDetail) runDetail.style.display = 'none';
+    // Restore KB sidebar
+    if (cachedKBData) renderKBSidebar(cachedKBData);
+    else if (sidebar) sidebar.innerHTML = '';
     // Reset back button to default (go to run list)
     if (backBtn) backBtn.onclick = () => showRunList();
 }
@@ -1056,42 +1218,43 @@ function escapeHtml(str) {
  * Build table of contents from headings in the document
  */
 function buildTOC(contentEl) {
-    const toc = document.getElementById('qa-toc');
-    const tocList = document.getElementById('qa-toc-list');
-    if (!toc || !tocList || !contentEl) return;
+    const sidebar = document.getElementById('qa-sidebar-content');
+    if (!sidebar || !contentEl) return;
 
     const headings = contentEl.querySelectorAll('h1, h2, h3');
     if (headings.length < 3) {
-        toc.style.display = 'none';
+        sidebar.innerHTML = '';
         return;
     }
 
-    tocList.innerHTML = '';
+    let html = '<div class="qa-toc-title">Contents</div><div class="qa-toc-list">';
     headings.forEach((h, i) => {
         const id = `qa-heading-${i}`;
         h.id = id;
-
         const level = parseInt(h.tagName.substring(1));
-        const item = document.createElement('a');
-        item.className = `qa-toc-item level-${level}`;
-        item.textContent = h.textContent;
+        html += `<a class="qa-toc-item level-${level}" data-heading-idx="${i}">${h.textContent}</a>`;
+    });
+    html += '</div>';
+    sidebar.innerHTML = html;
+
+    // Wire click handlers
+    sidebar.querySelectorAll('.qa-toc-item').forEach(item => {
         item.onclick = (e) => {
             e.preventDefault();
-            h.scrollIntoView({ behavior: 'smooth', block: 'start' });
-            tocList.querySelectorAll('.qa-toc-item').forEach(t => t.classList.remove('active'));
+            const idx = item.dataset.headingIdx;
+            const h = contentEl.querySelector(`#qa-heading-${idx}`);
+            if (h) h.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            sidebar.querySelectorAll('.qa-toc-item').forEach(t => t.classList.remove('active'));
             item.classList.add('active');
         };
-        tocList.appendChild(item);
     });
-
-    toc.style.display = '';
 
     // Highlight current section on scroll
     const observer = new IntersectionObserver((entries) => {
         entries.forEach(entry => {
             if (entry.isIntersecting) {
                 const id = entry.target.id;
-                tocList.querySelectorAll('.qa-toc-item').forEach((item, idx) => {
+                sidebar.querySelectorAll('.qa-toc-item').forEach((item, idx) => {
                     item.classList.toggle('active', `qa-heading-${idx}` === id);
                 });
             }

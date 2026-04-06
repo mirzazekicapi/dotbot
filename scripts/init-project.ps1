@@ -836,7 +836,20 @@ if (Test-Path $initScript) {
 # ---------------------------------------------------------------------------
 $mcpJsonPath = Join-Path $ProjectDir ".mcp.json"
 if (Test-Path $mcpJsonPath) {
-    Write-DotbotWarning ".mcp.json already exists -- skipping"
+    # Ensure dotbot server is present (may have been created early by workflow MCP merge)
+    $existingMcp = Get-Content $mcpJsonPath -Raw | ConvertFrom-Json
+    if (-not ($existingMcp.mcpServers.PSObject.Properties.Name -contains "dotbot")) {
+        $existingMcp.mcpServers | Add-Member -NotePropertyName "dotbot" -NotePropertyValue ([PSCustomObject][ordered]@{
+            type    = "stdio"
+            command = "pwsh"
+            args    = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", ".bot\systems\mcp\dotbot-mcp.ps1")
+            env     = @{}
+        }) -Force
+        $existingMcp | ConvertTo-Json -Depth 5 | Set-Content -Path $mcpJsonPath -Encoding UTF8
+        Write-Status "Added dotbot MCP server to existing .mcp.json"
+    } else {
+        Write-DotbotWarning ".mcp.json already exists -- skipping"
+    }
 } else {
     Write-Status "Creating .mcp.json (dotbot + Context7 + Playwright + Serena)"
 

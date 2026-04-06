@@ -12,19 +12,19 @@ Read from the current run directory:
 ## Output
 
 ### Multi-system tickets
-For each system:
-- `{output_directory}/systems/{system-id}/test-cases/{group-slug}.md`
+One consolidated test-cases file per system:
+- `{output_directory}/systems/{system-id}/test-cases.md`
 
 Plus cross-system E2E:
 - `{output_directory}/test-cases/cross-system-e2e.md`
 
 ### Single-system tickets
 All test cases in one consolidated file:
-- `{output_directory}/test-cases/test-cases.md`
+- `{output_directory}/test-cases.md`
 
 ## Instructions
 
-Apply the `write-test-cases` skill (read `.bot/prompts/skills/write-test-cases/SKILL.md`).
+Apply the `write-test-cases` skill (read `.bot/workflows/qa/prompts/skills/write-test-cases/SKILL.md`).
 
 ### For multi-system tickets
 
@@ -32,7 +32,8 @@ For each system detected:
 1. Read that system's `test-plan.md`
 2. Generate detailed test cases with: preconditions, step-by-step procedure, expected results, test data, priority, tags
 3. Tag each test case as automatable or manual-only
-4. Write to: `{output_directory}/systems/{system-id}/test-cases/{group-slug}.md`
+4. Write ALL test cases for that system into ONE file: `{output_directory}/systems/{system-id}/test-cases.md`
+5. Organize test cases by functional group using `## H2` section headings (e.g., `## Eligibility`, `## Purchase Flow`, `## Regression`)
 
 **System boundary isolation — CRITICAL:**
 
@@ -57,8 +58,16 @@ Then generate **cross-system E2E test cases**:
 ### For single-system tickets
 
 Generate all test cases in a **single file**:
-- All scenario groups organized by h2 headings within the file
-- Write to: `{output_directory}/test-cases/test-cases.md`
+- Organize test cases by functional group using `## H2` section headings
+- Write to: `{output_directory}/test-cases.md`
+
+## Knowledge Base (optional)
+
+If `{knowledge_base_path}` is not empty, for each system read the following files if they exist:
+- `{knowledge_base_path}/projects/{system-id}/skills/write-test-cases/SKILL.md` — project-specific test case patterns and conventions
+- `{knowledge_base_path}/projects/{system-id}/history/*.md` — historical test cases showing real test steps: where to click, how to navigate, what data to enter, correct UI labels and field names
+
+Use historical test cases as reference for writing accurate, detailed test steps. They show how users actually interact with each system.
 
 ## Anti-Patterns
 

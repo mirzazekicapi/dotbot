@@ -1643,7 +1643,59 @@ try {
                         }
                     }
 
-                    $content = @{ runs = $runs } | ConvertTo-Json -Depth 5 -Compress
+                    # Knowledge base status
+                    $kbStatus = @{ configured = $false; path = ""; valid = $false; project_count = 0; projects = @(); shared = @{ standards_count = 0; templates_count = 0 } }
+                    $kbSettingsPath = Join-Path $botRoot "defaults\settings.default.json"
+                    if (Test-Path $kbSettingsPath) {
+                        try {
+                            $kbSettings = Get-Content $kbSettingsPath -Raw | ConvertFrom-Json
+                            if ($kbSettings.qa -and $kbSettings.qa.knowledge_base_path) {
+                                $kbStatus.configured = $true
+                                $kbStatus.path = $kbSettings.qa.knowledge_base_path
+                                $kbRoot = $kbSettings.qa.knowledge_base_path
+                                if (Test-Path $kbRoot) {
+                                    $kbStatus.valid = $true
+                                    $kbProjectsDir = Join-Path $kbRoot "projects"
+                                    if (Test-Path $kbProjectsDir) {
+                                        $kbProjects = @()
+                                        foreach ($kbProjDir in @(Get-ChildItem $kbProjectsDir -Directory)) {
+                                            $projDir = $kbProjDir.FullName
+                                            $projId = $kbProjDir.Name
+                                            $skillNames = @()
+                                            $skillsDir = Join-Path $projDir "skills"
+                                            if (Test-Path $skillsDir) {
+                                                foreach ($skillDir in @(Get-ChildItem $skillsDir -Directory)) {
+                                                    if (Test-Path (Join-Path $skillDir.FullName "SKILL.md")) { $skillNames += $skillDir.Name }
+                                                }
+                                            }
+                                            $histCount = 0
+                                            $histDir = Join-Path $projDir "history"
+                                            if (Test-Path $histDir) { $histCount = @(Get-ChildItem $histDir -Filter "*.md" -ErrorAction SilentlyContinue).Count }
+                                            $kbProjects += @{
+                                                id = $projId
+                                                has_knowledge = (Test-Path (Join-Path $projDir "knowledge\application-summary.md"))
+                                                skill_count = $skillNames.Count
+                                                skills = $skillNames
+                                                has_agent = (Test-Path (Join-Path $projDir "agents\qa-tester.md"))
+                                                history_count = $histCount
+                                            }
+                                        }
+                                        $kbStatus.projects = $kbProjects
+                                        $kbStatus.project_count = $kbProjects.Count
+                                    }
+                                    # Shared
+                                    $sharedStd = Join-Path $kbRoot "shared\standards"
+                                    $sharedTpl = Join-Path $kbRoot "shared\templates"
+                                    $kbStatus.shared = @{
+                                        standards_count = if (Test-Path $sharedStd) { @(Get-ChildItem $sharedStd -Filter "*.md" -ErrorAction SilentlyContinue).Count } else { 0 }
+                                        templates_count = if (Test-Path $sharedTpl) { @(Get-ChildItem $sharedTpl -Filter "*.md" -ErrorAction SilentlyContinue).Count } else { 0 }
+                                    }
+                                }
+                            }
+                        } catch {}
+                    }
+
+                    $content = @{ runs = $runs; knowledge_base = $kbStatus } | ConvertTo-Json -Depth 5 -Compress
                     break
                 }
 
@@ -1681,7 +1733,14 @@ try {
                             $uatPlan = Get-Content $uatPlanPath -Raw
                         }
 
-                        if (Test-Path $testCasesDir) {
+                        # Support consolidated test-cases.md (new) and test-cases/ directory (legacy)
+                        $testCasesFile = Join-Path $runOutputDir "test-cases.md"
+                        if (Test-Path $testCasesFile) {
+                            $testCases += @{
+                                name = "test-cases"
+                                content = (Get-Content $testCasesFile -Raw)
+                            }
+                        } elseif (Test-Path $testCasesDir) {
                             Get-ChildItem -Path $testCasesDir -Filter "*.md" -ErrorAction SilentlyContinue | ForEach-Object {
                                 $testCases += @{
                                     name = $_.BaseName
@@ -1731,8 +1790,15 @@ try {
                                         $sysUatPlan = Get-Content $sysUatPath -Raw
                                     }
 
+                                    # Support consolidated test-cases.md (new) and test-cases/ directory (legacy)
+                                    $sysCasesFile = Join-Path $sysDir "test-cases.md"
                                     $sysCasesDir = Join-Path $sysDir "test-cases"
-                                    if (Test-Path $sysCasesDir) {
+                                    if (Test-Path $sysCasesFile) {
+                                        $sysCases += @{
+                                            name = "test-cases"
+                                            content = (Get-Content $sysCasesFile -Raw)
+                                        }
+                                    } elseif (Test-Path $sysCasesDir) {
                                         Get-ChildItem -Path $sysCasesDir -Filter "*.md" -ErrorAction SilentlyContinue | ForEach-Object {
                                             $sysCases += @{
                                                 name = $_.BaseName

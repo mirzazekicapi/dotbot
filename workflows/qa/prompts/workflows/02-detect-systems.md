@@ -54,6 +54,10 @@ Write `{output_directory}/systems.json`:
 - `jira_key`: the specific child epic/issue key for this system (if known, otherwise empty string)
 - `lead_system`: the id of the primary/lead system (if detectable, otherwise null)
 
+## Knowledge Base (optional)
+
+If `{knowledge_base_path}` is not empty, read `{knowledge_base_path}/shared/standards/qa-standards.md` if it exists for system naming conventions and standards.
+
 ## Notes
 
 - Do not hardcode system names — detect dynamically from Jira data

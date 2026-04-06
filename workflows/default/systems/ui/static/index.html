@@ -390,26 +390,10 @@
                 <div class="context-panel hidden" data-context="qa">
                     <div class="sidebar-section">
                         <div class="sidebar-header">
-                            <span class="sidebar-title">&#9672; New QA Run</span>
+                            <span class="sidebar-title">&#9672; QA</span>
                         </div>
-                        <div class="sidebar-content qa-sidebar-form">
-                            <div class="qa-field">
-                                <label class="qa-label">Jira Tickets <span class="qa-required">*</span></label>
-                                <input type="text" id="qa-jira-keys" class="qa-input" placeholder="PROJ-123, PROJ-456" />
-                                <span class="qa-hint">Comma-separated issue keys</span>
-                            </div>
-                            <div class="qa-field">
-                                <label class="qa-label">Confluence</label>
-                                <textarea id="qa-confluence-urls" class="qa-textarea" rows="2" placeholder="Page URLs, one per line"></textarea>
-                            </div>
-                            <div class="qa-field">
-                                <label class="qa-label">Instructions</label>
-                                <textarea id="qa-instructions" class="qa-textarea" rows="3" placeholder="Additional guidance for QA plan..."></textarea>
-                            </div>
-                            <div class="qa-sidebar-actions">
-                                <button class="ctrl-btn primary" id="qa-generate-btn" style="width:100%">Generate QA Plan</button>
-                                <div class="qa-status" id="qa-status"></div>
-                            </div>
+                        <div class="sidebar-content" id="qa-sidebar-content">
+                            <!-- Populated by JS: artifact cards when run is selected -->
                         </div>
                     </div>
                 </div>
@@ -808,10 +792,6 @@
                                 <div class="qa-detail-body">
                                     <div class="qa-detail-content" id="qa-detail-content">
                                         <!-- Sub-cards or document view -->
-                                    </div>
-                                    <div class="qa-toc" id="qa-toc" style="display:none">
-                                        <div class="qa-toc-title">Contents</div>
-                                        <div class="qa-toc-list" id="qa-toc-list"></div>
                                     </div>
                                 </div>
                             </div>

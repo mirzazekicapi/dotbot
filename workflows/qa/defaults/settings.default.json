@@ -1,5 +1,6 @@
 {
   "qa": {
+    "knowledge_base_path": "",
     "test_repo_path": "",
     "test_framework_presets": {
       "playwright-ts": {
