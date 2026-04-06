@@ -1369,7 +1369,7 @@ try {
                                 @{
                                     name = "Fetch Jira Context [$runId]"
                                     type = "prompt_template"
-                                    prompt = "prompts/workflows/01-fetch-jira-context.md"
+                                    prompt = "recipes/prompts/01-fetch-jira-context.md"
                                     description = "Fetch Jira requirements, Confluence docs, and local product context for QA plan generation.`n`n$contextBlock"
                                     priority = 1
                                     on_failure = "halt"
@@ -1380,7 +1380,7 @@ try {
                                 @{
                                     name = "Detect Systems [$runId]"
                                     type = "prompt_template"
-                                    prompt = "prompts/workflows/02-detect-systems.md"
+                                    prompt = "recipes/prompts/02-detect-systems.md"
                                     description = "Identify affected systems from Jira data.`n`n$contextBlock"
                                     priority = 2
                                     on_failure = "halt"
@@ -1392,7 +1392,7 @@ try {
                                 @{
                                     name = "Generate Test Plan [$runId]"
                                     type = "prompt_template"
-                                    prompt = "prompts/workflows/03-generate-test-plan.md"
+                                    prompt = "recipes/prompts/03-generate-test-plan.md"
                                     description = "Generate the overall technical test plan with 14 sections.`n`n$contextBlock"
                                     priority = 3
                                     skip_analysis = $true
@@ -1403,7 +1403,7 @@ try {
                                 @{
                                     name = "Generate UAT Plan [$runId]"
                                     type = "prompt_template"
-                                    prompt = "prompts/workflows/04-generate-uat-plan.md"
+                                    prompt = "recipes/prompts/04-generate-uat-plan.md"
                                     description = "Generate UAT plan in business-friendly language for non-technical testers.`n`n$contextBlock"
                                     priority = 4
                                     skip_analysis = $true
@@ -1414,7 +1414,7 @@ try {
                                 @{
                                     name = "Generate Per-System Plans [$runId]"
                                     type = "prompt_template"
-                                    prompt = "prompts/workflows/05-generate-system-plans.md"
+                                    prompt = "recipes/prompts/05-generate-system-plans.md"
                                     description = "Generate per-system test plans for multi-system tickets. Skip if single system.`n`n$contextBlock"
                                     priority = 5
                                     skip_analysis = $true
@@ -1425,7 +1425,7 @@ try {
                                 @{
                                     name = "Generate Test Cases [$runId]"
                                     type = "prompt_template"
-                                    prompt = "prompts/workflows/06-generate-test-cases.md"
+                                    prompt = "recipes/prompts/06-generate-test-cases.md"
                                     description = "Generate detailed technical test cases per system.`n`n$contextBlock"
                                     priority = 6
                                     skip_analysis = $true
@@ -1435,7 +1435,7 @@ try {
                                 @{
                                     name = "Validate Coverage [$runId]"
                                     type = "prompt_template"
-                                    prompt = "prompts/workflows/07-validate-coverage.md"
+                                    prompt = "recipes/prompts/07-validate-coverage.md"
                                     description = "Validate traceability and write completion marker.`n`n$contextBlock"
                                     priority = 7
                                     skip_analysis = $true
@@ -1453,7 +1453,7 @@ try {
                             }
 
                             # Launch workflow execution for this run
-                            $launchResult = Start-ProcessLaunch -Type 'workflow' -WorkflowName $wfName -Continue $true -Description "QA: $jiraKeys"
+                            $launchResult = Start-ProcessLaunch -Type 'task-runner' -WorkflowName $wfName -Continue $true -Description "QA: $jiraKeys"
 
                             # Save run metadata
                             $runMeta = @{

@@ -95,7 +95,10 @@ if (Test-Path $envLocal) {
 # ---------------------------------------------------------------------------
 # 4. Validate test repo path (optional — for test automation workflow 06)
 # ---------------------------------------------------------------------------
-$settingsPath = Join-Path $ProjectDir ".bot" "defaults" "settings.default.json"
+$settingsPath = Join-Path $ProjectDir ".bot" "settings" "settings.default.json"
+if (-not (Test-Path $settingsPath)) {
+    $settingsPath = Join-Path $ProjectDir ".bot" "defaults" "settings.default.json"
+}
 if (Test-Path $settingsPath) {
     $settings = Get-Content $settingsPath -Raw | ConvertFrom-Json
 
@@ -103,7 +106,7 @@ if (Test-Path $settingsPath) {
     if (-not $testRepoPath) {
         Write-Host ""
         Write-DotbotWarning "qa.test_repo_path is not set (needed for test automation, not required for test plan generation)"
-        Write-Host "    Set it in: .bot/defaults/settings.default.json" -ForegroundColor Yellow
+        Write-Host "    Set it in: .bot/settings/settings.default.json" -ForegroundColor Yellow
         Write-Host "    Example: `"qa`": { `"test_repo_path`": `"C:/path/to/test-repo`" }" -ForegroundColor Gray
         Write-Host ""
     } elseif (-not (Test-Path $testRepoPath)) {

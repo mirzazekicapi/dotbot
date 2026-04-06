@@ -26,7 +26,10 @@ function Invoke-QaSyncTestRepo {
         }
 
         # Read QA settings
-        $settingsPath = Join-Path $solutionRoot '.bot' 'defaults' 'settings.default.json'
+        $settingsPath = Join-Path $solutionRoot '.bot' 'settings' 'settings.default.json'
+        if (-not (Test-Path $settingsPath)) {
+            $settingsPath = Join-Path $solutionRoot '.bot' 'defaults' 'settings.default.json'
+        }
         $userSettingsPath = Join-Path $solutionRoot '.bot' '.control' 'settings.json'
 
         $testRepoPath = $null
@@ -56,7 +59,7 @@ function Invoke-QaSyncTestRepo {
                 -Version "1.0.0" `
                 -Summary "Failed: qa.test_repo_path not configured." `
                 -Data @{} `
-                -Errors @((New-ErrorObject -Code "NOT_CONFIGURED" -Message "qa.test_repo_path is not set. Configure it in .bot/defaults/settings.default.json")) `
+                -Errors @((New-ErrorObject -Code "NOT_CONFIGURED" -Message "qa.test_repo_path is not set. Configure it in .bot/settings/settings.default.json")) `
                 -Source "qa-sync-test-repo" `
                 -DurationMs $duration `
                 -Host (Get-McpHost)

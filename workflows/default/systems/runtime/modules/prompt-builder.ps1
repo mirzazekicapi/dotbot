@@ -164,7 +164,7 @@ function Build-TaskPrompt {
     $prompt = $prompt -replace '\{knowledge_base_path\}', $kbPath
 
     # Add steering protocol include
-    $steeringProtocolPath = Join-Path $PSScriptRoot "..\..\prompts\workflows\92-steering-protocol.include.md"
+    $steeringProtocolPath = Join-Path $PSScriptRoot "..\..\recipes\prompts\92-steering-protocol.include.md"
     $steeringProtocol = ""
     if (Test-Path $steeringProtocolPath) {
         $steeringProtocol = Get-Content $steeringProtocolPath -Raw -ErrorAction SilentlyContinue

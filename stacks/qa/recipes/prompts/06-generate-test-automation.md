@@ -25,7 +25,7 @@ If either is missing, stop. Output a gap report:
 
 Action required:
 - Missing test cases? Run workflow 05 (generate-test-cases) first.
-- Missing test repo? Set qa.test_repo_path in .bot/defaults/settings.default.json
+- Missing test repo? Set qa.test_repo_path in .bot/settings/settings.default.json
 ```
 
 ## Execution Steps

@@ -113,7 +113,10 @@ if (Test-Path $envLocal) {
 # ---------------------------------------------------------------------------
 # 4. Validate test repo path (optional — for test automation workflow 06)
 # ---------------------------------------------------------------------------
-$settingsPath = Join-Path $ProjectDir ".bot" "defaults" "settings.default.json"
+$settingsPath = Join-Path $ProjectDir ".bot" "settings" "settings.default.json"
+if (-not (Test-Path $settingsPath)) {
+    $settingsPath = Join-Path $ProjectDir ".bot" "defaults" "settings.default.json"
+}
 if (Test-Path $settingsPath) {
     $settings = Get-Content $settingsPath -Raw | ConvertFrom-Json
 
@@ -121,7 +124,7 @@ if (Test-Path $settingsPath) {
     if (-not $testRepoPath) {
         Write-Host ""
         Write-DotbotWarning "qa.test_repo_path is not set (needed for test automation, not required for test plan generation)"
-        Write-Host "    Set it in: .bot/defaults/settings.default.json" -ForegroundColor Yellow
+        Write-Host "    Set it in: .bot/settings/settings.default.json" -ForegroundColor Yellow
         Write-Host "    Example: `"qa`": { `"test_repo_path`": `"C:/path/to/test-repo`" }" -ForegroundColor Gray
         Write-Host ""
     } elseif (-not (Test-Path $testRepoPath)) {
@@ -139,7 +142,7 @@ if (Test-Path $settingsPath) {
     if (-not $kbPath) {
         Write-Host ""
         Write-DotbotWarning "qa.knowledge_base_path is not set (optional — enhances test plans with project-specific knowledge)"
-        Write-Host "    Set it in: .bot/defaults/settings.default.json" -ForegroundColor Yellow
+        Write-Host "    Set it in: .bot/settings/settings.default.json" -ForegroundColor Yellow
         Write-Host "    Example: `"qa`": { `"knowledge_base_path`": `"C:/path/to/dotbot-qa-knowledge-base`" }" -ForegroundColor Gray
     } elseif (-not (Test-Path $kbPath)) {
         Write-DotbotWarning "qa.knowledge_base_path '$kbPath' does not exist"

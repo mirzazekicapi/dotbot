@@ -45,8 +45,8 @@ domain:
 
 tasks:
   - name: "Fetch Jira Context"
-    type: prompt
-    workflow: "01-fetch-jira-context.md"
+    type: prompt_template
+    prompt: "recipes/prompts/01-fetch-jira-context.md"
     outputs: ["qa-runs/jira-context.json"]
     commit:
       paths: ["workspace/product/qa-runs/"]
@@ -55,8 +55,8 @@ tasks:
     on_failure: halt
 
   - name: "Detect Systems"
-    type: prompt
-    workflow: "02-detect-systems.md"
+    type: prompt_template
+    prompt: "recipes/prompts/02-detect-systems.md"
     depends_on: ["Fetch Jira Context"]
     outputs: ["qa-runs/systems.json"]
     commit:
@@ -66,8 +66,8 @@ tasks:
     on_failure: halt
 
   - name: "Generate Test Plan"
-    type: prompt
-    workflow: "03-generate-test-plan.md"
+    type: prompt_template
+    prompt: "recipes/prompts/03-generate-test-plan.md"
     depends_on: ["Detect Systems"]
     outputs: ["qa-runs/test-plan.md"]
     commit:
@@ -76,8 +76,8 @@ tasks:
     priority: 3
 
   - name: "Generate UAT Plan"
-    type: prompt
-    workflow: "04-generate-uat-plan.md"
+    type: prompt_template
+    prompt: "recipes/prompts/04-generate-uat-plan.md"
     depends_on: ["Generate Test Plan"]
     outputs: ["qa-runs/uat-plan.md"]
     commit:
@@ -86,8 +86,8 @@ tasks:
     priority: 4
 
   - name: "Generate Per-System Plans"
-    type: prompt
-    workflow: "05-generate-system-plans.md"
+    type: prompt_template
+    prompt: "recipes/prompts/05-generate-system-plans.md"
     depends_on: ["Generate Test Plan"]
     condition: ".bot/workspace/product/qa-runs/systems.json"
     commit:
@@ -96,8 +96,8 @@ tasks:
     priority: 5
 
   - name: "Generate Test Cases"
-    type: prompt
-    workflow: "06-generate-test-cases.md"
+    type: prompt_template
+    prompt: "recipes/prompts/06-generate-test-cases.md"
     depends_on: ["Generate Per-System Plans", "Generate UAT Plan"]
     commit:
       paths: ["workspace/product/qa-runs/"]
@@ -105,8 +105,8 @@ tasks:
     priority: 6
 
   - name: "Validate Coverage"
-    type: prompt
-    workflow: "07-validate-coverage.md"
+    type: prompt_template
+    prompt: "recipes/prompts/07-validate-coverage.md"
     depends_on: ["Generate Test Cases"]
     outputs: ["qa-runs/pipeline-complete.json"]
     commit:
