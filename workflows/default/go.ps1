@@ -24,14 +24,34 @@ $BotDir = $PSScriptRoot
 $UIDir = Join-Path $BotDir "systems\ui"
 $ServerScript = Join-Path $UIDir "server.ps1"
 
-# Log startup to unified diagnostic log
+# Migrate legacy folder names if needed (defaults→settings, prompts→recipes, adrs→decisions)
+$oldDefaults = Join-Path $BotDir "defaults"
+$newSettings = Join-Path $BotDir "settings"
+if ((Test-Path $oldDefaults) -and -not (Test-Path $newSettings)) { Rename-Item $oldDefaults $newSettings }
+$oldInner = Join-Path $BotDir "prompts\workflows"
+if (Test-Path $oldInner) { Rename-Item $oldInner (Join-Path $BotDir "prompts\_prompts_tmp") }
+$oldPrompts = Join-Path $BotDir "prompts"
+$newRecipes = Join-Path $BotDir "recipes"
+if ((Test-Path $oldPrompts) -and -not (Test-Path $newRecipes)) {
+    Rename-Item $oldPrompts $newRecipes
+    $tmp = Join-Path $newRecipes "_prompts_tmp"
+    if (Test-Path $tmp) { Rename-Item $tmp (Join-Path $newRecipes "prompts") }
+}
+$oldAdrs = Join-Path $BotDir "workspace\adrs"
+$newDec = Join-Path $BotDir "workspace\decisions"
+if ((Test-Path $oldAdrs) -and -not (Test-Path $newDec)) { Rename-Item $oldAdrs $newDec }
+
+# Initialize structured logging
 $controlDir = Join-Path $BotDir ".control"
 if (-not (Test-Path $controlDir)) { New-Item -Path $controlDir -ItemType Directory -Force | Out-Null }
-$diagLog = Join-Path $controlDir "diag.log"
-"$(Get-Date -Format o) [STARTUP] go.ps1 launched. BotDir=$BotDir" | Add-Content -Path $diagLog
+$logsDir = Join-Path $controlDir "logs"
+if (-not (Test-Path $logsDir)) { New-Item -Path $logsDir -ItemType Directory -Force | Out-Null }
+Import-Module "$PSScriptRoot\systems\runtime\modules\DotBotLog.psm1" -Force -DisableNameChecking
+Initialize-DotBotLog -LogDir $logsDir -ControlDir $controlDir -ProjectRoot (Split-Path $BotDir -Parent)
+Write-BotLog -Level Info -Message "go.ps1 launched. BotDir=$BotDir"
 
-Write-Host "  Starting .bot UI..." -ForegroundColor Cyan
-Write-Host ""
+Write-Status "  Starting .bot UI..." -Type Info
+Write-BotLog -Level Debug -Message ""
 
 # Check if a server is already running for this project
 $uiPortFile = Join-Path $controlDir "ui-port"
@@ -47,33 +67,33 @@ if (Test-Path $uiPortFile) {
                 $serverProjectRoot = $serverInfo.project_root
                 if ($serverProjectRoot -and ($serverProjectRoot -ne $thisProjectRoot)) {
                     # Different project's server on this port — start a new instance
-                    Write-Host "  Port $existingPort is used by a different project ($serverProjectRoot)" -ForegroundColor Yellow
-                    Write-Host "  Starting a new server instance..." -ForegroundColor Yellow
+                    Write-BotLog -Level Warn -Message "  Port $existingPort is used by a different project ($serverProjectRoot)"
+                    Write-BotLog -Level Warn -Message "  Starting a new server instance..."
                 } else {
                     $url = "http://localhost:$existingPort"
-                    Write-Host "  Server already running on port $existingPort" -ForegroundColor Green
+                    Write-Status "  Server already running on port $existingPort" -Type Success
                     if (Get-Command Open-Url -ErrorAction SilentlyContinue) {
                         Open-Url $url
                     } else {
                         Start-Process $url
                     }
-                    Write-Host "  Browser opened at $url" -ForegroundColor Green
-                    Write-Host ""
+                    Write-Status "  Browser opened at $url" -Type Success
+                    Write-BotLog -Level Debug -Message ""
                     exit 0
                 }
             }
         } catch {
-            # Server not responding — stale port file, continue with fresh start
+            Write-BotLog -Level Debug -Message "Server not responding on stale port — continuing with fresh start" -Exception $_
         }
     }
 }
 
 # Check if server script exists
 if (-not (Test-Path $ServerScript)) {
-    Write-Host "  Error: UI server script not found at:" -ForegroundColor Red
-    Write-Host "   $ServerScript" -ForegroundColor Red
-    Write-Host ""
-    Write-Host "Please ensure the .bot/systems/ui/ directory exists and contains server.ps1" -ForegroundColor Yellow
+    Write-BotLog -Level Error -Message "  Error: UI server script not found at:"
+    Write-BotLog -Level Error -Message "   $ServerScript"
+    Write-BotLog -Level Debug -Message ""
+    Write-BotLog -Level Warn -Message "Please ensure the .bot/systems/ui/ directory exists and contains server.ps1"
     exit 1
 }
 
@@ -85,9 +105,9 @@ if (Test-Path $PlatformModule) {
 }
 
 # Start the UI server
-Write-Host "  Starting UI server..." -ForegroundColor Yellow
-Write-Host "   Location: $UIDir" -ForegroundColor DarkGray
-Write-Host ""
+Write-Status "  Starting UI server..." -Type Info
+Write-BotLog -Level Debug -Message "   Location: $UIDir"
+Write-BotLog -Level Debug -Message ""
 
 # Build server arguments
 $serverArgs = @("-File", "`"$ServerScript`"")
@@ -116,7 +136,7 @@ for ($i = 0; $i -lt 20; $i++) {
 
 if ($resolvedPort -eq 0) {
     $resolvedPort = if ($Port -gt 0) { $Port } else { 8686 }
-    Write-Host "  Could not detect server port, assuming $resolvedPort" -ForegroundColor Yellow
+    Write-BotLog -Level Warn -Message "  Could not detect server port, assuming $resolvedPort"
 }
 
 $url = "http://localhost:$resolvedPort"
@@ -126,6 +146,6 @@ if (Get-Command Open-Url -ErrorAction SilentlyContinue) {
     Start-Process $url
 }
 
-Write-Host "  Browser opened at $url" -ForegroundColor Green
-Write-Host "   Server is running in a separate window (port $resolvedPort)." -ForegroundColor DarkGray
-Write-Host ""
+Write-Status "  Browser opened at $url" -Type Success
+Write-BotLog -Level Debug -Message "   Server is running in a separate window (port $resolvedPort)."
+Write-BotLog -Level Debug -Message ""

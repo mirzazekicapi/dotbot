@@ -70,11 +70,17 @@ $global:DotbotProjectRoot = $projectRoot
 $staticRoot = Join-Path $PSScriptRoot "static"
 $controlDir = Join-Path $botRoot ".control"
 
-# Import DotBotTheme
+# Import DotBotLog and DotBotTheme
+if (-not (Test-Path $controlDir)) { New-Item -Path $controlDir -ItemType Directory -Force | Out-Null }
+$dotBotLogPath = Join-Path $botRoot "systems\runtime\modules\DotBotLog.psm1"
+if (Test-Path $dotBotLogPath) {
+    $logsDir = Join-Path $controlDir "logs"
+    if (-not (Test-Path $logsDir)) { New-Item -Path $logsDir -ItemType Directory -Force | Out-Null }
+    Import-Module $dotBotLogPath -Force -DisableNameChecking
+    Initialize-DotBotLog -LogDir $logsDir -ControlDir $controlDir -ProjectRoot $projectRoot
+}
 Import-Module (Join-Path $botRoot "systems\runtime\modules\DotBotTheme.psm1") -Force
 $t = Get-DotBotTheme
-
-if (-not (Test-Path $controlDir)) { New-Item -Path $controlDir -ItemType Directory -Force | Out-Null }
 
 # Write selected port so go.ps1 (and other tools) can discover it
 $Port.ToString() | Set-Content (Join-Path $controlDir "ui-port") -NoNewline -Encoding UTF8
@@ -127,8 +133,8 @@ $script:manifestCache = @{}
 # Task file cache: keyed by file path → @{ workflow; lastModified }
 $script:taskFileCache = @{}
 
-# Clear screen
-Clear-Host
+# Clear screen (may fail when running without a console, e.g. redirected output)
+try { Clear-Host } catch { Write-BotLog -Level Debug -Message "Clear-Host not available" -Exception $_ }
 
 # Display banner
 Write-Card -Title "Dotbot Control Panel" -Width 70 -BorderStyle Rounded -BorderColor Label -TitleColor Label -Lines @(
@@ -172,7 +178,7 @@ Write-Phosphor "› Starting listener..." -Color Cyan -NoNewline
 try {
     $listener.Start()
     Write-Phosphor " ✓" -Color Green
-    Write-Host "$($t.Green)●$($t.Reset) $($t.Label)Press Ctrl+C to stop$($t.Reset)"
+    Write-BotLog -Level Info -Message "Press Ctrl+C to stop"
     Write-Separator -Width 70
 } catch {
     Write-Phosphor " ✗" -Color Red
@@ -188,7 +194,7 @@ try {
 function Get-BotDirectoryList {
     param([string]$Directory)
 
-    $dirPath = Join-Path $botRoot "prompts\$Directory"
+    $dirPath = Join-Path $botRoot "recipes\$Directory"
     $groups = [System.Collections.Generic.Dictionary[string, System.Collections.ArrayList]]::new()
 
     if (Test-Path $dirPath) {
@@ -313,11 +319,10 @@ try {
         $logLine = "$($t.Bezel)[$timestamp]$($t.Reset) $($t.Label)$method$($t.Reset) $($t.Cyan)$url$($t.Reset) $($t.Bezel)(#$script:requestCount)$($t.Reset)"
 
         if ($isPollingEndpoint) {
-            $clearPad = ' ' * [Math]::Max(0, 70 - (Get-VisualWidth $logLine))
-            Write-Host "`r$logLine$clearPad" -NoNewline
+            # Skip logging for high-frequency polling endpoints to avoid log bloat
         } else {
-            Write-Host ""
-            Write-Host $logLine
+            Write-BotLog -Level Debug -Message ""
+            Write-BotLog -Level Info -Message "$logLine"
         }
 
         # Route handler
@@ -338,7 +343,7 @@ try {
 
         if ($statusCode -eq 200) {
         try {
-            Write-Verbose "Processing URL: $url"
+            Write-BotLog -Level Debug -Message "Processing URL: $url"
             switch ($url) {
                 "/" {
                     $indexPath = Join-Path $staticRoot "index.html"
@@ -381,13 +386,13 @@ try {
                     }
 
                     # Read workflow name from settings
-                    $settingsFile = Join-Path $botRoot "defaults\settings.default.json"
+                    $settingsFile = Join-Path $botRoot "settings\settings.default.json"
                     $workflowName = $null
                     if (Test-Path $settingsFile) {
                         try {
                             $settingsData = Get-Content $settingsFile -Raw | ConvertFrom-Json
                             $workflowName = if ($settingsData.PSObject.Properties['workflow']) { $settingsData.workflow } else { $settingsData.profile }
-                        } catch { Write-Verbose "Failed to read settings for workflow name: $_" }
+                        } catch { Write-BotLog -Level Debug -Message "Failed to read settings for workflow name" -Exception $_ }
                     }
 
                     # Read kickstart dialog + phases from workflow manifest (primary source)
@@ -1645,7 +1650,10 @@ try {
 
                     # Knowledge base status
                     $kbStatus = @{ configured = $false; path = ""; valid = $false; project_count = 0; projects = @(); shared = @{ standards_count = 0; templates_count = 0 } }
-                    $kbSettingsPath = Join-Path $botRoot "defaults\settings.default.json"
+                    $kbSettingsPath = Join-Path $botRoot "settings\settings.default.json"
+                    if (-not (Test-Path $kbSettingsPath)) {
+                        $kbSettingsPath = Join-Path $botRoot "defaults\settings.default.json"
+                    }
                     if (Test-Path $kbSettingsPath) {
                         try {
                             $kbSettings = Get-Content $kbSettingsPath -Raw | ConvertFrom-Json
@@ -2248,13 +2256,13 @@ try {
 
                         # Check for running analysis/execution processes (default workflow processes)
                         $defaultRunning = $runningProcs | Where-Object {
-                            $_.type -in @('analysis', 'execution') -or ($_.type -eq 'workflow' -and -not $_.description -like '*:*')
+                            $_.type -in @('analysis', 'execution') -or ($_.type -eq 'task-runner' -and -not $_.description -like '*:*')
                         }
                         # Discover agents/skills from prompts directories
                         $defaultAgents = @()
                         $defaultSkills = @()
-                        $agentsDir = Join-Path $botRoot "prompts\agents"
-                        $skillsDir = Join-Path $botRoot "prompts\skills"
+                        $agentsDir = Join-Path $botRoot "recipes\agents"
+                        $skillsDir = Join-Path $botRoot "recipes\skills"
                         if (Test-Path $agentsDir) {
                             $defaultAgents = @(Get-ChildItem $agentsDir -Directory -ErrorAction SilentlyContinue | ForEach-Object { $_.Name })
                         }
@@ -2280,6 +2288,7 @@ try {
                             status = if ($defaultRunning) { 'running' } else { 'idle' }
                             tasks = $defaultTasks
                             has_running_process = [bool]$defaultRunning
+                            has_form = [bool]($defaultManifest -and $defaultManifest['form'])
                             is_default = $true
                         }
                     }
@@ -2295,7 +2304,7 @@ try {
 
                             # Check if a workflow process is running for this workflow
                             $hasRunning = $runningProcs | Where-Object {
-                                $_.type -eq 'workflow' -and $_.description -like "*$wfName*"
+                                $_.type -eq 'task-runner' -and $_.description -like "*$wfName*"
                             }
 
                             $installedList += @{
@@ -2312,17 +2321,18 @@ try {
                                 homepage = if ($manifest['homepage']) { "$($manifest['homepage'])" } else { '' }
                                 agents = if ($manifest['agents'] -and $manifest['agents'].Count -gt 0) { @($manifest['agents'] | Where-Object { $_ }) } else {
                                     # Fallback: discover from prompts directory
-                                    $wfAgentsDir = Join-Path $wfDir "prompts\agents"
+                                    $wfAgentsDir = Join-Path $wfDir "recipes\agents"
                                     if (Test-Path $wfAgentsDir) { @(Get-ChildItem $wfAgentsDir -Directory -ErrorAction SilentlyContinue | ForEach-Object { $_.Name }) } else { @() }
                                 }
                                 skills = if ($manifest['skills'] -and $manifest['skills'].Count -gt 0) { @($manifest['skills'] | Where-Object { $_ }) } else {
-                                    $wfSkillsDir = Join-Path $wfDir "prompts\skills"
+                                    $wfSkillsDir = Join-Path $wfDir "recipes\skills"
                                     if (Test-Path $wfSkillsDir) { @(Get-ChildItem $wfSkillsDir -Directory -ErrorAction SilentlyContinue | ForEach-Object { $_.Name }) } else { @() }
                                 }
                                 tools = if ($manifest['tools'] -and $manifest['tools'].Count -gt 0) { @($manifest['tools'] | Where-Object { $_ }) } else { @() }
                                 status = if ($hasRunning) { 'running' } else { 'idle' }
                                 tasks = $wfTasks
                                 has_running_process = [bool]$hasRunning
+                                has_form = [bool]($manifest['form'])
                             }
                         }
                     }
@@ -2365,7 +2375,7 @@ try {
                                 }
 
                                 # Start-ProcessLaunch auto-detects max_concurrent for workflow type
-                                $launchResult = Start-ProcessLaunch -Type 'workflow' -Continue $true -Description "Workflow: $wfName" -WorkflowName $wfName
+                                $launchResult = Start-ProcessLaunch -Type 'task-runner' -Continue $true -Description "Workflow: $wfName" -WorkflowName $wfName
                                 $content = @{
                                     success = $true
                                     workflow = $wfName
@@ -2396,13 +2406,13 @@ try {
                                 Get-ChildItem $processesDir -Filter "*.json" -File -ErrorAction SilentlyContinue | ForEach-Object {
                                     try {
                                         $proc = Get-Content $_.FullName -Raw | ConvertFrom-Json
-                                        if ($proc.status -in @('running', 'starting') -and $proc.type -eq 'workflow' -and $proc.description -like "*$wfName*") {
+                                        if ($proc.status -in @('running', 'starting') -and $proc.type -eq 'task-runner' -and $proc.description -like "*$wfName*") {
                                             # Create stop signal file
                                             $stopFile = Join-Path $processesDir "$($proc.id).stop"
                                             "stop" | Set-Content $stopFile -Encoding UTF8
                                             $stopped++
                                         }
-                                    } catch { Write-Verbose "Failed to read process file for stop signal: $_" }
+                                    } catch { Write-BotLog -Level Debug -Message "Failed to read process file for stop signal" -Exception $_ }
                                 }
                             }
                             $content = @{ success = $true; workflow = $wfName; stopped = $stopped } | ConvertTo-Json -Compress
@@ -2445,7 +2455,7 @@ try {
 
                 "/api/prompts/directories" {
                     $contentType = "application/json; charset=utf-8"
-                    $promptsDir = Join-Path $botRoot "prompts"
+                    $promptsDir = Join-Path $botRoot "recipes"
                     $directories = @()
                     $titleCase = (Get-Culture).TextInfo
 
@@ -2465,7 +2475,7 @@ try {
                     if (Test-Path $workflowsDir) {
                         Get-ChildItem $workflowsDir -Directory -ErrorAction SilentlyContinue | ForEach-Object {
                             $wfName = $_.Name
-                            $wfPromptsDir = Join-Path $_.FullName "prompts"
+                            $wfPromptsDir = Join-Path $_.FullName "recipes"
                             if (Test-Path $wfPromptsDir) {
                                 Get-ChildItem $wfPromptsDir -Directory -ErrorAction SilentlyContinue | ForEach-Object {
                                     $subName = $_.Name
@@ -2577,7 +2587,7 @@ try {
                     } else {
                         $wfName = "unknown"; $subDir = "unknown"
                     }
-                    $wfPromptDir = Join-Path $botRoot "workflows\$wfName\prompts\$subDir"
+                    $wfPromptDir = Join-Path $botRoot "workflows\$wfName\recipes\$subDir"
                     if (Test-Path $wfPromptDir) {
                         # Reuse same grouping logic as Get-BotDirectoryList but from workflow path
                         $groups = [System.Collections.Generic.Dictionary[string, System.Collections.ArrayList]]::new()
@@ -2611,7 +2621,7 @@ try {
                     } else {
                         $dirName = "unknown"
                     }
-                    $dirPath = Join-Path $botRoot "prompts\$dirName"
+                    $dirPath = Join-Path $botRoot "recipes\$dirName"
 
                     if (Test-Path $dirPath) {
                         $content = Get-BotDirectoryList -Directory $dirName
@@ -2645,11 +2655,11 @@ try {
         } catch {
             $statusCode = 500
             $content = "Server error: $($_.Exception.Message)"
-            Write-Host ""
+            Write-BotLog -Level Debug -Message ""
             Write-Status "[$timestamp] ERROR: $($_.Exception.Message)" -Type Error
-            Write-Host "  Script: $($_.InvocationInfo.ScriptName)" -ForegroundColor Red
-            Write-Host "  Line: $($_.InvocationInfo.ScriptLineNumber)" -ForegroundColor Red
-            Write-Host "  Statement: $($_.InvocationInfo.Line.Trim())" -ForegroundColor Red
+            Write-BotLog -Level Error -Message "  Script: $($_.InvocationInfo.ScriptName)"
+            Write-BotLog -Level Error -Message "  Line: $($_.InvocationInfo.ScriptLineNumber)"
+            Write-BotLog -Level Error -Message "  Statement: $($_.InvocationInfo.Line.Trim())"
         }
         } # end CSRF-safe block
 
@@ -2675,10 +2685,10 @@ try {
             if ($_.Exception.Message -match "network name is no longer available|connection was forcibly closed|broken pipe") {
                 # Silent handling for expected disconnects
             } else {
-                Write-Host ""
+                Write-BotLog -Level Debug -Message ""
                 Write-Status "Response write failed: $($_.Exception.Message)" -Type Warn
             }
-            try { $response.Close() } catch { Write-Verbose "Cleanup: failed to close response: $_" }
+            try { $response.Close() } catch { Write-BotLog -Level Debug -Message "Cleanup: failed to close response" -Exception $_ }
         }
     }
 } finally {
@@ -2686,7 +2696,7 @@ try {
     try {
         Stop-FileWatchers
     } catch {
-        Write-Verbose "Cleanup: failed to stop file watchers: $_"
+        Write-BotLog -Level Debug -Message "Cleanup: failed to stop file watchers" -Exception $_
     }
 
     # Safely stop listener if it's still running
@@ -2695,7 +2705,7 @@ try {
             $listener.Stop()
             $listener.Close()
         } catch {
-            Write-Verbose "Cleanup: failed to stop HTTP listener: $_"
+            Write-BotLog -Level Debug -Message "Cleanup: failed to stop HTTP listener" -Exception $_
         }
     }
     Write-Status "Server stopped" -Type Warn

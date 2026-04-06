@@ -463,7 +463,7 @@ function Get-BotState {
                 'done'        { $wc['done']++ }
                 'skipped'     { $wc['skipped']++ }
             }
-        } catch { Write-Verbose "Non-critical operation failed: $_" }
+        } catch { Write-BotLog -Level Debug -Message "Non-critical operation failed" -Exception $_ }
     }
 
     # Get session info from MCP tools
@@ -561,7 +561,7 @@ function Get-BotState {
                             $actFile = Join-Path $processesDir "$($proc.id).activity.jsonl"
                             $event = @{ timestamp = $deadNow; type = "text"; message = "Process terminated unexpectedly (PID $($proc.pid) no longer alive)" } | ConvertTo-Json -Compress
                             Add-Content -Path $actFile -Value $event -ErrorAction SilentlyContinue
-                        } catch { Write-Verbose "Failed to write file: $_" }
+                        } catch { Write-BotLog -Level Warn -Message "Failed to write file" -Exception $_ }
                         continue  # Skip adding to instances — it's dead
                     }
 
@@ -591,7 +591,7 @@ function Get-BotState {
                         }
                         $isActuallyRunning = $true
                     }
-                    if ($proc.type -eq 'workflow' -and -not $instances.workflow) {
+                    if ($proc.type -eq 'task-runner' -and -not $instances.workflow) {
                         $instances.workflow = @{
                             instance_id = $proc.id
                             pid = $proc.pid
@@ -604,7 +604,7 @@ function Get-BotState {
                         $isActuallyRunning = $true
                     }
                 }
-            } catch { Write-Verbose "Non-critical operation failed: $_" }
+            } catch { Write-BotLog -Level Debug -Message "Non-critical operation failed" -Exception $_ }
         }
     }
 
@@ -653,14 +653,14 @@ function Get-BotState {
 
     # Read workspace instance ID from settings.default.json
     $workspaceInstanceId = $null
-    $settingsPath = Join-Path $botRoot "defaults\settings.default.json"
+    $settingsPath = Join-Path $botRoot "settings\settings.default.json"
     if (Test-Path $settingsPath) {
         try {
             $settingsJson = Get-Content $settingsPath -Raw | ConvertFrom-Json
             if ($settingsJson.PSObject.Properties['instance_id'] -and $settingsJson.instance_id) {
                 $workspaceInstanceId = "$($settingsJson.instance_id)"
             }
-        } catch { Write-Verbose "Failed to parse data: $_" }
+        } catch { Write-BotLog -Level Debug -Message "Failed to parse data" -Exception $_ }
     }
     # Get steering status (for operator whisper channel) - legacy support
     $steeringStatus = $null

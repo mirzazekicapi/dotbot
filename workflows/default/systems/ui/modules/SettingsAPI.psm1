@@ -44,7 +44,7 @@ function Get-Theme {
                 if ($settings.theme) {
                     $activeTheme = $settings.theme
                 }
-            } catch { Write-Verbose "Failed to parse data: $_" }
+            } catch { Write-BotLog -Level Debug -Message "Failed to parse data" -Exception $_ }
         }
 
         # Validate active theme exists
@@ -103,7 +103,7 @@ function Set-Theme {
             foreach ($prop in $existingSettings.PSObject.Properties) {
                 $settings[$prop.Name] = $prop.Value
             }
-        } catch { Write-Verbose "Failed to parse data: $_" }
+        } catch { Write-BotLog -Level Debug -Message "Failed to parse data" -Exception $_ }
     }
 
     # Update theme preference
@@ -169,7 +169,7 @@ function Set-Settings {
             foreach ($prop in $existingSettings.PSObject.Properties) {
                 $settings[$prop.Name] = $prop.Value
             }
-        } catch { Write-Verbose "Failed to parse data: $_" }
+        } catch { Write-BotLog -Level Debug -Message "Failed to parse data" -Exception $_ }
     }
 
     # Update settings with provided values
@@ -197,7 +197,7 @@ function Set-Settings {
 }
 
 function Get-AnalysisConfig {
-    $settingsDefaultFile = Join-Path $script:Config.BotRoot "defaults\settings.default.json"
+    $settingsDefaultFile = Join-Path $script:Config.BotRoot "settings\settings.default.json"
 
     try {
         $settingsData = Get-Content $settingsDefaultFile -Raw | ConvertFrom-Json
@@ -214,7 +214,7 @@ function Set-AnalysisConfig {
     param(
         [Parameter(Mandatory)] $Body
     )
-    $settingsDefaultFile = Join-Path $script:Config.BotRoot "defaults\settings.default.json"
+    $settingsDefaultFile = Join-Path $script:Config.BotRoot "settings\settings.default.json"
 
     $settingsData = Get-Content $settingsDefaultFile -Raw | ConvertFrom-Json
     if (-not $settingsData.analysis) {
@@ -291,7 +291,7 @@ function Set-VerificationConfig {
 }
 
 function Get-CostConfig {
-    $settingsDefaultFile = Join-Path $script:Config.BotRoot "defaults\settings.default.json"
+    $settingsDefaultFile = Join-Path $script:Config.BotRoot "settings\settings.default.json"
 
     try {
         $settingsData = Get-Content $settingsDefaultFile -Raw | ConvertFrom-Json
@@ -308,7 +308,7 @@ function Set-CostConfig {
     param(
         [Parameter(Mandatory)] $Body
     )
-    $settingsDefaultFile = Join-Path $script:Config.BotRoot "defaults\settings.default.json"
+    $settingsDefaultFile = Join-Path $script:Config.BotRoot "settings\settings.default.json"
 
     $settingsData = Get-Content $settingsDefaultFile -Raw | ConvertFrom-Json
     if (-not $settingsData.costs) {
@@ -380,7 +380,7 @@ function Get-InstalledEditors {
                     $found = $true
                     break
                 }
-            } catch { Write-Verbose "Non-critical operation failed: $_" }
+            } catch { Write-BotLog -Level Debug -Message "Non-critical operation failed" -Exception $_ }
         }
         if ($found) {
             $installed += $editor.id
@@ -407,7 +407,7 @@ function Get-EditorRegistry {
 }
 
 function Get-EditorConfig {
-    $settingsDefaultFile = Join-Path $script:Config.BotRoot "defaults\settings.default.json"
+    $settingsDefaultFile = Join-Path $script:Config.BotRoot "settings\settings.default.json"
 
     try {
         $settingsData = Get-Content $settingsDefaultFile -Raw | ConvertFrom-Json
@@ -432,7 +432,7 @@ function Set-EditorConfig {
     param(
         [Parameter(Mandatory)] $Body
     )
-    $settingsDefaultFile = Join-Path $script:Config.BotRoot "defaults\settings.default.json"
+    $settingsDefaultFile = Join-Path $script:Config.BotRoot "settings\settings.default.json"
 
     if (-not (Test-Path $settingsDefaultFile)) {
         # Create a minimal settings file if it doesn't exist
@@ -491,8 +491,8 @@ function Set-EditorConfig {
 }
 
 function Get-ProviderList {
-    $providersDir = Join-Path $script:Config.BotRoot "defaults\providers"
-    $settingsDefaultFile = Join-Path $script:Config.BotRoot "defaults\settings.default.json"
+    $providersDir = Join-Path $script:Config.BotRoot "settings\providers"
+    $settingsDefaultFile = Join-Path $script:Config.BotRoot "settings\settings.default.json"
 
     try {
         # Read active provider from settings
@@ -501,7 +501,7 @@ function Get-ProviderList {
             try {
                 $settingsData = Get-Content $settingsDefaultFile -Raw | ConvertFrom-Json
                 if ($settingsData.provider) { $activeProvider = $settingsData.provider }
-            } catch { Write-Verbose "Failed to parse data: $_" }
+            } catch { Write-BotLog -Level Debug -Message "Failed to parse data" -Exception $_ }
         }
 
         # Read all provider config files
@@ -516,7 +516,7 @@ function Get-ProviderList {
                     try {
                         $exe = $config.executable
                         if (Get-Command $exe -ErrorAction SilentlyContinue) { $installed = $true }
-                    } catch { Write-Verbose "Failed to parse data: $_" }
+                    } catch { Write-BotLog -Level Debug -Message "Failed to parse data" -Exception $_ }
 
                     $providers += @{
                         name = $config.name
@@ -536,7 +536,7 @@ function Get-ProviderList {
                             }
                         }
                     }
-                } catch { Write-Verbose "Non-critical operation failed: $_" }
+                } catch { Write-BotLog -Level Debug -Message "Non-critical operation failed" -Exception $_ }
             }
         }
 
@@ -554,8 +554,8 @@ function Set-ActiveProvider {
     param(
         [Parameter(Mandatory)] $Body
     )
-    $settingsDefaultFile = Join-Path $script:Config.BotRoot "defaults\settings.default.json"
-    $providersDir = Join-Path $script:Config.BotRoot "defaults\providers"
+    $settingsDefaultFile = Join-Path $script:Config.BotRoot "settings\settings.default.json"
+    $providersDir = Join-Path $script:Config.BotRoot "settings\providers"
 
     $providerName = $Body.provider
     if (-not $providerName) {
@@ -599,7 +599,7 @@ function Set-ActiveProvider {
 }
 
 function Get-MothershipConfig {
-    $settingsDefaultFile = Join-Path $script:Config.BotRoot "defaults\settings.default.json"
+    $settingsDefaultFile = Join-Path $script:Config.BotRoot "settings\settings.default.json"
     $overridesFile = Join-Path $script:Config.ControlDir "settings.json"
     $uiSettingsFile = Join-Path $script:Config.ControlDir "ui-settings.json"
 
@@ -664,7 +664,7 @@ function Get-MothershipConfig {
                 if ($uiSettings.PSObject.Properties['notificationSoundEnabled']) {
                     $soundEnabled = [bool]$uiSettings.notificationSoundEnabled
                 }
-            } catch { Write-Verbose "Failed to parse data: $_" }
+            } catch { Write-BotLog -Level Debug -Message "Failed to parse data" -Exception $_ }
         }
 
         # Mask api_key for display (show last 4 chars only)
@@ -701,7 +701,7 @@ function Set-MothershipConfig {
     param(
         [Parameter(Mandatory)] $Body
     )
-    $settingsDefaultFile = Join-Path $script:Config.BotRoot "defaults\settings.default.json"
+    $settingsDefaultFile = Join-Path $script:Config.BotRoot "settings\settings.default.json"
     $overridesFile = Join-Path $script:Config.ControlDir "settings.json"
     $uiSettingsFile = Join-Path $script:Config.ControlDir "ui-settings.json"
 
@@ -799,7 +799,7 @@ function Set-MothershipConfig {
             foreach ($prop in $existing.PSObject.Properties) {
                 $overrides[$prop.Name] = $prop.Value
             }
-        } catch { Write-Verbose "Failed to parse data: $_" }
+        } catch { Write-BotLog -Level Debug -Message "Failed to parse data" -Exception $_ }
     }
 
     # Migrate legacy 'notifications' key to 'mothership' in overrides
@@ -840,7 +840,7 @@ function Set-MothershipConfig {
             if ($existingUiSettings.PSObject.Properties['notificationSoundEnabled']) {
                 $uiSettingsHasSoundPreference = $true
             }
-        } catch { Write-Verbose "Failed to parse data: $_" }
+        } catch { Write-BotLog -Level Debug -Message "Failed to parse data" -Exception $_ }
     }
 
     if ($null -ne $Body.sound_enabled) {
@@ -902,7 +902,7 @@ function Invoke-OpenEditor {
         [Parameter(Mandatory)] [string]$ProjectRoot
     )
 
-    $settingsDefaultFile = Join-Path $script:Config.BotRoot "defaults\settings.default.json"
+    $settingsDefaultFile = Join-Path $script:Config.BotRoot "settings\settings.default.json"
 
     try {
         $settingsData = Get-Content $settingsDefaultFile -Raw | ConvertFrom-Json
@@ -995,7 +995,7 @@ function Invoke-OpenEditor {
                 $foundCmd = $cmd
                 break
             }
-        } catch { Write-Verbose "Non-critical operation failed: $_" }
+        } catch { Write-BotLog -Level Debug -Message "Non-critical operation failed" -Exception $_ }
     }
 
     if (-not $foundCmd) {

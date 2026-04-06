@@ -86,7 +86,7 @@ function Build-TaskPrompt {
     if ($Task.applicable_standards -and $Task.applicable_standards.Count -gt 0) {
         $applicableStandards = ($Task.applicable_standards | ForEach-Object { "- $_" }) -join "`n"
     } else {
-        $applicableStandards = "No specific standards listed for this task - use global standards from .bot/prompts/standards/global/"
+        $applicableStandards = "No specific standards listed for this task - use global standards from .bot/recipes/standards/global/"
     }
     $prompt = $prompt -replace '\{\{APPLICABLE_STANDARDS\}\}', $applicableStandards
 
@@ -95,7 +95,7 @@ function Build-TaskPrompt {
     if ($Task.applicable_agents -and $Task.applicable_agents.Count -gt 0) {
         $applicableAgents = ($Task.applicable_agents | ForEach-Object { "- $_" }) -join "`n"
     } else {
-        $applicableAgents = "Use .bot/prompts/agents/implementer/AGENT.md as your default persona"
+        $applicableAgents = "Use .bot/recipes/agents/implementer/AGENT.md as your default persona"
     }
     $prompt = $prompt -replace '\{\{APPLICABLE_AGENTS\}\}', $applicableAgents
 
@@ -148,7 +148,10 @@ function Build-TaskPrompt {
     # Replace {knowledge_base_path} from QA settings
     $kbPath = ""
     if ($global:DotbotProjectRoot) {
-        $kbSettingsPath = Join-Path $global:DotbotProjectRoot ".bot\defaults\settings.default.json"
+        $kbSettingsPath = Join-Path $global:DotbotProjectRoot ".bot\settings\settings.default.json"
+        if (-not (Test-Path $kbSettingsPath)) {
+            $kbSettingsPath = Join-Path $global:DotbotProjectRoot ".bot\defaults\settings.default.json"
+        }
         if (Test-Path $kbSettingsPath) {
             try {
                 $kbSettings = Get-Content $kbSettingsPath -Raw | ConvertFrom-Json

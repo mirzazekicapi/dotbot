@@ -44,11 +44,11 @@ $todoDir = Join-Path $BotRoot "workspace\tasks\todo"
 # Resolve template: workflow-scoped install takes priority, fall back to global prompts dir
 $templatePath = $null
 if ($WorkflowDir) {
-    $candidate = Join-Path $WorkflowDir "prompts\workflows\03b-expand-task-group.md"
+    $candidate = Join-Path $WorkflowDir "recipes\prompts\03b-expand-task-group.md"
     if (Test-Path $candidate) { $templatePath = $candidate }
 }
 if (-not $templatePath) {
-    $templatePath = Join-Path $BotRoot "prompts\workflows\03b-expand-task-group.md"
+    $templatePath = Join-Path $BotRoot "recipes\prompts\03b-expand-task-group.md"
 }
 $groupsPath = Join-Path $productDir "task-groups.json"
 
@@ -61,7 +61,7 @@ if ($ProcessId) {
 
 function Write-GroupActivity {
     param([string]$Message)
-    try { Write-ActivityLog -Type "text" -Message $Message } catch { Write-Verbose "Logging operation failed: $_" }
+    try { Write-ActivityLog -Type "text" -Message $Message } catch { Write-BotLog -Level Debug -Message "Logging operation failed" -Exception $_ }
     Write-Status $Message -Type Info
 }
 
@@ -214,7 +214,7 @@ foreach ($group in $sortedGroups) {
         try {
             $taskData = Get-Content $f -Raw | ConvertFrom-Json
             $newTasks += @{ id = $taskData.id; name = $taskData.name }
-        } catch { Write-Verbose "Failed to parse data: $_" }
+        } catch { Write-BotLog -Level Debug -Message "Failed to parse data" -Exception $_ }
     }
 
     $groupTaskMap[$group.id] = $newTasks

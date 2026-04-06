@@ -73,7 +73,7 @@ function Get-ProcessList {
             }
 
             $processList += $proc
-        } catch { Write-Verbose "Logging operation failed: $_" }
+        } catch { Write-BotLog -Level Debug -Message "Logging operation failed" -Exception $_ }
     }
 
     # Apply query filters if present
@@ -107,7 +107,7 @@ function Get-ProcessOutput {
             $events = @()
             $startIdx = if ($Position -gt 0) { $Position } else { [Math]::Max(0, $totalLines - $Tail) }
             for ($li = $startIdx; $li -lt $totalLines; $li++) {
-                try { $events += ($allLines[$li] | ConvertFrom-Json) } catch { Write-Verbose "Cleanup: failed to close resource: $_" }
+                try { $events += ($allLines[$li] | ConvertFrom-Json) } catch { Write-BotLog -Level Debug -Message "Malformed JSONL line in activity log" -Exception $_ }
             }
 
             return @{
@@ -184,7 +184,7 @@ function Stop-ProcessByType {
                 "stop" | Set-Content -Path $stopFile -Force
                 $stopped += $pData.id
             }
-        } catch { Write-Verbose "Failed to parse data: $_" }
+        } catch { Write-BotLog -Level Debug -Message "Failed to parse data" -Exception $_ }
     }
     Write-Status "Stop signal sent to $($stopped.Count) $Type process(es)" -Type Info
 
@@ -213,7 +213,7 @@ function Stop-ManagedProcessByType {
                 "stop" | Set-Content -Path $stopFile -Force
                 $killed += $pData.id
             }
-        } catch { Write-Verbose "Cleanup: failed to stop process: $_" }
+        } catch { Write-BotLog -Level Debug -Message "Cleanup: failed to stop process" -Exception $_ }
     }
     Write-Status "Killed $($killed.Count) $Type process(es)" -Type Warn
 
@@ -239,7 +239,7 @@ function Stop-AllManagedProcesses {
                 "stop" | Set-Content -Path $stopFile -Force
                 $killed += $pData.id
             }
-        } catch { Write-Verbose "Cleanup: failed to stop process: $_" }
+        } catch { Write-BotLog -Level Debug -Message "Cleanup: failed to stop process" -Exception $_ }
     }
     Write-Status "Killed all processes ($($killed.Count) total)" -Type Warn
 
@@ -285,7 +285,7 @@ function Get-MaxConcurrent {
     $botRoot = $script:Config.BotRoot
     $controlDir = $script:Config.ControlDir
     $maxConcurrent = 1
-    $settingsPath = Join-Path $botRoot "defaults\settings.default.json"
+    $settingsPath = Join-Path $botRoot "settings\settings.default.json"
     $controlSettingsPath = Join-Path $controlDir "settings.json"
     foreach ($sp in @($controlSettingsPath, $settingsPath)) {
         if (Test-Path $sp) {
@@ -298,7 +298,7 @@ function Get-MaxConcurrent {
                     $maxConcurrent = [int]$s.execution.max_concurrent
                 }
                 if ($maxConcurrent -gt 1) { break }
-            } catch { Write-Verbose "Failed to parse max_concurrent setting: $_" }
+            } catch { Write-BotLog -Level Debug -Message "Failed to parse max_concurrent setting" -Exception $_ }
         }
     }
     return $maxConcurrent
@@ -321,7 +321,7 @@ function Start-ProcessLaunch {
 
     # Auto-concurrent: when launching a workflow without an explicit slot,
     # check max_concurrent and delegate to Start-ConcurrentWorkflow if > 1.
-    if ($Type -eq 'workflow' -and $Slot -lt 0) {
+    if ($Type -eq 'task-runner' -and $Slot -lt 0) {
         $maxConcurrent = Get-MaxConcurrent
         if ($maxConcurrent -gt 1) {
             return Start-ConcurrentWorkflow -WorkflowName $WorkflowName -Description $Description -MaxConcurrent $maxConcurrent
@@ -352,7 +352,7 @@ function Start-ProcessLaunch {
             $uiSettings = Get-Content $settingsFile -Raw | ConvertFrom-Json
             if ([bool]$uiSettings.showDebug) { $launchArgs += "-ShowDebug" }
             if ([bool]$uiSettings.showVerbose) { $launchArgs += "-ShowVerbose" }
-        } catch { Write-Verbose "Failed to parse data: $_" }
+        } catch { Write-BotLog -Level Debug -Message "Failed to parse data" -Exception $_ }
     }
 
     # Launch as separate process
@@ -374,7 +374,7 @@ function Start-ProcessLaunch {
                 $launchedProcId = $pData.id
                 break
             }
-        } catch { Write-Verbose "Failed to parse data: $_" }
+        } catch { Write-BotLog -Level Debug -Message "Failed to parse data" -Exception $_ }
     }
 
     $slotSegment = if ($Slot -ge 0) { ", Slot: $Slot" } else { "" }
@@ -400,7 +400,7 @@ function Start-ConcurrentWorkflow {
     $results = @()
     for ($slot = 0; $slot -lt $MaxConcurrent; $slot++) {
         $desc = if ($MaxConcurrent -gt 1) { "$Description (slot $slot)" } else { $Description }
-        $result = Start-ProcessLaunch -Type 'workflow' -Continue $true -Description $desc -WorkflowName $WorkflowName -Slot $slot
+        $result = Start-ProcessLaunch -Type 'task-runner' -Continue $true -Description $desc -WorkflowName $WorkflowName -Slot $slot
         $results += $result
         if ($slot -lt $MaxConcurrent - 1) { Start-Sleep -Milliseconds 300 }
     }

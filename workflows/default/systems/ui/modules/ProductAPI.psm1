@@ -206,7 +206,7 @@ function Get-PreflightResults {
 
     # Fallback to settings.kickstart.preflight for legacy installs
     if ($preflightChecks.Count -eq 0) {
-        $settingsFile = Join-Path $botRoot "defaults\settings.default.json"
+        $settingsFile = Join-Path $botRoot "settings\settings.default.json"
         if (Test-Path $settingsFile) {
             try {
                 $settingsData = Get-Content $settingsFile -Raw | ConvertFrom-Json
@@ -215,7 +215,7 @@ function Get-PreflightResults {
                     $preflightChecks = @($sectionData.preflight)
                 }
             } catch {
-                Write-Verbose "Pre-flight settings parse error: $_"
+                Write-BotLog -Level Debug -Message "Pre-flight settings parse error" -Exception $_
             }
         }
     }
@@ -261,7 +261,7 @@ function Get-PreflightResults {
                     if ($mcpData.mcpServers -and $mcpData.mcpServers.PSObject.Properties.Name -contains $check.name) {
                         $mcpFound = $true
                     }
-                } catch { Write-Verbose "Failed to parse data: $_" }
+                } catch { Write-BotLog -Level Debug -Message "Failed to parse data" -Exception $_ }
             }
 
             # 2) Fall back to CLI registry (claude mcp list) — cached at module scope
@@ -384,7 +384,7 @@ function Start-ProductKickstart {
                 $launchedProcId = $pData.id
                 break
             }
-        } catch { Write-Verbose "Failed to parse data: $_" }
+        } catch { Write-BotLog -Level Debug -Message "Failed to parse data" -Exception $_ }
     }
 
     Write-Status "Product kickstart launched (PID: $($proc.Id))" -Type Info
@@ -616,7 +616,7 @@ function Resolve-TaskGenChildTasks {
                     name = $tc.name
                     status = $statusMap[$sd]
                 })
-            } catch { Write-Verbose "Failed to parse data: $_" }
+            } catch { Write-BotLog -Level Debug -Message "Failed to parse data" -Exception $_ }
         }
     }
 
@@ -674,14 +674,14 @@ function Get-KickstartStatus {
 
     # Fallback to settings.kickstart.phases for legacy installs
     if ($kickstartPhases.Count -eq 0) {
-        $settingsFile = Join-Path $botRoot "defaults\settings.default.json"
+        $settingsFile = Join-Path $botRoot "settings\settings.default.json"
         if (Test-Path $settingsFile) {
             try {
                 $settingsData = Get-Content $settingsFile -Raw | ConvertFrom-Json
                 if ($settingsData.kickstart -and $settingsData.kickstart.phases) {
                     $kickstartPhases = @($settingsData.kickstart.phases)
                 }
-            } catch { Write-Verbose "Failed to parse data: $_" }
+            } catch { Write-BotLog -Level Debug -Message "Failed to parse data" -Exception $_ }
         }
     }
 
@@ -702,7 +702,7 @@ function Get-KickstartStatus {
                     $latestProc = $pData
                     break
                 }
-            } catch { Write-Verbose "Failed to parse data: $_" }
+            } catch { Write-BotLog -Level Debug -Message "Failed to parse data" -Exception $_ }
         }
     }
 
@@ -876,7 +876,7 @@ function Resume-ProductKickstart {
                 $launchedProcId = $pData.id
                 break
             }
-        } catch { Write-Verbose "Failed to parse data: $_" }
+        } catch { Write-BotLog -Level Debug -Message "Failed to parse data" -Exception $_ }
     }
 
     Write-Status "Kickstart resumed from phase '$resumePhase' (PID: $($proc.Id))" -Type Info
