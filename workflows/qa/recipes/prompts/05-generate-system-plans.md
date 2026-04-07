@@ -50,11 +50,4 @@ Do NOT duplicate cross-system E2E scenarios in per-system plans. Reference them:
 
 For each system that has user-facing scenarios, also generate a UAT plan using the `write-uat-plan` skill. Write to `{output_directory}/systems/{system-id}/uat-plan.md`. Skip systems with no user-facing UAT scenarios (e.g., backend-only systems).
 
-## Knowledge Base (optional)
 
-If `{knowledge_base_path}` is not empty, for each system read the following files if they exist:
-- `{knowledge_base_path}/projects/{system-id}/knowledge/application-summary.md` — system context
-- `{knowledge_base_path}/projects/{system-id}/skills/write-test-plan/SKILL.md` — project-specific test plan guidance
-- `{knowledge_base_path}/projects/{system-id}/history/*.md` — historical test cases showing real navigation flows, UI labels, and test data patterns
-
-Use this to make per-system plans more accurate and specific to how each system actually works.

@@ -137,18 +137,6 @@ if (Test-Path $settingsPath) {
 
     Write-Host "    Test framework will be auto-detected from the test repo" -ForegroundColor Gray
 
-    # Validate knowledge base path (optional — for project-specific skills and knowledge)
-    $kbPath = $settings.qa.knowledge_base_path
-    if (-not $kbPath) {
-        Write-Host ""
-        Write-DotbotWarning "qa.knowledge_base_path is not set (optional — enhances test plans with project-specific knowledge)"
-        Write-Host "    Set it in: .bot/settings/settings.default.json" -ForegroundColor Yellow
-        Write-Host "    Example: `"qa`": { `"knowledge_base_path`": `"C:/path/to/dotbot-qa-knowledge-base`" }" -ForegroundColor Gray
-    } elseif (-not (Test-Path $kbPath)) {
-        Write-DotbotWarning "qa.knowledge_base_path '$kbPath' does not exist"
-    } else {
-        Write-Success "Knowledge base found: $kbPath"
-    }
 }
 
 Write-Success "QA profile initialized"

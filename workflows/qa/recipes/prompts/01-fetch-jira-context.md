@@ -10,66 +10,116 @@ The prompt includes Jira ticket keys (e.g., `PROJ-123, PROJ-456`) and optionally
 
 Write all output to `.bot/workspace/product/qa-runs/` in the current run directory.
 
+## Data Access Strategy
+
+**Try Atlassian MCP tools first.** If they are not available (common in spawned processes), **fall back to the Jira REST API using credentials from `.env.local`**.
+
+### Check MCP availability
+
+Try calling `mcp__atlassian__getJiraIssue` for the first ticket. If it works, use MCP tools for all subsequent calls. If it fails or the tool doesn't exist, switch to the REST API fallback immediately — do not waste turns retrying MCP.
+
+### REST API Fallback
+
+If MCP tools are unavailable:
+
+1. **Read credentials** from `.env.local` in the project root:
+   ```bash
+   cat .env.local
+   ```
+   Extract: `ATLASSIAN_EMAIL`, `ATLASSIAN_API_TOKEN`, `ATLASSIAN_CLOUD_ID`
+
+2. **Resolve Cloud ID** — if `ATLASSIAN_CLOUD_ID` is a URL (like `https://site.atlassian.net`), resolve to UUID:
+   ```bash
+   curl -s "https://site.atlassian.net/_edge/tenant_info" | jq -r .cloudId
+   ```
+
+3. **Use curl for all Jira/Confluence calls** with basic auth:
+   ```bash
+   curl -s -u "{ATLASSIAN_EMAIL}:{ATLASSIAN_API_TOKEN}" \
+     "https://api.atlassian.com/ex/jira/{CLOUD_ID}/rest/api/3/..."
+   ```
+
 ## Steps
 
 ### 1. Fetch main Jira issues
 
-For each Jira ticket key, call `mcp__atlassian__getJiraIssue` to retrieve:
-- Summary, description, acceptance criteria
-- Status, priority, labels, components
-- Parent key (if exists)
-- Issue links and relationships
+**MCP:** `mcp__atlassian__getJiraIssue` with `cloudId` and `issueIdOrKey`
+
+**REST fallback:**
+```bash
+curl -s -u "{email}:{token}" \
+  "https://api.atlassian.com/ex/jira/{cloudId}/rest/api/3/issue/{KEY}?fields=summary,description,status,priority,labels,components,parent,issuelinks,comment,attachment" \
+  | jq '{key: .key, summary: .fields.summary, description: .fields.description, status: .fields.status.name, priority: .fields.priority.name, labels: .fields.labels, components: [.fields.components[].name], parent: .fields.parent.key}'
+```
+
+Retrieve: summary, description, acceptance criteria, status, priority, labels, components, parent key, issue links.
 
 ### 2. Fetch child issues
 
-Search for child issues and epic children:
-```
-mcp__atlassian__searchJiraIssuesUsingJql
-JQL: parent = {issue_key}
-Limit: 50
+**MCP:** `mcp__atlassian__searchJiraIssuesUsingJql` with JQL `parent = {issue_key}`
+
+**REST fallback:**
+```bash
+curl -s -u "{email}:{token}" \
+  -X POST "https://api.atlassian.com/ex/jira/{cloudId}/rest/api/3/search/jql" \
+  -H "Content-Type: application/json" \
+  -d '{"jql":"parent = {KEY}","fields":["key","summary","description","status","components"],"maxResults":50}'
 ```
 
 ### 3. Fetch linked issues
 
-Search for explicitly linked issues (blocks, is-blocked-by, relates-to, duplicates):
+**MCP:** `mcp__atlassian__searchJiraIssuesUsingJql` with JQL `issuekey in linkedIssues({issue_key})`
+
+**REST fallback:**
+```bash
+curl -s -u "{email}:{token}" \
+  -X POST "https://api.atlassian.com/ex/jira/{cloudId}/rest/api/3/search/jql" \
+  -H "Content-Type: application/json" \
+  -d '{"jql":"issuekey in linkedIssues({KEY})","fields":["key","summary","status"],"maxResults":50}'
 ```
-mcp__atlassian__searchJiraIssuesUsingJql
-JQL: issuekey in linkedIssues({issue_key})
-Limit: 50
-```
-Linked issues often define scope boundaries and negative test cases.
+
+Linked issues define scope boundaries and negative test cases.
 
 ### 4. Fetch parent context
 
 If the main issue has a parent (epic or initiative):
-- Fetch the parent with `mcp__atlassian__getJiraIssue` to understand the broader scope
-- This helps identify what is OUT of scope for this ticket
+
+**MCP:** `mcp__atlassian__getJiraIssue` with the parent key
+
+**REST fallback:** Same curl as Step 1 but with the parent key.
 
 ### 5. Fetch comments
 
-Use comments from the main issue response:
-- Look for hidden acceptance criteria discussed in comments
-- Look for edge cases, clarifications, or scope changes
-- Look for decisions that aren't reflected in the description
+Comments are included in the main issue response (Step 1) via the `comment` field. Extract:
+- Hidden acceptance criteria discussed in comments
+- Edge cases, clarifications, scope changes
+- Decisions not reflected in the description
 
 ### 6. Fetch Confluence context
 
 #### User-provided pages (if URLs given)
-For each Confluence page URL in the input:
-1. Extract the page ID or title from the URL
-2. Call `mcp__atlassian__getConfluencePage` to retrieve the page content
-3. Extract the body text, stripping HTML markup to plain text
+
+**MCP:** `mcp__atlassian__getConfluencePage` with page ID extracted from URL
+
+**REST fallback:**
+```bash
+# Extract page ID from URL (the number in /pages/{id}/)
+curl -s -u "{email}:{token}" \
+  "https://api.atlassian.com/ex/confluence/{cloudId}/wiki/api/v2/pages/{pageId}?body-format=storage"
+```
 
 #### Auto-search Confluence
-Search Confluence for pages related to the Jira tickets:
+
+**MCP:** `mcp__atlassian__searchConfluenceUsingCql` with CQL `text ~ "{issue_key}"`
+
+**REST fallback:**
+```bash
+CQL=$(python3 -c "import urllib.parse; print(urllib.parse.quote('text ~ \"{KEY}\"'))")
+curl -s -u "{email}:{token}" \
+  "https://api.atlassian.com/ex/confluence/{cloudId}/wiki/rest/api/content/search?cql=$CQL&limit=10"
 ```
-mcp__atlassian__searchConfluenceUsingCql
-CQL: text ~ "{issue_key}" OR text ~ "{issue_summary}"
-Limit: 10
-```
-For each discovered page (up to 5 most relevant):
-- Fetch full content with `mcp__atlassian__getConfluencePage`
-- Look for: specifications, design decisions, acceptance criteria, architecture notes
+
+For each discovered page (up to 5 most relevant), fetch full content.
 
 ### 7. Load local product context (if available)
 
@@ -101,6 +151,8 @@ Also write a detailed context file `{output_directory}/jira-context-full.md` wit
 
 ## Anti-Patterns
 
-- Do not make all Atlassian API calls in parallel — sequential to avoid rate limits
+- Do not make all API calls in parallel — sequential to avoid rate limits
 - If you hit a rate limit, wait 10 seconds and retry once. If it fails again, skip that step and continue.
 - Do not skip Jira data — it's the primary requirements source
+- Do not waste turns retrying MCP tools if the first call fails — switch to REST fallback immediately
+- When using curl, do not expose full API tokens in console output — use `... ` to truncate in logs

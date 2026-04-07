@@ -24,7 +24,7 @@ All test cases in one consolidated file:
 
 ## Instructions
 
-Apply the `write-test-cases` skill (read `.bot/workflows/qa/prompts/skills/write-test-cases/SKILL.md`).
+Apply the `write-test-cases` skill (read `.bot/workflows/qa/recipes/skills/write-test-cases/SKILL.md`).
 
 ### For multi-system tickets
 
@@ -60,14 +60,6 @@ Then generate **cross-system E2E test cases**:
 Generate all test cases in a **single file**:
 - Organize test cases by functional group using `## H2` section headings
 - Write to: `{output_directory}/test-cases.md`
-
-## Knowledge Base (optional)
-
-If `{knowledge_base_path}` is not empty, for each system read the following files if they exist:
-- `{knowledge_base_path}/projects/{system-id}/skills/write-test-cases/SKILL.md` — project-specific test case patterns and conventions
-- `{knowledge_base_path}/projects/{system-id}/history/*.md` — historical test cases showing real test steps: where to click, how to navigate, what data to enter, correct UI labels and field names
-
-Use historical test cases as reference for writing accurate, detailed test steps. They show how users actually interact with each system.
 
 ## Anti-Patterns
 

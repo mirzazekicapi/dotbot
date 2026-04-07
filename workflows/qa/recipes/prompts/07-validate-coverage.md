@@ -73,6 +73,3 @@ Per-System Plans: systems/
 Coverage: N/N acceptance criteria mapped (100%)
 ```
 
-## Knowledge Base (optional)
-
-If `{knowledge_base_path}` is not empty, read `{knowledge_base_path}/shared/standards/qa-standards.md` if it exists for cross-project validation rules and standards.
