@@ -112,63 +112,40 @@ function formatFileSize(bytes) {
 }
 
 /**
- * Build a tree structure from a flat list of docs
- * @param {Array} docs - Flat array of {name, filename, depth, type, size}
- * @returns {object} - Tree with { docs: [], folders: { name: tree } }
+ * Activate a product file nav item — load markdown or show binary placeholder.
+ * @param {HTMLElement} item - The .file-nav-item element
  */
-function buildProductTree(docs) {
-    const root = { docs: [], folders: {} };
-
-    for (const doc of docs) {
-        const parts = doc.filename.split('/');
-        if (parts.length === 1) {
-            // Root-level file
-            root.docs.push(doc);
-        } else {
-            // Nested file — walk/create folder nodes
-            let node = root;
-            for (let i = 0; i < parts.length - 1; i++) {
-                const folderName = parts[i];
-                if (!node.folders[folderName]) {
-                    node.folders[folderName] = { docs: [], folders: {} };
-                }
-                node = node.folders[folderName];
-            }
-            node.docs.push(doc);
-        }
+function activateProductItem(item) {
+    if (item.dataset.type === 'binary') {
+        showBinaryPlaceholder({
+            name: item.dataset.doc,
+            filename: item.dataset.filename,
+            size: parseInt(item.dataset.size, 10) || 0
+        });
+    } else {
+        loadProductDoc(item.dataset.doc);
     }
-
-    return root;
 }
 
 /**
  * Render tree HTML recursively
- * @param {object} tree - Tree node from buildProductTree
+ * @param {object} tree - Tree node from buildFolderTree (uses .items / .folders)
  * @returns {string} - HTML string
  */
 function renderProductTree(tree) {
     let html = '';
 
     // Render root-level docs first (no folder wrapper)
-    for (const doc of tree.docs) {
+    for (const doc of tree.items) {
         html += renderProductFileItem(doc);
     }
 
     // Render folders
-    const folderNames = Object.keys(tree.folders);
-    for (const folderName of folderNames) {
+    for (const folderName of Object.keys(tree.folders)) {
         const folder = tree.folders[folderName];
         const itemCount = countTreeItems(folder);
-        html += `<div class="chain-folder">
-            <div class="chain-folder-header">
-                <span class="folder-toggle">&#x25BC;</span>
-                <span class="folder-name">${escapeHtml(folderName)}</span>
-                <span class="folder-count">${itemCount}</span>
-            </div>
-            <div class="chain-folder-items">
-                ${renderProductTree(folder)}
-            </div>
-        </div>`;
+        const contentHtml = renderProductTree(folder);
+        html += renderFolderGroup(folderName, contentHtml, itemCount);
     }
 
     return html;
@@ -188,19 +165,6 @@ function renderProductFileItem(doc) {
         <span class="item-icon doc">${icon}</span>
         <span>${escapeHtml(displayName)}</span>
     </div>`;
-}
-
-/**
- * Count total items (docs) in a tree node recursively
- * @param {object} tree
- * @returns {number}
- */
-function countTreeItems(tree) {
-    let count = tree.docs.length;
-    for (const folderName of Object.keys(tree.folders)) {
-        count += countTreeItems(tree.folders[folderName]);
-    }
-    return count;
 }
 
 /**
