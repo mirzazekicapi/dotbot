@@ -60,6 +60,8 @@ docs/proposal-v4/
 .codex/
 .gemini/
 node_modules/
+studio-ui/static/
+studio-ui/.vite/
 test-results/
 playwright-report/
 .vscode/mcp.json

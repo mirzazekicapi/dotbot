@@ -44,17 +44,41 @@ if ($resolvedBase -and ($resolvedSource -eq $resolvedBase)) {
             New-Item -ItemType Directory -Force -Path $BaseDir | Out-Null
         }
         
-        # Copy all files except .git
-        $itemsToCopy = Get-ChildItem -Path $SourceDir -Exclude ".git", ".vs"
-        
+        # Copy all files except .git, .vs, and studio-ui (handled separately)
+        $itemsToCopy = Get-ChildItem -Path $SourceDir -Exclude ".git", ".vs", "studio-ui"
+
         foreach ($item in $itemsToCopy) {
             $dest = Join-Path $BaseDir $item.Name
-            
+
             if ($item.PSIsContainer) {
                 if (Test-Path $dest) { Remove-Item -Path $dest -Recurse -Force }
                 Copy-Item -Path $item.FullName -Destination $dest -Recurse -Force
             } else {
                 Copy-Item -Path $item.FullName -Destination $dest -Force
+            }
+        }
+
+        # Copy only deployable studio-ui files (server.ps1, module, static/)
+        $editorSrc = Join-Path $SourceDir "studio-ui"
+        if (Test-Path $editorSrc) {
+            $editorDest = Join-Path $BaseDir "studio-ui"
+            if (Test-Path $editorDest) { Remove-Item -Path $editorDest -Recurse -Force }
+            New-Item -ItemType Directory -Force -Path $editorDest | Out-Null
+
+            # Copy server script and API module
+            foreach ($file in @("server.ps1", "StudioAPI.psm1")) {
+                $src = Join-Path $editorSrc $file
+                if (Test-Path $src) {
+                    Copy-Item -Path $src -Destination (Join-Path $editorDest $file) -Force
+                }
+            }
+
+            # Copy static/ directory (built client assets)
+            $staticSrc = Join-Path $editorSrc "static"
+            if (Test-Path $staticSrc) {
+                Copy-Item -Path $staticSrc -Destination (Join-Path $editorDest "static") -Recurse -Force
+            } else {
+                Write-DotbotWarning "studio-ui/static/ not found — the editor UI requires built assets. Run 'npm run build' in studio-ui/ first."
             }
         }
         
@@ -131,6 +155,7 @@ function Show-Help {
     Write-DotbotLabel "    registry list     " "List registered extension registries"
     Write-DotbotLabel "    registry remove   " "Remove an extension registry"
     Write-DotbotLabel "    update            " "Update global installation"
+    Write-DotbotLabel "    studio            " "Launch visual configuration studio"
     Write-DotbotLabel "    doctor            " "Scan project for health issues"
     Write-DotbotLabel "    help              " "Show this help message"
     Write-BlankLine
@@ -346,6 +371,44 @@ switch ($Command) {
     "list" { Invoke-List }
     "profiles" { Invoke-List }  # backward compat
     "status" { Invoke-Status }
+    "studio" {
+        $studioDir = Join-Path $DotbotBase "studio-ui"
+        $serverScript = Join-Path $studioDir "server.ps1"
+        $portFile = Join-Path $DotbotBase ".studio-port"
+
+        if (-not (Test-Path $serverScript)) {
+            Write-BlankLine
+            Write-DotbotError "Studio not found."
+            Write-DotbotWarning "Run 'dotbot update' to install the studio"
+            Write-BlankLine
+            break
+        }
+
+        # Check if studio is already running
+        if (Test-Path $portFile) {
+            try {
+                $portInfo = Get-Content $portFile -Raw | ConvertFrom-Json
+                $existingPort = $portInfo.port
+                $existingPid = $portInfo.pid
+                # Verify the process is still alive
+                $proc = Get-Process -Id $existingPid -ErrorAction SilentlyContinue
+                if ($proc -and $proc.ProcessName -match 'pwsh|powershell') {
+                    Write-BlankLine
+                    Write-Success "Studio already running at http://localhost:$existingPort (PID $existingPid)"
+                    Write-Status "Opening browser..."
+                    Write-BlankLine
+                    Start-Process "http://localhost:$existingPort"
+                    break
+                }
+                # Stale port file — process is gone
+                Remove-Item $portFile -Force -ErrorAction SilentlyContinue
+            } catch {
+                Remove-Item $portFile -Force -ErrorAction SilentlyContinue
+            }
+        }
+
+        & pwsh -NoProfile -File $serverScript
+    }
     "doctor" { & (Join-Path $ScriptsDir 'doctor.ps1') @SplatArgs }
     "update" { Invoke-Update }
     "help" { Show-Help }
