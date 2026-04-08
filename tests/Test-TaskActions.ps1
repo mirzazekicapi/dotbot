@@ -112,21 +112,28 @@ function New-TestTaskFile {
 }
 
 function Get-ExpectedAuditUsername {
-    try {
-        $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
-        if ($identity -and $identity.Name) {
-            return $identity.Name
+    if ($IsWindows) {
+        try {
+            $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+            if ($identity -and $identity.Name) {
+                return $identity.Name
+            }
+        } catch {
+            # Fall back to cross-platform APIs below.
         }
-    } catch {
-        # Fall back to environment variables when Windows identity is unavailable.
     }
 
-    if ($env:USERDOMAIN -and $env:USERNAME) {
-        return "$($env:USERDOMAIN)\$($env:USERNAME)"
+    $user = [System.Environment]::UserName
+
+    if ($IsWindows) {
+        $domain = [System.Environment]::UserDomainName
+        if ($domain -and $user -and $domain -ne $user) {
+            return "$domain\$user"
+        }
     }
 
-    if ($env:USERNAME) {
-        return $env:USERNAME
+    if ($user) {
+        return $user
     }
 
     return "unknown"
