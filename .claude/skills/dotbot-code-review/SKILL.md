@@ -42,8 +42,8 @@ gh api "repos/{owner}/{repo}/pulls/{pr_number}/comments" --paginate | ConvertFro
 # Get all reviews (top-level review bodies)
 gh api "repos/{owner}/{repo}/pulls/{pr_number}/reviews" --paginate | ConvertFrom-Json
 
-# Get review threads with resolution status
-gh pr view {pr_number} --json reviewThreads,reviews
+# Get review threads with resolution status (GraphQL — gh pr view lacks reviewThreads)
+gh api graphql -f query='{ repository(owner:"{owner}", name:"{repo}") { pullRequest(number:{pr_number}) { reviewThreads(first:100) { nodes { isResolved comments(first:1) { nodes { path line body author { login } } } } } } } }'
 ```
 
 **Identify automated reviewers:**
@@ -56,7 +56,7 @@ Filter comments by author login matching known bot patterns:
 - `path` — file the comment is attached to
 - `line` / `start_line` — line range in the diff
 - `body` — the comment text
-- `isResolved` — whether the thread has been resolved (from `reviewThreads`)
+- `isResolved` — whether the thread has been resolved (from GraphQL `reviewThreads` query)
 
 **Build prior context document:**
 Compile unresolved automated findings into a structured summary to feed into each review agent (Step 2):
