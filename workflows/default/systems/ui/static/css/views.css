@@ -3049,6 +3049,7 @@
 }
 
 .qa-run-status.processing { color: var(--color-secondary, #e8a030); }
+.qa-run-status.awaiting-approval { color: var(--color-primary, #00d4ff); }
 .qa-run-status.completed { color: var(--color-success, #00ff88); }
 .qa-run-status.failed { color: var(--color-accent, #ff4444); }
 
@@ -3625,6 +3626,40 @@
     color: var(--color-text-dim);
     font-family: var(--font-mono);
     opacity: 0.6;
+}
+
+/* Approve button on artifact cards */
+.qa-approve-btn {
+    flex-shrink: 0;
+    margin-left: 8px;
+    padding: 4px 10px;
+    font-size: 10px;
+    font-weight: 700;
+    font-family: var(--font-mono);
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    background: transparent;
+    color: var(--color-success, #00ff88);
+    border: 1px solid var(--color-success, #00ff88);
+    border-radius: 2px;
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s;
+}
+
+.qa-approve-btn:hover {
+    background: var(--color-success, #00ff88);
+    color: var(--bg-panel, #0a0a0a);
+}
+
+/* Approved badge shown after approval */
+.qa-approved-badge {
+    display: inline-block;
+    margin-left: 6px;
+    font-size: 9px;
+    font-weight: 700;
+    color: var(--color-success, #00ff88);
+    opacity: 0.8;
+    vertical-align: middle;
 }
 
 /* Run card progress stage label */

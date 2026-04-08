@@ -82,6 +82,7 @@ function createRunCard(run) {
     card.dataset.runId = run.id;
 
     const statusLabel = run.status === 'processing' ? 'Processing...'
+        : run.status === 'awaiting-approval' ? 'Awaiting Approval'
         : run.status === 'completed' ? 'Completed'
         : run.status === 'failed' ? 'Failed'
         : run.status;
@@ -340,6 +341,32 @@ async function killQARun(runId) {
 }
 
 /**
+ * Approve a QA phase and unlock the next generation step
+ */
+async function approveQAPhase(runId, phase) {
+    const phaseLabels = { 'test-plan': 'Test Plan', 'uat-plan': 'UAT Plan', 'test-cases': 'Test Cases' };
+    const label = phaseLabels[phase] || phase;
+
+    try {
+        const res = await fetch(`${API_BASE}/api/qa/approve`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ run_id: runId, phase })
+        });
+        const data = await res.json();
+        if (data.success) {
+            showToast(`${label} approved — next step started`, 'success');
+            // Refresh the detail view
+            await showRunDetail(runId);
+        } else {
+            showToast(data.error || 'Approval failed', 'error');
+        }
+    } catch (e) {
+        showToast('Approval request failed', 'error');
+    }
+}
+
+/**
  * Show detail view for a specific run
  */
 // Store current run data and ID for sub-navigation
@@ -379,6 +406,7 @@ async function showRunDetail(runId) {
         detailTitle.textContent = data.jira_keys || runId;
 
         const isProcessing = data.status === 'processing';
+        const isAwaitingApproval = data.status === 'awaiting-approval';
 
         // Hide TOC and search (shown only in document view)
         const toc = document.getElementById('qa-toc');
@@ -389,7 +417,7 @@ async function showRunDetail(runId) {
         if (searchInput) searchInput.value = '';
 
         // Show/hide progress bar (task-based or file-based)
-        if (isProcessing) {
+        if (isProcessing || isAwaitingApproval) {
             renderTaskProgress(currentRunId);
         } else {
             renderProgress(null, false);
@@ -412,19 +440,19 @@ async function showRunDetail(runId) {
             rerunBtn.onclick = () => rerunQA(data);
         }
 
+        // Start polling for updates if processing or awaiting approval
+        if (isProcessing || isAwaitingApproval) {
+            startQAProgressPoll(runId);
+        } else {
+            stopQAProgressPoll();
+        }
+
         // Hide copy button (shown only in document view)
         const copyBtn = document.getElementById('qa-copy-btn');
         if (copyBtn) copyBtn.style.display = 'none';
 
         // Build artifacts view (sub-cards)
         renderArtifactCards(data);
-
-        // Start polling for updates if processing
-        if (isProcessing) {
-            startQAProgressPoll(runId);
-        } else {
-            stopQAProgressPoll();
-        }
 
     } catch (e) {
         detailContent.innerHTML = '<div class="qa-empty-state"><div class="qa-empty-text">Failed to load results</div></div>';
@@ -445,6 +473,22 @@ function renderArtifactCards(data) {
     const hasOverallCases = data.test_cases && data.test_cases.length > 0;
     const hasAnyContent = hasOverallPlan || hasOverallCases || isMultiSystem;
 
+    // Approval state helpers
+    const approvals = data.approvals || {};
+    const approvalPhase = data.approval_phase || null;
+    const isAwaitingApproval = data.status === 'awaiting-approval';
+
+    const testPlanApproved = !!(approvals.test_plan);
+    const uatPlanApproved = !!(approvals.uat_plan);
+    const testCasesApproved = !!(approvals.test_cases);
+
+    // Render an approve button for a given phase (only shown when that phase needs approval)
+    function approveBtn(phase) {
+        const needsApproval = isAwaitingApproval && approvalPhase === phase;
+        if (!needsApproval) return '';
+        return `<button class="qa-approve-btn" data-phase="${phase}" title="Approve and continue to next step">Approve</button>`;
+    }
+
     let html = '<div class="qa-subcards">';
 
     const hasUatPlan = !!data.uat_plan;
@@ -460,23 +504,27 @@ function renderArtifactCards(data) {
         if (hasOverallPlan) {
             const planTitle = isMultiSystem ? 'Overall Test Plan' : 'Test Plan';
             const planDesc = isMultiSystem ? 'High-level test strategy across all systems' : 'Test strategy, scenarios, and coverage';
+            const approvedBadge = testPlanApproved ? '<span class="qa-approved-badge">&#10003; Approved</span>' : '';
             html += `<div class="qa-subcard" data-doc="test-plan">
                 <div class="qa-subcard-icon">TP</div>
                 <div class="qa-subcard-info">
-                    <div class="qa-subcard-title">${planTitle}</div>
+                    <div class="qa-subcard-title">${planTitle}${approvedBadge}</div>
                     <div class="qa-subcard-desc">${planDesc}</div>
                 </div>
+                ${approveBtn('test-plan')}
             </div>`;
         }
 
         if (hasUatPlan) {
             const uatTitle = isMultiSystem ? 'Overall UAT Plan' : 'UAT Plan';
+            const approvedBadge = uatPlanApproved ? '<span class="qa-approved-badge">&#10003; Approved</span>' : '';
             html += `<div class="qa-subcard qa-subcard-uat" data-doc="uat-plan">
                 <div class="qa-subcard-icon qa-icon-uat">UAT</div>
                 <div class="qa-subcard-info">
-                    <div class="qa-subcard-title">${uatTitle}</div>
+                    <div class="qa-subcard-title">${uatTitle}${approvedBadge}</div>
                     <div class="qa-subcard-desc">Business-friendly test scenarios for non-technical testers</div>
                 </div>
+                ${approveBtn('uat-plan')}
             </div>`;
         }
 
@@ -485,12 +533,14 @@ function renderArtifactCards(data) {
                 const displayName = tc.name.replace(/-/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
                 const icon = isMultiSystem ? 'E2E' : 'TC';
                 const desc = isMultiSystem ? 'Cross-system end-to-end test cases' : 'Detailed test cases with steps and expected results';
+                const approvedBadge = testCasesApproved ? '<span class="qa-approved-badge">&#10003; Approved</span>' : '';
                 html += `<div class="qa-subcard" data-doc="tc:${escapeHtml(tc.name)}">
                     <div class="qa-subcard-icon">${icon}</div>
                     <div class="qa-subcard-info">
-                        <div class="qa-subcard-title">${escapeHtml(displayName)}</div>
+                        <div class="qa-subcard-title">${escapeHtml(displayName)}${approvedBadge}</div>
                         <div class="qa-subcard-desc">${desc}</div>
                     </div>
+                    ${approveBtn('test-cases')}
                 </div>`;
             }
         }
@@ -546,12 +596,14 @@ function renderArtifactCards(data) {
             if (hasCases) {
                 for (const tc of sys.test_cases) {
                     const displayName = tc.name.replace(/-/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+                    const approvedBadge = testCasesApproved ? '<span class="qa-approved-badge">&#10003; Approved</span>' : '';
                     html += `<div class="qa-subcard" data-doc="sys:${escapeHtml(sys.id)}:tc:${escapeHtml(tc.name)}">
                         <div class="qa-subcard-icon">TC</div>
                         <div class="qa-subcard-info">
-                            <div class="qa-subcard-title">${escapeHtml(displayName)}</div>
+                            <div class="qa-subcard-title">${escapeHtml(displayName)}${approvedBadge}</div>
                             <div class="qa-subcard-desc">Detailed test cases for ${escapeHtml(sys.name)}</div>
                         </div>
+                        ${approveBtn('test-cases')}
                     </div>`;
                 }
             }
@@ -561,8 +613,8 @@ function renderArtifactCards(data) {
     }
 
     if (!hasAnyContent) {
-        const isProcessing = data.status === 'processing';
-        if (isProcessing) {
+        const isProcessingOrWaiting = data.status === 'processing' || data.status === 'awaiting-approval';
+        if (isProcessingOrWaiting) {
             html += '<div class="qa-empty-state"><div class="qa-empty-text">No artifacts yet</div><div class="qa-empty-hint">Check the Processes tab for detailed logs</div></div>';
         } else {
             html += '<div class="qa-empty-state"><div class="qa-empty-text">No documents</div><div class="qa-empty-hint">This run did not produce any output</div></div>';
@@ -572,10 +624,19 @@ function renderArtifactCards(data) {
     html += '</div>';
     detailContent.innerHTML = html;
 
-    // Wire sub-card clicks
+    // Wire sub-card clicks (but not approve button clicks)
     detailContent.querySelectorAll('.qa-subcard').forEach(card => {
-        card.addEventListener('click', () => {
+        card.addEventListener('click', (e) => {
+            if (e.target.closest('.qa-approve-btn')) return;
             showRunDocument(card.dataset.doc);
+        });
+    });
+
+    // Wire approve button clicks
+    detailContent.querySelectorAll('.qa-approve-btn').forEach(btn => {
+        btn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            approveQAPhase(currentRunId, btn.dataset.phase);
         });
     });
 
@@ -805,28 +866,35 @@ function startQAProgressPoll(runId) {
             const res = await fetch(`${API_BASE}/api/qa/results?run=${encodeURIComponent(runId)}`);
             const data = await res.json();
 
+            const isActive = data.status === 'processing' || data.status === 'awaiting-approval';
+
             // Update progress bar (task-based)
-            if (data.status === 'processing') {
+            if (isActive) {
                 renderTaskProgress(runId);
             } else {
                 renderProgress(null, false);
             }
 
-            // Refresh artifact cards if new content appeared
+            // Refresh artifact cards if content or approval state changed
             const hadPlan = currentRunData && currentRunData.test_plan;
+            const hadUat = currentRunData && currentRunData.uat_plan;
             const hadCases = currentRunData && currentRunData.test_cases ? currentRunData.test_cases.length : 0;
             const hadSystems = currentRunData && currentRunData.systems ? currentRunData.systems.length : 0;
+            const hadStatus = currentRunData && currentRunData.status;
+            const hadPhase = currentRunData && currentRunData.approval_phase;
             const nowHasPlan = data.test_plan;
+            const nowHasUat = data.uat_plan;
             const nowHasCases = data.test_cases ? data.test_cases.length : 0;
             const nowHasSystems = data.systems ? data.systems.length : 0;
 
-            if (nowHasPlan !== hadPlan || nowHasCases !== hadCases || nowHasSystems !== hadSystems) {
+            if (nowHasPlan !== hadPlan || nowHasUat !== hadUat || nowHasCases !== hadCases ||
+                nowHasSystems !== hadSystems || data.status !== hadStatus || data.approval_phase !== hadPhase) {
                 currentRunData = data;
                 renderArtifactCards(data);
             }
 
-            // If completed, stop polling and do final refresh
-            if (data.status !== 'processing') {
+            // If done or failed, stop polling and do final refresh
+            if (!isActive) {
                 stopQAProgressPoll();
                 currentRunData = data;
                 renderProgress(null, false);
@@ -981,7 +1049,7 @@ function startQAPoll() {
 
             if (!data.runs) return;
 
-            const hasActive = data.runs.some(r => r.status === 'processing');
+            const hasActive = data.runs.some(r => r.status === 'processing' || r.status === 'awaiting-approval');
 
             // Update cards
             for (const run of data.runs) {
