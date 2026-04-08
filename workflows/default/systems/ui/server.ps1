@@ -50,8 +50,8 @@ function Find-AvailablePort {
         } catch {
             continue  # HTTP prefix conflict — try next
         } finally {
-            try { if ($http.IsListening) { $http.Stop() } } catch { Write-Verbose "Port probe: failed to stop HttpListener: $_" }
-            try { $http.Close() } catch { Write-Verbose "Port probe: failed to close HttpListener: $_" }
+            try { if ($http.IsListening) { $http.Stop() } } catch { $null = $_ }
+            try { $http.Close() } catch { $null = $_ }
         }
     }
     throw "No available port found in range ${StartPort}–${maxPort}"
@@ -275,6 +275,11 @@ function Get-StaticAssetVersion {
 }
 
 function Add-StaticAssetVersions {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute(
+        'PSUseSingularNouns',
+        '',
+        Justification = 'The function versions multiple asset references within one HTML document.'
+    )]
     param(
         [Parameter(Mandatory)]
         [string]$Html
@@ -881,6 +886,76 @@ try {
                     break
                 }
 
+                "/api/launch-studio" {
+                    $contentType = "application/json; charset=utf-8"
+                    if ($method -eq "POST") {
+                        try {
+                            $reader = New-Object System.IO.StreamReader($request.InputStream)
+                            $bodyText = $reader.ReadToEnd()
+                            $reader.Close()
+                            $body = if ($bodyText) { $bodyText | ConvertFrom-Json } else { @{} }
+                            $workflowName = if ($body.workflow) { $body.workflow } else { $null }
+
+                            $dotbotBase = Join-Path $HOME 'dotbot'
+                            $studioDir = Join-Path $dotbotBase 'studio-ui'
+                            $serverScript = Join-Path $studioDir 'server.ps1'
+                            $portFile = Join-Path $dotbotBase '.studio-port'
+
+                            if (-not (Test-Path $serverScript)) {
+                                $statusCode = 404
+                                $content = @{ success = $false; error = 'Studio not installed. Run dotbot update.' } | ConvertTo-Json -Compress
+                            } else {
+                                $studioUrl = $null
+                                # Check if studio is already running
+                                if (Test-Path $portFile) {
+                                    try {
+                                        $portInfo = Get-Content $portFile -Raw | ConvertFrom-Json
+                                        $proc = Get-Process -Id $portInfo.pid -ErrorAction SilentlyContinue
+                                        if ($proc -and $proc.ProcessName -match 'pwsh|powershell') {
+                                            $studioUrl = "http://localhost:$($portInfo.port)"
+                                        } else {
+                                            Remove-Item $portFile -Force -ErrorAction SilentlyContinue
+                                        }
+                                    } catch {
+                                        Remove-Item $portFile -Force -ErrorAction SilentlyContinue
+                                    }
+                                }
+                                # Start studio if not running
+                                if (-not $studioUrl) {
+                                    $launchArgs = @{ FilePath = 'pwsh'; ArgumentList = @('-NoProfile', '-File', $serverScript) }
+                                    if ($IsWindows) { $launchArgs['WindowStyle'] = 'Hidden' }
+                                    Start-Process @launchArgs
+                                    # Wait for port file (up to 10 seconds)
+                                    $waited = 0
+                                    while ($waited -lt 10 -and -not (Test-Path $portFile)) {
+                                        Start-Sleep -Milliseconds 500
+                                        $waited += 0.5
+                                    }
+                                    if (Test-Path $portFile) {
+                                        $portInfo = Get-Content $portFile -Raw | ConvertFrom-Json
+                                        $studioUrl = "http://localhost:$($portInfo.port)"
+                                    }
+                                }
+                                if ($studioUrl) {
+                                    if ($workflowName) { $studioUrl += "?workflow=$([System.Uri]::EscapeDataString($workflowName))" }
+                                    $content = @{ success = $true; url = $studioUrl } | ConvertTo-Json -Compress
+                                } else {
+                                    $statusCode = 500
+                                    $content = @{ success = $false; error = 'Failed to start studio' } | ConvertTo-Json -Compress
+                                }
+                            }
+                        } catch {
+                            $statusCode = 500
+                            $content = @{ success = $false; error = "Failed to launch studio: $($_.Exception.Message)" } | ConvertTo-Json -Compress
+                        }
+                    }
+                    else {
+                        $statusCode = 405
+                        $content = @{ success = $false; error = "Method not allowed" } | ConvertTo-Json -Compress
+                    }
+                    break
+                }
+
                 "/api/config/mothership" {
                     $contentType = "application/json; charset=utf-8"
                     if ($method -eq "GET") {
@@ -1128,7 +1203,7 @@ try {
                             $reader = New-Object System.IO.StreamReader($request.InputStream)
                             $body = $reader.ReadToEnd() | ConvertFrom-Json
                             $reader.Close()
-                            $content = Submit-TaskAnswer -TaskId $body.task_id -Answer $body.answer -CustomText $body.custom_text | ConvertTo-Json -Depth 5 -Compress
+                            $content = Submit-TaskAnswer -TaskId $body.task_id -Answer $body.answer -CustomText $body.custom_text -Attachments $body.attachments | ConvertTo-Json -Depth 10 -Compress
                         } catch {
                             $statusCode = 500
                             $content = @{ success = $false; error = "Failed to submit answer: $($_.Exception.Message)" } | ConvertTo-Json -Compress
@@ -2028,13 +2103,57 @@ try {
                                     $statusCode = 404
                                     $content = @{ success = $false; error = "Process not found: $($body.process_id)" } | ConvertTo-Json -Compress
                                 } else {
+                                    # Save any per-question attachment files and replace base64 with paths
+                                    $allowedAttachExtensions = @('.md', '.docx', '.xlsx', '.pdf', '.txt')
+                                    $productDir = Join-Path $botRoot "workspace\product"
+                                    $processedAnswers = @()
+                                    foreach ($ans in @($body.answers)) {
+                                        $ansObj = @{
+                                            question_id = $ans.question_id
+                                            question    = $ans.question
+                                            answer      = $ans.answer
+                                        }
+                                        if ($ans.attachments -and @($ans.attachments).Count -gt 0) {
+                                            $attachMeta = @()
+                                            $attachDir = Join-Path $productDir "attachments\$($ans.question_id)"
+                                            if (-not (Test-Path $attachDir)) {
+                                                New-Item -ItemType Directory -Force -Path $attachDir | Out-Null
+                                            }
+                                            foreach ($att in @($ans.attachments)) {
+                                                $safeName = [System.IO.Path]::GetFileName($att.name)
+                                                $ext = [System.IO.Path]::GetExtension($safeName).ToLower()
+                                                if ($ext -notin $allowedAttachExtensions) { continue }
+                                                try {
+                                                    $bytes = [System.Convert]::FromBase64String($att.content)
+                                                    $filePath = Join-Path $attachDir $safeName
+                                                    [System.IO.File]::WriteAllBytes($filePath, $bytes)
+                                                    $relPath = ".bot/workspace/product/attachments/$($ans.question_id)/$safeName"
+                                                    $attachMeta += @{
+                                                        name = $safeName
+                                                        size = $att.size
+                                                        path = $relPath
+                                                    }
+                                                } catch {
+                                                    Write-BotLog "Failed to save kickstart attachment '$safeName': $($_.Exception.Message)"
+                                                }
+                                            }
+                                            if ($attachMeta.Count -gt 0) {
+                                                $ansObj['attachments'] = $attachMeta
+                                                # Embed paths in answer text so the AI can locate the files
+                                                $pathList = ($attachMeta | ForEach-Object { $_.path }) -join ', '
+                                                $pathNote = "Attached: $pathList"
+                                                $ansObj['answer'] = if ($ansObj['answer']) { "$($ansObj['answer'])`n$pathNote" } else { $pathNote }
+                                            }
+                                        }
+                                        $processedAnswers += $ansObj
+                                    }
+
                                     # Write answers file that the interview loop is polling for
                                     $answersData = @{
                                         skipped = ($body.skipped -eq $true)
-                                        answers = @($body.answers)
+                                        answers = $processedAnswers
                                         submitted_at = (Get-Date).ToUniversalTime().ToString("o")
                                     }
-                                    $productDir = Join-Path $botRoot "workspace\product"
                                     $answersPath = Join-Path $productDir "clarification-answers.json"
                                     $answersData | ConvertTo-Json -Depth 10 | Set-Content -Path $answersPath -Encoding utf8NoBOM
                                     $content = @{ success = $true } | ConvertTo-Json -Compress

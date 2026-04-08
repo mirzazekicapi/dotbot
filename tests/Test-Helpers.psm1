@@ -300,6 +300,32 @@ function Remove-TestProject {
     }
 }
 
+function Initialize-TestBotProject {
+    <#
+    .SYNOPSIS
+        Create a temp project and run dotbot init.
+    #>
+    $dotbotDir = Get-DotbotInstallDir
+    $project = New-TestProject
+    Push-Location $project
+    & pwsh -NoProfile -ExecutionPolicy Bypass -File (Join-Path $dotbotDir "scripts\init-project.ps1") 2>&1 | Out-Null
+    & git add -A 2>&1 | Out-Null
+    & git commit -m "dotbot init" --quiet 2>&1 | Out-Null
+    Pop-Location
+
+    $botDir = Join-Path $project ".bot"
+    $controlDir = Join-Path $botDir ".control"
+    if (-not (Test-Path $controlDir)) {
+        New-Item -Path $controlDir -ItemType Directory -Force | Out-Null
+    }
+
+    return @{
+        ProjectRoot = $project
+        BotDir      = $botDir
+        ControlDir  = $controlDir
+    }
+}
+
 # --- MCP Server Helpers ---
 
 function Start-McpServer {
@@ -444,6 +470,7 @@ Export-ModuleMember -Function @(
     'Assert-ValidPowerShellAst'
     'New-TestProject'
     'Remove-TestProject'
+    'Initialize-TestBotProject'
     'Start-McpServer'
     'Stop-McpServer'
     'Send-McpRequest'

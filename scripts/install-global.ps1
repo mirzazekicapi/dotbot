@@ -44,17 +44,48 @@ if ($resolvedBase -and ($resolvedSource -eq $resolvedBase)) {
             New-Item -ItemType Directory -Force -Path $BaseDir | Out-Null
         }
         
-        # Copy all files except .git
-        $itemsToCopy = Get-ChildItem -Path $SourceDir -Exclude ".git", ".vs"
-        
-        foreach ($item in $itemsToCopy) {
-            $dest = Join-Path $BaseDir $item.Name
-            
-            if ($item.PSIsContainer) {
+        # Allowlist: only copy directories and files needed at runtime.
+        # Everything else (server, ideas, tests, docs, assets, etc.) stays in the repo.
+        $allowedDirs = @("scripts", "workflows", "stacks")
+        $allowedFiles = @("version.json", "dotbot.psm1", "dotbot.psd1", "install.ps1", "install-remote.ps1")
+
+        foreach ($dirName in $allowedDirs) {
+            $src = Join-Path $SourceDir $dirName
+            if (Test-Path $src) {
+                $dest = Join-Path $BaseDir $dirName
                 if (Test-Path $dest) { Remove-Item -Path $dest -Recurse -Force }
-                Copy-Item -Path $item.FullName -Destination $dest -Recurse -Force
+                Copy-Item -Path $src -Destination $dest -Recurse -Force
+            }
+        }
+
+        foreach ($fileName in $allowedFiles) {
+            $src = Join-Path $SourceDir $fileName
+            if (Test-Path $src) {
+                Copy-Item -Path $src -Destination (Join-Path $BaseDir $fileName) -Force
+            }
+        }
+
+        # Copy only deployable studio-ui files (server.ps1, module, static/)
+        $editorSrc = Join-Path $SourceDir "studio-ui"
+        if (Test-Path $editorSrc) {
+            $editorDest = Join-Path $BaseDir "studio-ui"
+            if (Test-Path $editorDest) { Remove-Item -Path $editorDest -Recurse -Force }
+            New-Item -ItemType Directory -Force -Path $editorDest | Out-Null
+
+            # Copy server script and API module
+            foreach ($file in @("server.ps1", "StudioAPI.psm1")) {
+                $src = Join-Path $editorSrc $file
+                if (Test-Path $src) {
+                    Copy-Item -Path $src -Destination (Join-Path $editorDest $file) -Force
+                }
+            }
+
+            # Copy static/ directory (built client assets)
+            $staticSrc = Join-Path $editorSrc "static"
+            if (Test-Path $staticSrc) {
+                Copy-Item -Path $staticSrc -Destination (Join-Path $editorDest "static") -Recurse -Force
             } else {
-                Copy-Item -Path $item.FullName -Destination $dest -Force
+                Write-DotbotWarning "studio-ui/static/ not found — the editor UI requires built assets. Run 'npm run build' in studio-ui/ first."
             }
         }
         
@@ -113,7 +144,7 @@ $DotbotVersion = 'unknown'
 try {
     $vf = Join-Path $DotbotBase 'version.json'
     if (Test-Path $vf) { $DotbotVersion = (Get-Content $vf -Raw | ConvertFrom-Json).version }
-} catch { Write-Verbose "Failed to parse data: $_" }
+} catch { Write-DotbotCommand "Parse skipped: $_" }
 $env:DOTBOT_VERSION = $DotbotVersion
 
 function Show-Help {
@@ -131,9 +162,10 @@ function Show-Help {
     Write-DotbotLabel "    registry list     " "List registered extension registries"
     Write-DotbotLabel "    registry remove   " "Remove an extension registry"
     Write-DotbotLabel "    update            " "Update global installation"
+    Write-DotbotLabel "    studio            " "Launch visual configuration studio"
     Write-DotbotLabel "    doctor            " "Scan project for health issues"
     Write-DotbotLabel "    help              " "Show this help message"
-    Write-Host ""
+    Write-BlankLine
 }
 
 function Invoke-Init {
@@ -156,7 +188,7 @@ function Invoke-Status {
     Write-DotbotSection "GLOBAL INSTALLATION"
     Write-DotbotLabel "    Status:   " "✓ Installed" -ValueType Success
     Write-DotbotLabel "    Location: " "$DotbotBase"
-    Write-Host ""
+    Write-BlankLine
 
     # Check project installation
     $botDir = Join-Path (Get-Location) ".bot"
@@ -183,12 +215,12 @@ function Invoke-Status {
             Write-DotbotLabel "    Agents:   " "$agentCount"
             Write-DotbotLabel "    Skills:   " "$skillCount"
         }
-        Write-Host ""
+        Write-BlankLine
     } else {
         Write-DotbotLabel "    Status:   " "✗ Not initialized" -ValueType Error
-        Write-Host ""
+        Write-BlankLine
         Write-DotbotWarning "Run 'dotbot init' to add dotbot to this project"
-        Write-Host ""
+        Write-BlankLine
     }
 }
 
@@ -214,7 +246,7 @@ function Invoke-List {
                 }
                 Write-DotbotLabel "    $($d.Name.PadRight(24))" "$desc"
             }
-            Write-Host ""
+            Write-BlankLine
         }
     }
 
@@ -236,24 +268,24 @@ function Invoke-List {
                 if ($extends) { $label += " (extends: $extends)" }
                 Write-DotbotLabel "    $($label.PadRight(36))" "$desc"
             }
-            Write-Host ""
+            Write-BlankLine
         }
     }
 
     Write-DotbotSection "USAGE"
     Write-DotbotCommand "dotbot init --stack dotnet"
     Write-DotbotCommand "dotbot init --workflow kickstart-via-jira --stack dotnet-blazor"
-    Write-Host ""
+    Write-BlankLine
 }
 
 function Invoke-Update {
-    Write-Host ""
+    Write-BlankLine
     Write-DotbotWarning "To update dotbot:"
-    Write-Host ""
+    Write-BlankLine
     Write-DotbotCommand "cd ~/dotbot"
     Write-DotbotCommand "git pull"
     Write-DotbotCommand "./install.ps1"
-    Write-Host ""
+    Write-BlankLine
 }
 
 function Invoke-Workflow {
@@ -282,6 +314,7 @@ function Invoke-Registry {
         'add'    { Join-Path $ScriptsDir 'registry-add.ps1' }
         'remove' { Join-Path $ScriptsDir 'registry-remove.ps1' }
         'list'   { Join-Path $ScriptsDir 'registry-list.ps1' }
+        'update' { Join-Path $ScriptsDir 'registry-update.ps1' }
         default  { $null }
     }
 
@@ -312,11 +345,17 @@ function Invoke-Registry {
             if ($positional.Count -ge 2) { $regSplat['Source'] = $positional[1] }
         } elseif ($regSubCmd -eq 'remove') {
             if ($positional.Count -ge 1) { $regSplat['Name'] = $positional[0] }
+        } elseif ($regSubCmd -eq 'update') {
+            if ($positional.Count -ge 1) { $regSplat['Name'] = $positional[0] }
         }
 
         & $regScript @regSplat
     } else {
-        Write-DotbotWarning "Usage: dotbot registry [add] <name> <source> [--branch main] [--force]"
+        Write-DotbotWarning "Usage: dotbot registry [add|list|update|remove] ..."
+        Write-DotbotCommand "  add    <name> <source> [--branch main] [--force]"
+        Write-DotbotCommand "  list"
+        Write-DotbotCommand "  update [name] [--force]"
+        Write-DotbotCommand "  remove <name>"
     }
 }
 
@@ -338,14 +377,52 @@ switch ($Command) {
     "registry" { Invoke-Registry }
     "run" { Invoke-Run }
     "resume" {
-        Write-Host ""
+        Write-BlankLine
         Write-DotbotWarning "'dotbot resume' is not yet supported."
         Write-DotbotWarning "Please use 'dotbot run <workflow-name>' instead."
-        Write-Host ""
+        Write-BlankLine
     }
     "list" { Invoke-List }
     "profiles" { Invoke-List }  # backward compat
     "status" { Invoke-Status }
+    "studio" {
+        $studioDir = Join-Path $DotbotBase "studio-ui"
+        $serverScript = Join-Path $studioDir "server.ps1"
+        $portFile = Join-Path $DotbotBase ".studio-port"
+
+        if (-not (Test-Path $serverScript)) {
+            Write-BlankLine
+            Write-DotbotError "Studio not found."
+            Write-DotbotWarning "Run 'dotbot update' to install the studio"
+            Write-BlankLine
+            break
+        }
+
+        # Check if studio is already running
+        if (Test-Path $portFile) {
+            try {
+                $portInfo = Get-Content $portFile -Raw | ConvertFrom-Json
+                $existingPort = $portInfo.port
+                $existingPid = $portInfo.pid
+                # Verify the process is still alive
+                $proc = Get-Process -Id $existingPid -ErrorAction SilentlyContinue
+                if ($proc -and $proc.ProcessName -match 'pwsh|powershell') {
+                    Write-BlankLine
+                    Write-Success "Studio already running at http://localhost:$existingPort (PID $existingPid)"
+                    Write-Status "Opening browser..."
+                    Write-BlankLine
+                    Start-Process "http://localhost:$existingPort"
+                    break
+                }
+                # Stale port file — process is gone
+                Remove-Item $portFile -Force -ErrorAction SilentlyContinue
+            } catch {
+                Remove-Item $portFile -Force -ErrorAction SilentlyContinue
+            }
+        }
+
+        & pwsh -NoProfile -File $serverScript
+    }
     "doctor" { & (Join-Path $ScriptsDir 'doctor.ps1') @SplatArgs }
     "update" { Invoke-Update }
     "help" { Show-Help }
@@ -353,10 +430,10 @@ switch ($Command) {
     "-h" { Show-Help }
     $null { Show-Help }
     default {
-        Write-Host ""
+        Write-BlankLine
         Write-DotbotError "Unknown command: $Command"
         Write-DotbotWarning "Run 'dotbot help' for available commands"
-        Write-Host ""
+        Write-BlankLine
     }
 }
 '@
@@ -396,12 +473,12 @@ if (-not $DryRun) {
 }
 
 # Show completion message
-Write-Host ""
+Write-BlankLine
 Write-Success "Installation Complete!"
 Write-Status "Platform: $(Get-PlatformName)"
-Write-Host ""
+Write-BlankLine
 Write-DotbotSection "NEXT STEPS"
 Write-DotbotCommand "1. Restart your terminal"
 Write-DotbotCommand "2. Navigate to your project: cd your-project"
 Write-DotbotCommand "3. Initialize dotbot: dotbot init"
-Write-Host ""
+Write-BlankLine

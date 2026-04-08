@@ -22,6 +22,7 @@ dotbot wraps AI-assisted coding in a managed, transparent workflow where every s
 - **Per-task model selection** - Tasks can specify a model (e.g. Sonnet for simple tasks, Opus for complex ones) that overrides the process-level default. Use cheaper models where they suffice to reduce token spend.
 - **Multi-slot concurrent execution** - The workflow engine runs multiple tasks from the same workflow in parallel with slot-aware locking, shortening wall-clock time for large task queues.
 - **Multi-provider** - Switch between **Claude**, **Codex**, and **Gemini** from the Settings tab. Each provider has its own CLI wrapper, stream parser, and model configuration.
+- **Configurable permission modes** - Choose how each provider handles permission checks during autonomous execution. Claude supports bypass and auto mode (AI-classified safety); Codex supports bypass and full-auto; Gemini supports YOLO and auto-edit. The dashboard detects installed providers, their versions, and authentication status.
 
 ### Dashboard and observability
 - **Web dashboard** - Seven-tab UI (Overview, Product, Roadmap, Processes, Decisions, Workflow, Settings) with workflow cards showing progress pills, per-workflow run/stop controls, and pipeline-phase filtering.
@@ -127,6 +128,8 @@ Teams can publish workflows, stacks, tools, and skills in a git repo with a `reg
 ```powershell
 dotbot registry add myorg https://github.com/myorg/dotbot-extensions.git
 dotbot registry add myorg C:\repos\myorg-dotbot-extensions  # Local path
+dotbot registry update                                       # Update all registries
+dotbot registry update myorg                                 # Update one registry
 dotbot init -Workflow myorg:custom-workflow                  # Use from registry
 ```
 
@@ -174,6 +177,7 @@ dotbot workflow add <name>     # Add a workflow to existing project
 dotbot workflow remove <name>  # Remove an installed workflow
 dotbot workflow list           # List installed workflows
 dotbot registry add <n> <src>  # Add an enterprise extension registry
+dotbot registry update [name]  # Update registry (all or named)
 dotbot registry list           # List registries and available content
 dotbot doctor                  # Run project health checks
 dotbot status                  # Check installation status
