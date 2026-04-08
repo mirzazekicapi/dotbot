@@ -83,7 +83,7 @@ DotbotServer/
 ├── src/Dotbot.Server/        # C# bot application
 │   ├── DotbotAgent.cs          # Core bot logic
 │   ├── Services/               # Card builder, answer storage, convo refs
-│   └── Models/                 # QuestionPayload, AnswerRecord
+│   └── Models/                 # QuestionOption, AnswerRecord
 ├── terraform/                  # Azure infrastructure
 ├── teams-app/                  # Teams manifest + icons
 ├── scripts/                    # Deploy, icon generation
