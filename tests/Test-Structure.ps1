@@ -1056,15 +1056,31 @@ if (Test-Path $workflowsDefault) {
     Get-ChildItem -Path $workflowsDefault -Recurse -Include *.ps1, *.psm1 | ForEach-Object {
         $relativePath = $_.FullName.Substring($workflowsDefault.Length + 1).Replace('\', '/')
         $lines = Get-Content $_.FullName
+        $inIsWindowsBlock = $false
+        $isWindowsBlockDepth = 0
         for ($lineNum = 0; $lineNum -lt $lines.Count; $lineNum++) {
             $line = $lines[$lineNum]
             # Skip comment-only lines
             if ($line.TrimStart() -match '^\s*#') { continue }
-            # Skip lines that are part of an $IsWindows guard — check the current line and
-            # up to 5 lines above to catch patterns inside if ($IsWindows) { ... } blocks.
-            $windowStart = [Math]::Max(0, $lineNum - 5)
-            $contextWindow = $lines[$windowStart..$lineNum] -join ' '
-            if ($contextWindow -match '\$IsWindows') { continue }
+
+            if ($inIsWindowsBlock) {
+                $isWindowsBlockDepth += ([regex]::Matches($line, '\{')).Count
+                $isWindowsBlockDepth -= ([regex]::Matches($line, '\}')).Count
+                if ($isWindowsBlockDepth -le 0) {
+                    $inIsWindowsBlock = $false
+                    $isWindowsBlockDepth = 0
+                }
+                continue
+            }
+
+            if ($line -match '^\s*(if|elseif)\b[^{]*\$IsWindows\b[^{]*\{') {
+                $isWindowsBlockDepth = ([regex]::Matches($line, '\{')).Count - ([regex]::Matches($line, '\}')).Count
+                if ($isWindowsBlockDepth -gt 0) {
+                    $inIsWindowsBlock = $true
+                }
+                continue
+            }
+
             foreach ($wp in $windowsOnlyPatterns) {
                 if ($line -match $wp.Pattern) {
                     $cpViolations += "$relativePath`:$($lineNum + 1) uses $($wp.Name)"

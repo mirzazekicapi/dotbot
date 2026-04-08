@@ -130,8 +130,19 @@ ST: urn:schemas-upnp-org:device:basic:1
         try {
             $udpSocket.Connect('8.8.8.8', 80)
             $localIp = ($udpSocket.LocalEndPoint -as [System.Net.IPEndPoint]).Address.ToString()
+        } catch {
+            # No default route — fall back to interface enumeration below.
         } finally {
             $udpSocket.Dispose()
+        }
+
+        if (-not $localIp) {
+            $localIp = [System.Net.NetworkInformation.NetworkInterface]::GetAllNetworkInterfaces() |
+                Where-Object { $_.OperationalStatus -eq 'Up' -and $_.NetworkInterfaceType -ne 'Loopback' } |
+                ForEach-Object { $_.GetIPProperties().UnicastAddresses } |
+                Where-Object { $_.Address.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetwork } |
+                Select-Object -First 1 -ExpandProperty Address |
+                ForEach-Object { $_.ToString() }
         }
 
         if ($localIp -match "(\d+\.\d+\.\d+)\.\d+") {

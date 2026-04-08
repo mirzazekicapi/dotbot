@@ -104,10 +104,13 @@ function Get-AuditUsername {
         }
     }
 
-    $domain = [System.Environment]::UserDomainName
     $user = [System.Environment]::UserName
-    if ($domain -and $user -and $domain -ne $user) {
-        return "$domain\$user"
+
+    if ($IsWindows) {
+        $domain = [System.Environment]::UserDomainName
+        if ($domain -and $user -and $domain -ne $user) {
+            return "$domain\$user"
+        }
     }
 
     if ($user) {
