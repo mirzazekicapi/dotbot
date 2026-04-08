@@ -1260,7 +1260,23 @@ function Invoke-Claude {
         $cliArgs += "--session-id", $SessionId
     }
 
-    $Prompt | & claude.exe @cliArgs
+    $previousOutputEncoding = $OutputEncoding
+    $previousConsoleInputEncoding = [Console]::InputEncoding
+    $previousConsoleOutputEncoding = [Console]::OutputEncoding
+    $utf8Encoding = [System.Text.UTF8Encoding]::new($false)
+
+    try {
+        $OutputEncoding = $utf8Encoding
+        [Console]::InputEncoding = $utf8Encoding
+        [Console]::OutputEncoding = $utf8Encoding
+
+        $Prompt | & claude.exe @cliArgs
+    }
+    finally {
+        $OutputEncoding = $previousOutputEncoding
+        [Console]::InputEncoding = $previousConsoleInputEncoding
+        [Console]::OutputEncoding = $previousConsoleOutputEncoding
+    }
 }
 
 function Get-ClaudeModels {
