@@ -223,6 +223,18 @@ if (-not $dotbotInstalled) {
             Assert-True -Name ".mcp.json has playwright server" `
                 -Condition ($null -ne $mcpConfig.mcpServers.playwright) `
                 -Message "playwright server entry missing"
+            Assert-True -Name ".mcp.json does not have serena server" `
+                -Condition ($null -eq $mcpConfig.mcpServers.serena) `
+                -Message "serena should not be included in the default MCP config"
+        }
+
+        $projectGitignore = Join-Path $testProject ".gitignore"
+        Assert-PathExists -Name ".gitignore created" -Path $projectGitignore
+        if (Test-Path $projectGitignore) {
+            $projectGitignoreContent = Get-Content $projectGitignore -Raw
+            Assert-True -Name ".gitignore does not include .serena/" `
+                -Condition ($projectGitignoreContent -notmatch '(?m)^\s*\.serena/?\s*$') `
+                -Message ".serena/ should not be auto-added by init"
         }
 
         # .claude directory (created by init.ps1)
