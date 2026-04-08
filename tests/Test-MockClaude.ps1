@@ -53,7 +53,6 @@ if (-not $IsWindows) {
     }
 }
 
-
 try {
     # ═══════════════════════════════════════════════════════════════════
     # MOCK CLAUDE BASIC
@@ -234,7 +233,6 @@ try {
     }
 
 } finally {
-
     # Restore original PATH
     $env:PATH = $originalPath
     $env:DOTBOT_MOCK_LOG_DIR = $null
