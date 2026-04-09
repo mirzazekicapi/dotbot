@@ -1439,7 +1439,8 @@ try {
                             if ($instructions) { $contextBlock += "`nAdditional Instructions: $instructions" }
                             $contextBlock += "`n"
 
-                            # Create 7 native tasks with dynamic workflow name
+                            # Phase 1 tasks only: Fetch → Detect Systems → Generate Test Plan
+                            # Subsequent phases are unlocked when each phase is approved via /api/qa/approve
                             $qaTaskDefs = @(
                                 @{
                                     name = "Fetch Jira Context [$runId]"
@@ -1475,49 +1476,6 @@ try {
                                     depends_on = @("Detect Systems [$runId]")
                                     outputs = @("$outputDir/test-plan.md")
                                 }
-                                @{
-                                    name = "Generate UAT Plan [$runId]"
-                                    type = "prompt_template"
-                                    prompt = "recipes/prompts/04-generate-uat-plan.md"
-                                    description = "Generate UAT plan in business-friendly language for non-technical testers.`n`n$contextBlock"
-                                    priority = 4
-                                    skip_analysis = $true
-                                    skip_worktree = $true
-                                    depends_on = @("Generate Test Plan [$runId]")
-                                    outputs = @("$outputDir/uat-plan.md")
-                                }
-                                @{
-                                    name = "Generate Per-System Plans [$runId]"
-                                    type = "prompt_template"
-                                    prompt = "recipes/prompts/05-generate-system-plans.md"
-                                    description = "Generate per-system test plans for multi-system tickets. Skip if single system.`n`n$contextBlock"
-                                    priority = 5
-                                    skip_analysis = $true
-                                    skip_worktree = $true
-                                    depends_on = @("Generate Test Plan [$runId]")
-                                    condition = "$outputDir/systems.json"
-                                }
-                                @{
-                                    name = "Generate Test Cases [$runId]"
-                                    type = "prompt_template"
-                                    prompt = "recipes/prompts/06-generate-test-cases.md"
-                                    description = "Generate detailed technical test cases per system.`n`n$contextBlock"
-                                    priority = 6
-                                    skip_analysis = $true
-                                    skip_worktree = $true
-                                    depends_on = @("Generate Per-System Plans [$runId]", "Generate UAT Plan [$runId]")
-                                }
-                                @{
-                                    name = "Validate Coverage [$runId]"
-                                    type = "prompt_template"
-                                    prompt = "recipes/prompts/07-validate-coverage.md"
-                                    description = "Validate traceability and write completion marker.`n`n$contextBlock"
-                                    priority = 7
-                                    skip_analysis = $true
-                                    skip_worktree = $true
-                                    depends_on = @("Generate Test Cases [$runId]")
-                                    outputs = @("$outputDir/pipeline-complete.json")
-                                }
                             )
 
                             # Create tasks via New-WorkflowTask
@@ -1545,10 +1503,131 @@ try {
                                 scenario_count = 0
                                 test_case_count = 0
                                 task_count = $createdTasks.Count
+                                approvals = @{ test_plan = $null; uat_plan = $null; test_cases = $null }
                             }
                             $runMeta | ConvertTo-Json -Depth 3 | Set-Content (Join-Path $qaRunsDir "$runId.json") -Encoding UTF8
 
                             $content = @{ success = $true; run_id = $runId; process_id = $launchResult.process_id; pid = $launchResult.pid; tasks_created = $createdTasks.Count } | ConvertTo-Json -Compress
+                        }
+                    } else {
+                        $statusCode = 405
+                        $content = @{ success = $false; error = "Method not allowed" } | ConvertTo-Json -Compress
+                    }
+                    break
+                }
+
+                "/api/qa/approve" {
+                    if ($method -eq "POST") {
+                        $contentType = "application/json; charset=utf-8"
+                        $reader = New-Object System.IO.StreamReader($request.InputStream)
+                        $body = $reader.ReadToEnd() | ConvertFrom-Json
+                        $reader.Close()
+
+                        $approveRunId = $body.run_id
+                        $approvePhase = $body.phase  # test-plan | uat-plan | test-cases
+
+                        if (-not $approveRunId -or -not $approvePhase) {
+                            $content = @{ success = $false; error = "run_id and phase are required" } | ConvertTo-Json -Compress
+                        } else {
+                            $qaRunsDir2 = Join-Path $botRoot ".control\qa-runs"
+                            $approveMetaPath = Join-Path $qaRunsDir2 "$approveRunId.json"
+                            if (-not (Test-Path $approveMetaPath)) {
+                                $content = @{ success = $false; error = "Run not found: $approveRunId" } | ConvertTo-Json -Compress
+                            } else {
+                                $approveMeta = Get-Content $approveMetaPath -Raw | ConvertFrom-Json
+                                $approveOutputDir = ".bot/workspace/product/qa-runs/$approveRunId"
+                                $approveWfName = if ($approveMeta.workflow_name) { $approveMeta.workflow_name } else { $approveRunId }
+
+                                # Reconstruct context block from saved metadata
+                                $approveContext = "## QA Run Context`n`nRun ID: $approveRunId`nOutput Directory: $approveOutputDir/`nJira Tickets: $($approveMeta.jira_keys)"
+                                if ($approveMeta.confluence_urls) { $approveContext += "`nConfluence Pages: $($approveMeta.confluence_urls)" }
+                                if ($approveMeta.instructions) { $approveContext += "`nAdditional Instructions: $($approveMeta.instructions)" }
+                                $approveContext += "`n"
+
+                                # Ensure approvals object exists
+                                if (-not $approveMeta.PSObject.Properties['approvals']) {
+                                    $approveMeta | Add-Member -NotePropertyName "approvals" -NotePropertyValue ([PSCustomObject]@{ test_plan = $null; uat_plan = $null; test_cases = $null }) -Force
+                                }
+
+                                $approvedAt = (Get-Date -Format "o")
+                                $approveNewTasks = @()
+
+                                switch ($approvePhase) {
+                                    "test-plan" {
+                                        $approveMeta.approvals | Add-Member -NotePropertyName "test_plan" -NotePropertyValue $approvedAt -Force
+                                        # Phase 2: UAT Plan only — Per-System Plans start after UAT Plan is approved
+                                        $approveNewTasks = @(
+                                            @{
+                                                name = "Generate UAT Plan [$approveRunId]"
+                                                type = "prompt_template"
+                                                prompt = "recipes/prompts/04-generate-uat-plan.md"
+                                                description = "Generate UAT plan in business-friendly language for non-technical testers.`n`n$approveContext"
+                                                priority = 4
+                                                skip_analysis = $true
+                                                skip_worktree = $true
+                                                outputs = @("$approveOutputDir/uat-plan.md")
+                                            }
+                                        )
+                                    }
+                                    "uat-plan" {
+                                        $approveMeta.approvals | Add-Member -NotePropertyName "uat_plan" -NotePropertyValue $approvedAt -Force
+                                        # Phase 3: Per-System Plans, then Test Cases auto-starts after (depends_on)
+                                        $approveNewTasks = @(
+                                            @{
+                                                name = "Generate Per-System Plans [$approveRunId]"
+                                                type = "prompt_template"
+                                                prompt = "recipes/prompts/05-generate-system-plans.md"
+                                                description = "Generate per-system test plans for multi-system tickets. Skip if single system.`n`n$approveContext"
+                                                priority = 5
+                                                skip_analysis = $true
+                                                skip_worktree = $true
+                                                condition = "$approveOutputDir/systems.json"
+                                            }
+                                            @{
+                                                name = "Generate Test Cases [$approveRunId]"
+                                                type = "prompt_template"
+                                                prompt = "recipes/prompts/06-generate-test-cases.md"
+                                                description = "Generate detailed technical test cases per system.`n`n$approveContext"
+                                                priority = 6
+                                                skip_analysis = $true
+                                                skip_worktree = $true
+                                                depends_on = @("Generate Per-System Plans [$approveRunId]")
+                                            }
+                                        )
+                                    }
+                                    "test-cases" {
+                                        $approveMeta.approvals | Add-Member -NotePropertyName "test_cases" -NotePropertyValue $approvedAt -Force
+                                        # Phase 4: Validate Coverage
+                                        $approveNewTasks = @(
+                                            @{
+                                                name = "Validate Coverage [$approveRunId]"
+                                                type = "prompt_template"
+                                                prompt = "recipes/prompts/07-validate-coverage.md"
+                                                description = "Validate traceability and write completion marker.`n`n$approveContext"
+                                                priority = 7
+                                                skip_analysis = $true
+                                                skip_worktree = $true
+                                                outputs = @("$approveOutputDir/pipeline-complete.json")
+                                            }
+                                        )
+                                    }
+                                }
+
+                                # Create the new tasks and relaunch the task runner
+                                $approveCreated = @()
+                                foreach ($td in $approveNewTasks) {
+                                    $approveCreated += New-WorkflowTask -ProjectBotDir $botRoot -WorkflowName $approveWfName -TaskDef $td
+                                }
+
+                                $approveLaunch = Start-ProcessLaunch -Type 'task-runner' -WorkflowName $approveWfName -Continue $true -Description "QA: $($approveMeta.jira_keys)"
+                                $approveMeta.status = "processing"
+                                $approveMeta | Add-Member -NotePropertyName "process_id" -NotePropertyValue $approveLaunch.process_id -Force
+                                $approveMeta | Add-Member -NotePropertyName "pid" -NotePropertyValue $approveLaunch.pid -Force
+                                $approveMeta | Add-Member -NotePropertyName "approval_phase" -NotePropertyValue $null -Force
+                                $approveMeta | ConvertTo-Json -Depth 4 | Set-Content $approveMetaPath -Encoding UTF8
+
+                                $content = @{ success = $true; phase = $approvePhase; tasks_created = $approveCreated.Count } | ConvertTo-Json -Compress
+                            }
                         }
                     } else {
                         $statusCode = 405
@@ -1657,10 +1736,36 @@ try {
                                             if ($rt.status -eq "in-progress") { $stage = $rt.name + "..."; break }
                                             if ($rt.status -eq "todo") { $stage = "Waiting: " + $rt.name; break }
                                         }
-                                        # Check if all done
+                                        # Check if all done or if awaiting approval
                                         $allDone = ($runTasks | Where-Object { $_.status -eq "done" }).Count -eq $runTasks.Count -and $runTasks.Count -gt 0
                                         $anyFailed = ($runTasks | Where-Object { $_.status -eq "cancelled" }).Count -gt 0
+                                        $hasActiveTasks = ($runTasks | Where-Object { $_.status -in @("todo", "in-progress") }).Count -gt 0
                                         if ($allDone) { $stage = "Completing..." }
+
+                                        # Detect awaiting-approval: no active tasks, pipeline not complete, approval gates pending
+                                        # Note: $allDone can be true here (all phase-1 tasks done) — we still need to check approval gates
+                                        if (-not $hasActiveTasks -and $runTasks.Count -gt 0) {
+                                            $pipelineCompletePath2 = Join-Path $runOutputDir "pipeline-complete.json"
+                                            if (-not (Test-Path $pipelineCompletePath2)) {
+                                                $approvals2 = if ($runMeta.PSObject.Properties['approvals']) { $runMeta.approvals } else { $null }
+                                                $tp = $approvals2 -and $approvals2.PSObject.Properties['test_plan'] -and $approvals2.test_plan
+                                                $up = $approvals2 -and $approvals2.PSObject.Properties['uat_plan'] -and $approvals2.uat_plan
+                                                $tc = $approvals2 -and $approvals2.PSObject.Properties['test_cases'] -and $approvals2.test_cases
+                                                $awaitPhase = $null
+                                                if ((Test-Path (Join-Path $runOutputDir "test-plan.md")) -and -not $tp) {
+                                                    $awaitPhase = "test-plan"; $stage = "Awaiting Test Plan approval"
+                                                } elseif ((Test-Path (Join-Path $runOutputDir "uat-plan.md")) -and -not $up) {
+                                                    $awaitPhase = "uat-plan"; $stage = "Awaiting UAT Plan approval"
+                                                } elseif (((Test-Path (Join-Path $runOutputDir "test-cases.md")) -or (Get-ChildItem -Path (Join-Path $runOutputDir "test-cases") -Filter "*.md" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1)) -and -not $tc) {
+                                                    $awaitPhase = "test-cases"; $stage = "Awaiting Test Cases approval"
+                                                }
+                                                if ($awaitPhase) {
+                                                    $runMeta.status = "awaiting-approval"
+                                                    $runMeta | Add-Member -NotePropertyName "approval_phase" -NotePropertyValue $awaitPhase -Force
+                                                    $runMeta | ConvertTo-Json -Depth 4 | Set-Content $_.FullName -Encoding UTF8
+                                                }
+                                            }
+                                        }
                                         $runMeta | Add-Member -NotePropertyName "current_stage" -NotePropertyValue $stage -Force
                                     } else {
                                         # File-based stage detection (legacy/fallback)
@@ -1748,6 +1853,41 @@ try {
                         if (Test-Path $runMetaPath) {
                             $meta = Get-Content $runMetaPath -Raw | ConvertFrom-Json
                             $jiraKeys = $meta.jira_keys
+
+                            # Detect awaiting-approval from detail view poll (mirrors /api/qa/runs logic)
+                            if ($meta.status -eq "processing" -and $meta.workflow_name) {
+                                $rTaskDirs = @("todo", "in-progress", "done", "skipped", "cancelled")
+                                $rTasks = @()
+                                foreach ($rTDir in $rTaskDirs) {
+                                    $rTPath = Join-Path $botRoot "workspace\tasks\$rTDir"
+                                    if (Test-Path $rTPath) {
+                                        Get-ChildItem -Path $rTPath -Filter "*.json" -ErrorAction SilentlyContinue | ForEach-Object {
+                                            try {
+                                                $rTData = Get-Content $_.FullName -Raw | ConvertFrom-Json
+                                                if ($rTData.workflow -eq $meta.workflow_name) {
+                                                    $rTasks += @{ status = $rTDir }
+                                                }
+                                            } catch {}
+                                        }
+                                    }
+                                }
+                                $rHasActive = ($rTasks | Where-Object { $_.status -in @("todo", "in-progress") }).Count -gt 0
+                                if (-not $rHasActive -and $rTasks.Count -gt 0 -and -not (Test-Path (Join-Path $runOutputDir "pipeline-complete.json"))) {
+                                    $rApprovals = if ($meta.PSObject.Properties['approvals']) { $meta.approvals } else { $null }
+                                    $rTp = $rApprovals -and $rApprovals.PSObject.Properties['test_plan'] -and $rApprovals.test_plan
+                                    $rUp = $rApprovals -and $rApprovals.PSObject.Properties['uat_plan'] -and $rApprovals.uat_plan
+                                    $rTc = $rApprovals -and $rApprovals.PSObject.Properties['test_cases'] -and $rApprovals.test_cases
+                                    $rAwaitPhase = $null
+                                    if ((Test-Path (Join-Path $runOutputDir "test-plan.md")) -and -not $rTp) { $rAwaitPhase = "test-plan" }
+                                    elseif ((Test-Path (Join-Path $runOutputDir "uat-plan.md")) -and -not $rUp) { $rAwaitPhase = "uat-plan" }
+                                    elseif (((Test-Path (Join-Path $runOutputDir "test-cases.md")) -or (Get-ChildItem -Path (Join-Path $runOutputDir "test-cases") -Filter "*.md" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1)) -and -not $rTc) { $rAwaitPhase = "test-cases" }
+                                    if ($rAwaitPhase) {
+                                        $meta.status = "awaiting-approval"
+                                        $meta | Add-Member -NotePropertyName "approval_phase" -NotePropertyValue $rAwaitPhase -Force
+                                        $meta | ConvertTo-Json -Depth 4 | Set-Content $runMetaPath -Encoding UTF8
+                                    }
+                                }
+                            }
                         }
 
                         $uatPlan = $null
@@ -1876,6 +2016,9 @@ try {
                             $progress.current_stage = "complete"
                         }
 
+                        $approvals = if ($meta -and $meta.PSObject.Properties['approvals']) { $meta.approvals } else { $null }
+                        $approvalPhase = if ($meta -and $meta.PSObject.Properties['approval_phase']) { $meta.approval_phase } else { $null }
+
                         $content = @{
                             jira_keys = $jiraKeys
                             status = $runStatus
@@ -1885,6 +2028,8 @@ try {
                             test_cases = $testCases
                             systems = $systems
                             progress = $progress
+                            approvals = $approvals
+                            approval_phase = $approvalPhase
                         } | ConvertTo-Json -Depth 6 -Compress
                     }
                     break
