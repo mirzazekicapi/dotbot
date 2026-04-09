@@ -122,6 +122,28 @@ if (Test-Path $instanceIdModule) {
     Write-TestResult -Name "InstanceId module exists" -Status Fail -Message "Module not found at $instanceIdModule"
 }
 
+$worktreeManagerModule = Join-Path $botDir "systems\runtime\modules\WorktreeManager.psm1"
+if (Test-Path $worktreeManagerModule) {
+    Import-Module $worktreeManagerModule -Force
+
+    Add-Content -Path (Join-Path $testProject ".gitignore") -Value ".serena/"
+    $serenaCacheDir = Join-Path $testProject ".serena\cache"
+    New-Item -Path $serenaCacheDir -ItemType Directory -Force | Out-Null
+    Set-Content -Path (Join-Path $serenaCacheDir "index.json") -Value '{"cache":true}'
+    Set-Content -Path (Join-Path $testProject ".env") -Value "DOTBOT_TEST=1"
+
+    $gitignoredCopyPaths = @(Get-GitignoredCopyPaths -ProjectRoot $testProject)
+
+    Assert-True -Name "Get-GitignoredCopyPaths keeps ignored env files" `
+        -Condition ($gitignoredCopyPaths -contains ".env") `
+        -Message "Expected .env to be copied into worktrees"
+    Assert-True -Name "Get-GitignoredCopyPaths excludes legacy .serena caches" `
+        -Condition (-not ($gitignoredCopyPaths -contains ".serena/cache/index.json")) `
+        -Message "Legacy .serena cache contents should stay excluded from worktree copies"
+} else {
+    Write-TestResult -Name "WorktreeManager module exists" -Status Fail -Message "Module not found at $worktreeManagerModule"
+}
+
 $promptBuilderScript = Join-Path $botDir "systems\runtime\modules\prompt-builder.ps1"
 if (Test-Path $promptBuilderScript) {
     . $promptBuilderScript
@@ -2219,4 +2241,3 @@ $allPassed = Write-TestSummary -LayerName "Layer 2: Components"
 if (-not $allPassed) {
     exit 1
 }
-

@@ -98,7 +98,8 @@ Import-Module (Join-Path $PSScriptRoot "modules\ReferenceCache.psm1") -Force
 Import-Module (Join-Path $PSScriptRoot "modules\SettingsAPI.psm1") -Force
 Import-Module (Join-Path $PSScriptRoot "modules\ControlAPI.psm1") -Force
 Import-Module (Join-Path $PSScriptRoot "modules\ProductAPI.psm1") -Force
-Import-Module (Join-Path $PSScriptRoot "modules\TaskAPI.psm1") -Force
+# TaskAPI intentionally exports Delete-RoadmapTask for UI/back-compat, so disable verb-name warnings here.
+Import-Module (Join-Path $PSScriptRoot "modules\TaskAPI.psm1") -Force -DisableNameChecking
 Import-Module (Join-Path $PSScriptRoot "modules\ProcessAPI.psm1") -Force
 Import-Module (Join-Path $PSScriptRoot "modules\StateBuilder.psm1") -Force
 Import-Module (Join-Path $PSScriptRoot "modules\NotificationPoller.psm1") -Force
