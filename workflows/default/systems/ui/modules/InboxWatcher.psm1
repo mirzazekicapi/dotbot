@@ -14,8 +14,8 @@ entirely — no PS event system, no $script: scope issues, no silent failures.
 #>
 
 # Module-scope state
-$script:WorkerPSList = [System.Collections.Generic.List[powershell]]::new()
-$script:BotRoot      = $null
+$script:Workers     = [System.Collections.Generic.List[hashtable]]::new()  # { PS; StopFlag }
+$script:Initialized = $false
 
 function Initialize-InboxWatcher {
     param(
@@ -23,21 +23,38 @@ function Initialize-InboxWatcher {
         [string]$BotRoot
     )
 
-    $script:BotRoot = $BotRoot
-    $workspaceRoot  = Join-Path $BotRoot "workspace"
+    if ($script:Initialized) {
+        Write-BotLog -Level Debug -Message "[InboxWatcher] Already initialized, skipping"
+        return
+    }
+
+    $workspaceRoot = Join-Path $BotRoot "workspace"
 
     # Read file_listener config from settings
-    $settingsPath = Join-Path $BotRoot "settings\settings.default.json"
-    if (-not (Test-Path $settingsPath)) {
+    $settingsPath = Join-Path $BotRoot "settings" "settings.default.json"
+    if (-not (Test-Path -LiteralPath $settingsPath)) {
         Write-BotLog -Level Debug -Message "[InboxWatcher] settings.default.json not found at $settingsPath, skipping"
         return
     }
 
     try {
-        $settings = Get-Content $settingsPath -Raw | ConvertFrom-Json
+        $settings = Get-Content -LiteralPath $settingsPath -Raw | ConvertFrom-Json
     } catch {
         Write-BotLog -Level Warn -Message "[InboxWatcher] Failed to parse settings.default.json" -Exception $_
         return
+    }
+
+    # Apply user overrides from .control/settings.json (gitignored)
+    $overridePath = Join-Path $BotRoot ".control" "settings.json"
+    if (Test-Path -LiteralPath $overridePath) {
+        try {
+            $overrides = Get-Content -LiteralPath $overridePath -Raw | ConvertFrom-Json
+            if ($overrides.PSObject.Properties['file_listener']) {
+                $settings.file_listener = $overrides.file_listener
+            }
+        } catch {
+            Write-BotLog -Level Warn -Message "[InboxWatcher] Failed to parse .control/settings.json" -Exception $_
+        }
     }
 
     $listenerConfig = $settings.file_listener
@@ -52,7 +69,18 @@ function Initialize-InboxWatcher {
         return
     }
 
-    $logPath = Join-Path $BotRoot ".control\logs\inbox-watcher.log"
+    $maxConcurrent = if (($listenerConfig.max_concurrent -as [int]) -gt 0) {
+        $listenerConfig.max_concurrent -as [int]
+    } else { 3 }
+
+    $coalesceWindow = if (($listenerConfig.coalesce_window_seconds -as [int]) -gt 0) {
+        $listenerConfig.coalesce_window_seconds -as [int]
+    } else { 10 }
+
+    $logPath    = Join-Path $BotRoot ".control" "logs" "inbox-watcher.log"
+    $null       = New-Item -ItemType Directory -Force -Path (Split-Path $logPath -Parent)
+    $resolvedRoot = [System.IO.Path]::GetFullPath($workspaceRoot)
+    $rootPrefix   = $resolvedRoot.TrimEnd([IO.Path]::DirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
 
     foreach ($watcherDef in $watcherDefs) {
         $folder = $watcherDef.folder
@@ -61,8 +89,23 @@ function Initialize-InboxWatcher {
             continue
         }
 
-        $resolvedPath = Join-Path $workspaceRoot $folder
-        if (-not (Test-Path $resolvedPath)) {
+        # Reject rooted paths — on Windows, Join-Path with a rooted second argument
+        # discards the base entirely, bypassing the workspace boundary.
+        if ([System.IO.Path]::IsPathRooted($folder)) {
+            Write-BotLog -Level Warn -Message "[InboxWatcher] Rooted folder path rejected, skipping: $folder"
+            continue
+        }
+
+        # Normalise via GetFullPath so '..' sequences are resolved, then assert the
+        # result is still inside $workspaceRoot before doing anything with it.
+        $resolvedPath = [System.IO.Path]::GetFullPath((Join-Path $workspaceRoot $folder))
+
+        if ($resolvedPath -ne $resolvedRoot -and -not $resolvedPath.StartsWith($rootPrefix)) {
+            Write-BotLog -Level Warn -Message "[InboxWatcher] Folder '$folder' escapes workspace root, skipping: $resolvedPath"
+            continue
+        }
+
+        if (-not (Test-Path -LiteralPath $resolvedPath)) {
             Write-BotLog -Level Warn -Message "[InboxWatcher] Watched folder not found, skipping: $resolvedPath"
             continue
         }
@@ -70,6 +113,12 @@ function Initialize-InboxWatcher {
         $filter      = if ($watcherDef.filter)      { $watcherDef.filter }      else { '*' }
         $events      = if ($watcherDef.events)      { @($watcherDef.events) }   else { @('created') }
         $folderLabel = if ($watcherDef.description) { $watcherDef.description } else { "watched folder ($folder)" }
+
+        $knownEvents  = @('created', 'updated')
+        $unknownEvents = @($events | Where-Object { $_ -notin $knownEvents })
+        foreach ($unknown in $unknownEvents) {
+            Write-BotLog -Level Warn -Message "[InboxWatcher] Unknown event type '$unknown' for $folder — did you mean 'created' or 'updated'?"
+        }
 
         $watchCreated = 'created' -in $events
         $watchUpdated = 'updated' -in $events
@@ -88,21 +137,32 @@ function Initialize-InboxWatcher {
         $workerRunspace.SessionStateProxy.SetVariable('WatchCreated', $watchCreated)
         $workerRunspace.SessionStateProxy.SetVariable('WatchUpdated', $watchUpdated)
         $workerRunspace.SessionStateProxy.SetVariable('FolderLabel',  $folderLabel)
-        $workerRunspace.SessionStateProxy.SetVariable('BotRoot',      $script:BotRoot)
-        $workerRunspace.SessionStateProxy.SetVariable('LogPath',      $logPath)
+        $workerRunspace.SessionStateProxy.SetVariable('BotRoot',        $BotRoot)
+        $workerRunspace.SessionStateProxy.SetVariable('LogPath',        $logPath)
+        $workerRunspace.SessionStateProxy.SetVariable('MaxConcurrent',   $maxConcurrent)
+        $workerRunspace.SessionStateProxy.SetVariable('CoalesceWindow', $coalesceWindow)
+        $stopFlag = [bool[]](,$false)
+        $workerRunspace.SessionStateProxy.SetVariable('StopFlag',       $stopFlag)
 
         $ps = [powershell]::Create()
         $ps.Runspace = $workerRunspace
         $null = $ps.AddScript({
             function Write-WorkerLog {
-                param([string]$Message)
+                param(
+                    [string]$Message,
+                    [System.Management.Automation.ErrorRecord]$Exception
+                )
                 try {
                     $line = "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') [InboxWatcher] $Message"
+                    if ($Exception) {
+                        $line += " | $($Exception.Exception.Message)"
+                        if ($Exception.ScriptStackTrace) { $line += " at $($Exception.ScriptStackTrace)" }
+                    }
                     Add-Content -Path $LogPath -Value $line -ErrorAction SilentlyContinue
                 } catch {}
             }
 
-            Write-WorkerLog "Worker started. Watching: $WatchedPath (filter: $Filter)"
+            Write-WorkerLog "Worker started. Watching: $WatchedPath (filter: $Filter, coalesce: ${CoalesceWindow}s)"
 
             $watcher = New-Object System.IO.FileSystemWatcher
             $watcher.Path                  = $WatchedPath
@@ -119,76 +179,117 @@ function Initialize-InboxWatcher {
             if ($WatchUpdated) { $watchTypes = $watchTypes -bor [System.IO.WatcherChangeTypes]::Changed }
 
             $recentlyProcessed = @{}
+            $runningProcs      = [System.Collections.Generic.List[System.Diagnostics.Process]]::new()
+            $pendingFiles      = [System.Collections.Generic.List[hashtable]]::new()
+            $lastEventTime     = [DateTime]::MinValue
 
-            while ($true) {
-                try {
-                    $result = $watcher.WaitForChanged($watchTypes, 2000)
-                    if ($result.TimedOut) { continue }
+            # Launched for both mid-loop flushes and the on-shutdown flush.
+            # Closes over $pendingFiles, $runningProcs, and all injected variables.
+            $flushPending = {
+                if ($pendingFiles.Count -eq 0) { return }
 
-                    $filePath = Join-Path $WatchedPath $result.Name
-                    Write-WorkerLog "File detected: $filePath"
-
-                    # Skip directories
-                    if (Test-Path $filePath -PathType Container) {
-                        Write-WorkerLog "Skipping directory: $filePath"
-                        continue
-                    }
-
-                    # Debounce: skip if same file processed within last 5 seconds
-                    $now = [DateTime]::UtcNow
-                    if ($recentlyProcessed.ContainsKey($filePath)) {
-                        if (($now - $recentlyProcessed[$filePath]).TotalSeconds -lt 5) {
-                            Write-WorkerLog "Debounced: $filePath"
-                            continue
-                        }
-                    }
-                    $recentlyProcessed[$filePath] = $now
-
-                    # Purge stale debounce entries (older than 60s)
-                    $stale = @($recentlyProcessed.Keys | Where-Object {
-                        ($now - $recentlyProcessed[$_]).TotalSeconds -gt 60
-                    })
-                    foreach ($key in $stale) { $recentlyProcessed.Remove($key) }
-
-                    # Build context prompt
-                    $fileName      = Split-Path $filePath -Leaf
-                    $contextPrompt = "A new file '$fileName' has been added to $FolderLabel (path: $filePath). Read this file using your available tools, review its contents against the existing product documentation and task list, and create any new tasks needed to address the changes, requirements, or decisions it represents."
-                    $description   = "Review new file: $fileName"
-
-                    # Locate launcher
-                    $launcherPath = Join-Path $BotRoot "systems\runtime\launch-process.ps1"
-                    if (-not (Test-Path $launcherPath)) {
-                        Write-WorkerLog "ERROR: Launcher not found at $launcherPath"
-                        continue
-                    }
-
-                    $escapedPrompt = $contextPrompt -replace '"', '\"'
-                    $escapedDesc   = $description   -replace '"', '\"'
-                    $launchArgs    = @(
-                        "-File", "`"$launcherPath`"",
-                        "-Type", "task-creation",
-                        "-Prompt", "`"$escapedPrompt`"",
-                        "-Description", "`"$escapedDesc`""
-                    )
-
-                    $startParams = @{ ArgumentList = $launchArgs }
-                    if ($IsWindows) { $startParams.WindowStyle = 'Normal' }
-
-                    Write-WorkerLog "Launching task-creation for: $fileName"
-                    Start-Process pwsh @startParams
-                    Write-WorkerLog "Launched successfully for: $fileName"
-                } catch {
-                    Write-WorkerLog "ERROR: $_"
+                if ($pendingFiles.Count -eq 1) {
+                    $entry         = $pendingFiles[0]
+                    $contextPrompt = "A new file '$($entry.SafeName)' has been added to $FolderLabel (path: $($entry.Path)). Read this file using your available tools, review its contents against the existing product documentation and task list, and create any new tasks needed to address the changes, requirements, or decisions it represents."
+                    $description   = "Review new file: $($entry.SafeName)"
+                } else {
+                    $fileList      = ($pendingFiles | ForEach-Object { "- $($_.SafeName) (path: $($_.Path))" }) -join "`n"
+                    $contextPrompt = "$($pendingFiles.Count) new files have been added to $FolderLabel`:`n$fileList`n`nRead each file using your available tools, review their contents against the existing product documentation and task list, and create any new tasks needed."
+                    $description   = "Review $($pendingFiles.Count) new files in $FolderLabel"
                 }
+
+                $launcherPath = Join-Path $BotRoot "systems" "runtime" "launch-process.ps1"
+                if (-not (Test-Path -LiteralPath $launcherPath)) {
+                    Write-WorkerLog "ERROR: Launcher not found at $launcherPath"
+                    return
+                }
+
+                $null = $runningProcs.RemoveAll([Predicate[System.Diagnostics.Process]]{ param($p) $p.HasExited })
+                if ($runningProcs.Count -ge $MaxConcurrent) {
+                    Write-WorkerLog "Concurrency limit ($MaxConcurrent) reached, dropping batch of $($pendingFiles.Count) file(s)"
+                    return
+                }
+
+                $launchArgs  = @("-File", $launcherPath, "-Type", "task-creation", "-Prompt", $contextPrompt, "-Description", $description)
+                $startParams = @{ ArgumentList = $launchArgs; PassThru = $true }
+                if ($IsWindows) { $startParams.WindowStyle = 'Normal' }
+
+                Write-WorkerLog "Launching task-creation for $($pendingFiles.Count) file(s): $(($pendingFiles | ForEach-Object { $_.SafeName }) -join ', ')"
+                $proc = Start-Process pwsh @startParams
+                if ($proc) { $runningProcs.Add($proc) }
+                Write-WorkerLog "Launched: $description ($($runningProcs.Count)/$MaxConcurrent active)"
+            }
+
+            try {
+                while (-not $StopFlag[0]) {
+                    try {
+                        $result = $watcher.WaitForChanged($watchTypes, 2000)
+                        $now    = [DateTime]::UtcNow
+
+                        if (-not $result.TimedOut) {
+                            $filePath = Join-Path $WatchedPath $result.Name
+                            Write-WorkerLog "File detected: $filePath"
+
+                            if (Test-Path -LiteralPath $filePath -PathType Container) {
+                                Write-WorkerLog "Skipping directory: $filePath"
+                            } else {
+                                $debounced = $recentlyProcessed.ContainsKey($filePath) -and
+                                             ($now - $recentlyProcessed[$filePath]).TotalSeconds -lt 5
+                                if ($debounced) {
+                                    Write-WorkerLog "Debounced: $filePath"
+                                } else {
+                                    $recentlyProcessed[$filePath] = $now
+
+                                    # Purge stale debounce entries (older than 60s)
+                                    $stale = @($recentlyProcessed.Keys | Where-Object {
+                                        ($now - $recentlyProcessed[$_]).TotalSeconds -gt 60
+                                    })
+                                    foreach ($key in $stale) { $recentlyProcessed.Remove($key) }
+
+                                    # Sanitize filename for CLI safety; keep path intact for Claude.
+                                    $fileName     = Split-Path $filePath -Leaf
+                                    $safeFileName = $fileName -replace '["$`]', '_'
+                                    $pendingFiles.Add(@{ Path = $filePath; SafeName = $safeFileName })
+                                    $lastEventTime = $now
+                                    Write-WorkerLog "Queued: $filePath ($($pendingFiles.Count) pending)"
+                                }
+                            }
+                        }
+
+                        # Flush once the folder has been quiet for CoalesceWindow seconds
+                        if ($pendingFiles.Count -gt 0 -and
+                            ($now - $lastEventTime).TotalSeconds -ge $CoalesceWindow) {
+                            & $flushPending
+                            $pendingFiles.Clear()
+                        }
+                    } catch {
+                        Write-WorkerLog "ERROR in worker loop" -Exception $_
+                    }
+                }
+            } finally {
+                # Flush any events still pending on graceful stop.
+                # Wrapped in its own try so a flush failure never skips Dispose().
+                try {
+                    if ($pendingFiles.Count -gt 0) {
+                        Write-WorkerLog "Flushing $($pendingFiles.Count) pending file(s) on shutdown"
+                        & $flushPending
+                        $pendingFiles.Clear()
+                    }
+                } catch {
+                    Write-WorkerLog "ERROR during shutdown flush" -Exception $_
+                }
+                $watcher.Dispose()
+                Write-WorkerLog "Worker stopped, watcher disposed"
             }
         })
         $null = $ps.BeginInvoke()
-        $script:WorkerPSList.Add($ps)
+        $script:Workers.Add(@{ PS = $ps; StopFlag = $stopFlag })
         Write-BotLog -Level Info -Message "[InboxWatcher] Worker started for: $resolvedPath (filter: $filter, events: $($events -join ', '))"
     }
 
-    if ($script:WorkerPSList.Count -gt 0) {
-        Write-BotLog -Level Info -Message "[InboxWatcher] Initialization complete. $($script:WorkerPSList.Count) watcher(s) active. Log: $logPath"
+    if ($script:Workers.Count -gt 0) {
+        $script:Initialized = $true
+        Write-BotLog -Level Info -Message "[InboxWatcher] Initialization complete. $($script:Workers.Count) watcher(s) active. Log: $logPath"
     }
 }
 
@@ -196,14 +297,22 @@ function Initialize-InboxWatcher {
 function Stop-InboxWatcher {
     Write-BotLog -Level Debug -Message "[InboxWatcher] Stopping all inbox watchers"
 
-    foreach ($ps in $script:WorkerPSList) {
+    # Signal all workers to exit cooperatively. Each worker checks StopFlag[0]
+    # after each WaitForChanged timeout (2 s), so 2.5 s gives one full cycle.
+    foreach ($worker in $script:Workers) {
+        $worker.StopFlag[0] = $true
+    }
+    Start-Sleep -Milliseconds 2500
+
+    foreach ($worker in $script:Workers) {
         try {
-            $ps.Stop()
-            $ps.Runspace.Close()
-            $ps.Dispose()
+            $worker.PS.Stop()
+            $worker.PS.Runspace.Close()
+            $worker.PS.Dispose()
         } catch {}
     }
-    $script:WorkerPSList.Clear()
+    $script:Workers.Clear()
+    $script:Initialized = $false
 
     Write-BotLog -Level Debug -Message "[InboxWatcher] All inbox watchers stopped"
 }

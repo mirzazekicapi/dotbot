@@ -2436,6 +2436,244 @@ if (Test-Path $dotBotLogModule) {
 }
 
 # ═══════════════════════════════════════════════════════════════════
+# INBOX WATCHER MODULE TESTS
+# ═══════════════════════════════════════════════════════════════════
+Write-Host ""
+Write-Host "--- InboxWatcher Module ---" -ForegroundColor Cyan
+
+$inboxWatcherModule = Join-Path $botDir "systems\ui\modules\InboxWatcher.psm1"
+
+if (Test-Path $inboxWatcherModule) {
+    # DotBotLog may have been removed by the preceding DotBotLog test section — re-import it
+    if (-not (Get-Module DotBotLog)) {
+        if (Test-Path $dotBotLogModule) { Import-Module $dotBotLogModule -Force }
+    }
+
+    $inboxTestRoot = Join-Path ([IO.Path]::GetTempPath()) "inbox-watcher-test-$([guid]::NewGuid().ToString('N').Substring(0,8))"
+    try {
+        # ── Scaffolding ──────────────────────────────────────────────────
+        $inboxBotRoot  = Join-Path $inboxTestRoot ".bot"
+        $settingsDir   = Join-Path $inboxBotRoot "settings"
+        $controlDir    = Join-Path $inboxBotRoot ".control"
+        $inboxFolder   = Join-Path $inboxBotRoot "workspace" "inbox"
+        $logPath       = Join-Path $controlDir "logs" "inbox-watcher.log"
+
+        foreach ($dir in @($settingsDir, $controlDir, $inboxFolder)) {
+            New-Item -ItemType Directory -Path $dir -Force | Out-Null
+        }
+
+        $defaultSettingsPath  = Join-Path $settingsDir "settings.default.json"
+        $overrideSettingsPath = Join-Path $controlDir "settings.json"
+
+        function Write-InboxSettings {
+            param([object]$Config)
+            $Config | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $defaultSettingsPath -Encoding UTF8
+        }
+
+        function Reset-InboxWatcher {
+            try { Stop-InboxWatcher } catch {}
+            Remove-Module InboxWatcher -ErrorAction SilentlyContinue
+            Import-Module $inboxWatcherModule -Force
+        }
+
+        # Test 1. Missing settings file — silent no-op ──────────────────────
+        Import-Module $inboxWatcherModule -Force
+        $threw = $false
+        try { Initialize-InboxWatcher -BotRoot $inboxBotRoot } catch { $threw = $true }
+        Assert-True -Name "Initialize-InboxWatcher no-op when settings file missing" `
+            -Condition (-not $threw)
+        Reset-InboxWatcher
+
+        # Test 2. Disabled in settings — silent no-op ───────────────────────
+        Write-InboxSettings @{ file_listener = @{ enabled = $false; watchers = @() } }
+        $threw = $false
+        try { Initialize-InboxWatcher -BotRoot $inboxBotRoot } catch { $threw = $true }
+        Assert-True -Name "Initialize-InboxWatcher no-op when file_listener disabled" `
+            -Condition (-not $threw)
+        Reset-InboxWatcher
+
+        # Test 3. Enabled but zero watchers — silent no-op ──────────────────
+        Write-InboxSettings @{ file_listener = @{ enabled = $true; watchers = @() } }
+        $threw = $false
+        try { Initialize-InboxWatcher -BotRoot $inboxBotRoot } catch { $threw = $true }
+        Assert-True -Name "Initialize-InboxWatcher no-op when watchers list is empty" `
+            -Condition (-not $threw)
+        Reset-InboxWatcher
+
+        # Test 4. Invalid JSON in settings.default.json ─────────────────────
+        "{ not valid json" | Set-Content -LiteralPath $defaultSettingsPath -Encoding UTF8
+        $threw = $false
+        try { Initialize-InboxWatcher -BotRoot $inboxBotRoot } catch { $threw = $true }
+        Assert-True -Name "Initialize-InboxWatcher no-op on malformed settings JSON" `
+            -Condition (-not $threw)
+        Reset-InboxWatcher
+
+        # Test 5. Invalid JSON in user override — defaults still used ────────
+        Write-InboxSettings @{ file_listener = @{ enabled = $false; watchers = @() } }
+        "{ bad" | Set-Content -LiteralPath $overrideSettingsPath -Encoding UTF8
+        $threw = $false
+        try { Initialize-InboxWatcher -BotRoot $inboxBotRoot } catch { $threw = $true }
+        Assert-True -Name "Initialize-InboxWatcher ignores invalid override JSON" `
+            -Condition (-not $threw)
+        Remove-Item -LiteralPath $overrideSettingsPath -ErrorAction SilentlyContinue
+        Reset-InboxWatcher
+
+        # Test 6. User override enables listener that defaults had disabled ───
+        Write-InboxSettings @{ file_listener = @{ enabled = $false; watchers = @() } }
+        @{ file_listener = @{ enabled = $true; watchers = @() } } |
+            ConvertTo-Json -Depth 4 |
+            Set-Content -LiteralPath $overrideSettingsPath -Encoding UTF8
+        $threw = $false
+        try { Initialize-InboxWatcher -BotRoot $inboxBotRoot } catch { $threw = $true }
+        Assert-True -Name "Initialize-InboxWatcher applies user override from .control/settings.json" `
+            -Condition (-not $threw)
+        Remove-Item -LiteralPath $overrideSettingsPath -ErrorAction SilentlyContinue
+        Reset-InboxWatcher
+
+        # Test 7. Rooted folder path rejected without throw ──────────────────
+        $rootedPath = if ($IsWindows) { 'C:\Windows' } else { '/etc' }
+        Write-InboxSettings @{
+            file_listener = @{
+                enabled  = $true
+                watchers = @(@{ folder = $rootedPath; events = @('created') })
+            }
+        }
+        $threw = $false
+        try { Initialize-InboxWatcher -BotRoot $inboxBotRoot } catch { $threw = $true }
+        Assert-True -Name "Initialize-InboxWatcher rejects rooted folder path" `
+            -Condition (-not $threw)
+        Reset-InboxWatcher
+
+        # Test 8. Path traversal rejected without throw ──────────────────────
+        Write-InboxSettings @{
+            file_listener = @{
+                enabled  = $true
+                watchers = @(@{ folder = '../../etc'; events = @('created') })
+            }
+        }
+        $threw = $false
+        try { Initialize-InboxWatcher -BotRoot $inboxBotRoot } catch { $threw = $true }
+        Assert-True -Name "Initialize-InboxWatcher rejects path traversal in folder" `
+            -Condition (-not $threw)
+        Reset-InboxWatcher
+
+        # Test 9. Nonexistent watched folder skipped without throw ───────────
+        Write-InboxSettings @{
+            file_listener = @{
+                enabled  = $true
+                watchers = @(@{ folder = 'does-not-exist'; events = @('created') })
+            }
+        }
+        $threw = $false
+        try { Initialize-InboxWatcher -BotRoot $inboxBotRoot } catch { $threw = $true }
+        Assert-True -Name "Initialize-InboxWatcher skips nonexistent watched folder" `
+            -Condition (-not $threw)
+        Reset-InboxWatcher
+
+        # Test 10. Unknown event type warns but does not throw ───────────────
+        Write-InboxSettings @{
+            file_listener = @{
+                enabled  = $true
+                watchers = @(@{ folder = 'inbox'; events = @('create') })   # typo: 'create' not 'created'
+            }
+        }
+        $threw = $false
+        try { Initialize-InboxWatcher -BotRoot $inboxBotRoot } catch { $threw = $true }
+        Assert-True -Name "Initialize-InboxWatcher warns on unknown event type without throw" `
+            -Condition (-not $threw)
+        Reset-InboxWatcher
+
+        # Test 11. Non-numeric max_concurrent falls back to default ──────────
+        Write-InboxSettings @{
+            file_listener = @{
+                enabled        = $true
+                max_concurrent = "bad"
+                watchers       = @(@{ folder = 'inbox'; events = @('created') })
+            }
+        }
+        $threw = $false
+        try { Initialize-InboxWatcher -BotRoot $inboxBotRoot } catch { $threw = $true }
+        Assert-True -Name "Initialize-InboxWatcher falls back to default when max_concurrent is non-numeric" `
+            -Condition (-not $threw)
+        Reset-InboxWatcher
+
+        # Test 12. Non-numeric coalesce_window_seconds falls back to default ─
+        Write-InboxSettings @{
+            file_listener = @{
+                enabled                 = $true
+                coalesce_window_seconds = "bad"
+                watchers                = @(@{ folder = 'inbox'; events = @('created') })
+            }
+        }
+        $threw = $false
+        try { Initialize-InboxWatcher -BotRoot $inboxBotRoot } catch { $threw = $true }
+        Assert-True -Name "Initialize-InboxWatcher falls back to default when coalesce_window_seconds is non-numeric" `
+            -Condition (-not $threw)
+        Reset-InboxWatcher
+
+        # Test 13. Valid config — worker starts and writes startup log ───────
+        Write-InboxSettings @{
+            file_listener = @{
+                enabled  = $true
+                watchers = @(@{ folder = 'inbox'; events = @('created') })
+            }
+        }
+        $threw = $false
+        try { Initialize-InboxWatcher -BotRoot $inboxBotRoot } catch { $threw = $true }
+        Assert-True -Name "Initialize-InboxWatcher starts worker for valid config" `
+            -Condition (-not $threw)
+
+        Start-Sleep -Milliseconds 600   # let worker runspace write its startup log entry
+        Assert-True -Name "Initialize-InboxWatcher creates log file" `
+            -Condition (Test-Path -LiteralPath $logPath)
+        if (Test-Path -LiteralPath $logPath) {
+            $logText = Get-Content -LiteralPath $logPath -Raw -ErrorAction SilentlyContinue
+            Assert-True -Name "Initialize-InboxWatcher logs worker started message" `
+                -Condition ($logText -match 'Worker started') `
+                -Message "Expected 'Worker started' in log"
+        }
+
+        # Test 14. Re-entrancy guard — second init call is a no-op ──────────
+        $linesBefore = if (Test-Path -LiteralPath $logPath) {
+            (Get-Content -LiteralPath $logPath).Count
+        } else { 0 }
+        $threw = $false
+        try { Initialize-InboxWatcher -BotRoot $inboxBotRoot } catch { $threw = $true }
+        Start-Sleep -Milliseconds 300
+        $linesAfter = if (Test-Path -LiteralPath $logPath) {
+            (Get-Content -LiteralPath $logPath).Count
+        } else { 0 }
+        Assert-True -Name "Initialize-InboxWatcher no-op on second call" `
+            -Condition (-not $threw)
+        Assert-True -Name "Initialize-InboxWatcher does not spawn additional workers on second call" `
+            -Condition ($linesAfter -eq $linesBefore) `
+            -Message "Log grew unexpectedly: before=$linesBefore after=$linesAfter"
+
+        # Test 15. Stop-InboxWatcher cleans up without throw ─────────────────
+        $threw = $false
+        try { Stop-InboxWatcher } catch { $threw = $true }
+        Assert-True -Name "Stop-InboxWatcher cleans up without throw" `
+            -Condition (-not $threw)
+
+        # Test 16. Re-init after stop succeeds (Initialized flag was reset) ──
+        $threw = $false
+        try { Initialize-InboxWatcher -BotRoot $inboxBotRoot } catch { $threw = $true }
+        Assert-True -Name "Initialize-InboxWatcher succeeds after Stop-InboxWatcher" `
+            -Condition (-not $threw)
+        Stop-InboxWatcher
+
+    } finally {
+        try { Stop-InboxWatcher } catch {}
+        Remove-Module InboxWatcher -ErrorAction SilentlyContinue
+        if ($inboxTestRoot -and (Test-Path $inboxTestRoot)) {
+            Remove-Item $inboxTestRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+} else {
+    Write-TestResult -Name "InboxWatcher module exists" -Status Skip -Message "Module not found at $inboxWatcherModule"
+}
+
+# ═══════════════════════════════════════════════════════════════════
 # CLEANUP
 # ═══════════════════════════════════════════════════════════════════
 
