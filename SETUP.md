@@ -1,119 +1,96 @@
 # Setup Guide
 
-Manual steps to complete **after** merging the triage workflow files into `main`.
+Reference for the dotbot triage workflow infrastructure. Initial setup was completed on 2026-04-10.
 
-## 1. GitHub Project
+## GitHub Project
 
-Open [https://github.com/users/andresharpe/projects/2](https://github.com/users/andresharpe/projects/2) and configure:
+[Dotbot v4 Roadmap](https://github.com/users/andresharpe/projects/2)
 
 ### Status field
 
-Add a single-select **Status** field with these options (in order):
+Single-select **Status** with these stages (in order):
 
-1. Inbox
-2. Triage
-3. Spec/Design
-4. Ready
-5. In Progress
-6. In Review
-7. Done
+1. Inbox - new issue or PR, not yet looked at
+2. Triage - being reviewed by the steering group
+3. Spec/Design - needs a PRD or design before it is buildable
+4. Ready - triaged and ready for a contributor to pick up
+5. In Progress - actively being worked on
+6. In Review - PR open and under review
+7. Done - merged and shipped
 
 ### Custom fields
-
-Add these fields to the project:
 
 - **PRD link** (text) - URL to the product requirements document
 - **Design link** (text) - URL to Figma/design artifact
 - **Size** (single-select) - XS, S, M, L, XL
-- **Owner** (text or assignee) - who is working on it
 
-### Built-in workflows
+### Built-in project workflows (enabled)
 
-Go to Project Settings > Workflows and enable:
-
-- **Auto-add** - any new issue or PR in `andresharpe/dotbot` -> Status = Inbox
+- **Auto-add to project** - any new issue or PR in `andresharpe/dotbot` (filter: `is:issue,pr is:open`)
+- **Item added to project** -> Status = Inbox
 - **Item closed** -> Status = Done
-- **PR merged** -> Status = Done
-- **PR opened linked to issue** -> Status = In Review
+- **Pull request merged** -> Status = Done
+- **Pull request linked to issue** -> Status = In Review
 
-### Saved views
+### Saved views (to be created as needed)
 
-Create these saved views:
-
-- **Inbox** - filter: Status = Inbox
 - **Triage queue** - filter: label = needs-triage
 - **Up for grabs** - filter: Status = Ready, sort by Size
 - **In flight** - filter: Status in (In Progress, In Review)
 
-## 2. Repo settings
-
-Go to [https://github.com/andresharpe/dotbot/settings](https://github.com/andresharpe/dotbot/settings):
+## Repo settings
 
 ### Branch protection on `main`
 
-Settings > Branches > Add rule for `main`:
-
-- [x] Require a pull request before merging
-- [x] Require approvals: 1
-- [x] Dismiss stale pull request approvals when new commits are pushed
-- [x] Require status checks to pass before merging
-  - Add: `PR link check / check` (the job name from the `pr-link-check` workflow)
-- [ ] Do not require branches to be up to date (optional, your call)
+- Require a pull request before merging
+- Require 1 approval, dismiss stale reviews
+- Require status check: `PR link check / check`
 
 ### General
 
-- [x] Automatically delete head branches
+- Automatically delete head branches: enabled
 
-### Discussions (optional)
+## Discord webhooks
 
-Settings > General > Features > [x] Discussions
+Four webhooks are provisioned on the dotbot Discord server and stored as GitHub Actions secrets:
 
-## 3. Discord webhooks
+| GitHub secret | Discord channel | Webhook name | Fires on |
+|---|---|---|---|
+| `DISCORD_DEVOPS_WEBHOOK` | #devops | GitHub - New Issues | New issue opened |
+| `DISCORD_ADVISORY_WEBHOOK` | #advisory-steering | GitHub - Triage & Stale | Triage nudge (weekday cron), weekly stale digest |
+| `DISCORD_CONTRIBUTORS_WEBHOOK` | #ap-contributors | GitHub - Ready for Pickup | Issue labelled `ready` |
+| `DISCORD_PR_WEBHOOK` | #pull-requests | GitHub - PR Activity | PR opened, ready for review, merged, closed |
 
-Provision webhooks using the existing discord.js tooling.
+### Re-provisioning webhooks
 
-### Run the webhook script
-
-The webhook provisioning scripts live in `ideas/team/discord-setup/` which is gitignored (local tooling only). If you don't have it, ask Andre for a copy.
+If a webhook URL is rotated or lost, re-run the provisioning script (local tooling, gitignored):
 
 ```bash
 cd ideas/team/discord-setup
-npm install        # if not already done
-npm run webhooks   # runs create-webhooks.js
+npm install
+npm run webhooks
 ```
 
-Requires the `DISCORD_BOT_TOKEN` environment variable. Set it via KeePassXC before running (the token is stored under `APIs/discord/dotbot-bot` in the team KeePass vault).
+Requires `DISCORD_BOT_TOKEN` env var (KeePassXC: `APIs/discord/dotbot-bot`). The script is idempotent - it reuses existing webhooks by name. Copy the printed URLs into the matching GitHub Actions secrets.
 
-The script will print four webhook URLs. Copy each into the matching GitHub Actions secret:
+## GitHub Actions workflows
 
-Go to [Repo Settings > Secrets and variables > Actions](https://github.com/andresharpe/dotbot/settings/secrets/actions) and add:
-
-| GitHub secret | Source channel | Webhook name |
+| Workflow | Trigger | What it does |
 |---|---|---|
-| `DISCORD_DEVOPS_WEBHOOK` | #devops | GitHub - New Issues |
-| `DISCORD_ADVISORY_WEBHOOK` | #advisory-steering | GitHub - Triage & Stale |
-| `DISCORD_CONTRIBUTORS_WEBHOOK` | #ap-contributors | GitHub - Ready for Pickup |
-| `DISCORD_PR_WEBHOOK` | #pull-requests | GitHub - PR Activity |
+| `notify-new-issue.yml` | `issues.opened` | Posts embed to #devops |
+| `triage-nudge.yml` | Weekday cron 07:00 UTC + manual | Queries `needs-triage` issues idle 2+ days, posts to #advisory-steering |
+| `notify-ready.yml` | `issues.labeled` (ready) | Posts to #ap-contributors with size/tags |
+| `notify-pr.yml` | `pull_request` (opened, ready, closed) | Posts to #pull-requests |
+| `pr-link-check.yml` | `pull_request_target` (opened, edited, sync) | Fails if no `Closes/Fixes/Resolves #N`; override with `no-issue` label |
+| `stale.yml` | Monday cron 07:00 UTC + manual | Marks stale issues, posts weekly digest to #advisory-steering |
+| `sync-labels.yml` | Push to main (labels.yml changed) + manual | Syncs `.github/labels.yml` to repo labels |
 
-The script is idempotent - re-running reuses existing webhooks with matching names.
+## Labels
 
-## 4. First-run checklist
+Managed in `.github/labels.yml` and synced via the `sync-labels` workflow. Categories:
 
-After completing steps 1-3, verify everything works:
-
-- [ ] Run `npm run webhooks` in `ideas/team/discord-setup/` and add the four secrets to GitHub
-- [ ] Run the `sync-labels` workflow manually (Actions > Sync labels > Run workflow) to create all labels
-- [ ] File one test issue per template (feature, bug, question) to verify:
-  - Auto-labels (`needs-triage`, `type:*`) are applied
-  - Project auto-add puts it in Inbox
-  - A notification appears in `#devops`
-- [ ] Manually add the `ready` label to one test issue:
-  - Expect a notification in `#ap-contributors`
-- [ ] Open a draft PR with `Closes #<test-issue>` in the body:
-  - Expect a notification in `#pull-requests`
-  - Expect the project card to move to In Review
-- [ ] Trigger `triage-nudge.yml` via workflow_dispatch:
-  - Expect a post in `#advisory-steering` (if any `needs-triage` issues exist > 2 days)
-- [ ] Add senior contributor GitHub handles to `.github/CODEOWNERS`
-- [ ] Verify the Discord invite URLs in `.github/ISSUE_TEMPLATE/config.yml` and `.github/ISSUE_TEMPLATE/question.yml` are still valid (`https://discord.gg/UPQDpN2f8N`)
-- [ ] Close/delete the test issues
+- **Status** (blue) - needs-triage, ready, in-progress, blocked, help-wanted, good-first-issue
+- **Type** (purple) - type:feature, type:bug, type:question, type:chore, type:docs
+- **Size** (grey) - size:xs, size:s, size:m, size:l, size:xl
+- **Resolution** (red/brown) - wontfix, duplicate, needs-info, stale, stale-triage
+- **Workflow** (yellow) - no-issue, pinned
