@@ -4,6 +4,88 @@
  */
 
 let qaPollTimer = null;
+let qaChatRunId = null;
+let qaChatPhase = null;
+
+/**
+ * Open the QA chat modal for a given run/phase
+ */
+function openQAChatModal(runId, phase) {
+    qaChatRunId = runId;
+    qaChatPhase = phase;
+    const phaseLabels = { 'test-plan': 'Test Plan', 'uat-plan': 'UAT Plan', 'test-cases': 'Test Cases' };
+    const label = phaseLabels[phase] || phase;
+
+    const modal = document.getElementById('qa-chat-modal');
+    const textarea = document.getElementById('qa-chat-comment');
+    const status = document.getElementById('qa-chat-status');
+    const title = modal ? modal.querySelector('.modal-title') : null;
+
+    if (title) title.textContent = `Refine ${label}`;
+    if (textarea) textarea.value = '';
+    if (status) { status.textContent = ''; }
+    if (modal) modal.classList.add('visible');
+    if (textarea) setTimeout(() => textarea.focus(), 50);
+}
+
+/**
+ * Close the QA chat modal
+ */
+function closeQAChatModal() {
+    const modal = document.getElementById('qa-chat-modal');
+    if (modal) modal.classList.remove('visible');
+    qaChatRunId = null;
+    qaChatPhase = null;
+}
+
+/**
+ * Send a chat comment to regenerate the current phase
+ */
+async function sendQAChat() {
+    const textarea = document.getElementById('qa-chat-comment');
+    const status = document.getElementById('qa-chat-status');
+    const sendBtn = document.getElementById('qa-chat-send-btn');
+    const btnText = sendBtn ? sendBtn.querySelector('.btn-text') : null;
+    const btnLoading = sendBtn ? sendBtn.querySelector('.btn-loading') : null;
+
+    const comment = textarea ? textarea.value.trim() : '';
+    if (!comment) {
+        if (status) { status.textContent = 'Please enter a comment'; status.style.color = 'var(--color-accent)'; }
+        if (textarea) textarea.focus();
+        return;
+    }
+
+    if (sendBtn) sendBtn.disabled = true;
+    if (btnText) btnText.style.display = 'none';
+    if (btnLoading) btnLoading.style.display = '';
+    if (status) status.textContent = '';
+
+    const runId = qaChatRunId;
+    const phase = qaChatPhase;
+
+    try {
+        const res = await fetch(`${API_BASE}/api/qa/chat`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ run_id: runId, phase, comment })
+        });
+        const data = await res.json();
+        if (data.success) {
+            closeQAChatModal();
+            showToast('Regenerating — check back shortly', 'success');
+            await showRunDetail(runId);
+            startQAProgressPoll(runId);
+        } else {
+            if (status) { status.textContent = data.error || 'Failed to send'; status.style.color = 'var(--color-accent)'; }
+        }
+    } catch (e) {
+        if (status) { status.textContent = 'Request failed'; status.style.color = 'var(--color-accent)'; }
+    } finally {
+        if (sendBtn) sendBtn.disabled = false;
+        if (btnText) btnText.style.display = '';
+        if (btnLoading) btnLoading.style.display = 'none';
+    }
+}
 
 /**
  * Initialize QA tab — check profile, load runs, wire form
@@ -28,6 +110,18 @@ async function initQATab() {
     // Back button is wired dynamically via onclick in showRunDetail/showRunDocument
     const backBtn = document.getElementById('qa-back-btn');
     if (backBtn) backBtn.onclick = () => showRunList();
+
+    // Wire QA chat modal
+    const chatModal = document.getElementById('qa-chat-modal');
+    if (chatModal) {
+        const closeBtn = chatModal.querySelector('.modal-close');
+        if (closeBtn) closeBtn.addEventListener('click', closeQAChatModal);
+        chatModal.addEventListener('click', (e) => { if (e.target === chatModal) closeQAChatModal(); });
+    }
+    const chatCloseBtn = document.getElementById('qa-chat-close-btn');
+    if (chatCloseBtn) chatCloseBtn.addEventListener('click', closeQAChatModal);
+    const chatSendBtn = document.getElementById('qa-chat-send-btn');
+    if (chatSendBtn) chatSendBtn.addEventListener('click', sendQAChat);
 
     // Load existing runs
     await loadQARuns();
@@ -367,6 +461,31 @@ async function approveQAPhase(runId, phase) {
 }
 
 /**
+ * Skip a QA phase and continue to the next generation step without this artifact
+ */
+async function skipQAPhase(runId, phase) {
+    const phaseLabels = { 'test-plan': 'Test Plan', 'uat-plan': 'UAT Plan', 'test-cases': 'Test Cases' };
+    const label = phaseLabels[phase] || phase;
+
+    try {
+        const res = await fetch(`${API_BASE}/api/qa/skip`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ run_id: runId, phase })
+        });
+        const data = await res.json();
+        if (data.success) {
+            showToast(`${label} skipped — continuing pipeline`, 'success');
+            await showRunDetail(runId);
+        } else {
+            showToast(data.error || 'Skip failed', 'error');
+        }
+    } catch (e) {
+        showToast('Skip request failed', 'error');
+    }
+}
+
+/**
  * Show detail view for a specific run
  */
 // Store current run data and ID for sub-navigation
@@ -489,6 +608,20 @@ function renderArtifactCards(data) {
         return `<button class="qa-approve-btn" data-phase="${phase}" title="Approve and continue to next step">Approve</button>`;
     }
 
+    // Render a chat button for a given phase (only shown when that phase needs approval)
+    function chatBtn(phase) {
+        const needsApproval = isAwaitingApproval && approvalPhase === phase;
+        if (!needsApproval) return '';
+        return `<button class="qa-chat-btn" data-phase="${phase}" title="Refine with comments and regenerate">Chat</button>`;
+    }
+
+    // Render a skip button for a given phase (only shown when that phase needs approval)
+    function skipBtn(phase) {
+        const needsApproval = isAwaitingApproval && approvalPhase === phase;
+        if (!needsApproval) return '';
+        return `<button class="qa-skip-btn" data-phase="${phase}" title="Skip this artifact and continue to the next step">Skip</button>`;
+    }
+
     let html = '<div class="qa-subcards">';
 
     const hasUatPlan = !!data.uat_plan;
@@ -511,7 +644,7 @@ function renderArtifactCards(data) {
                     <div class="qa-subcard-title">${planTitle}${approvedBadge}</div>
                     <div class="qa-subcard-desc">${planDesc}</div>
                 </div>
-                ${approveBtn('test-plan')}
+                ${approveBtn('test-plan')}${chatBtn('test-plan')}${skipBtn('test-plan')}
             </div>`;
         }
 
@@ -524,7 +657,7 @@ function renderArtifactCards(data) {
                     <div class="qa-subcard-title">${uatTitle}${approvedBadge}</div>
                     <div class="qa-subcard-desc">Business-friendly test scenarios for non-technical testers</div>
                 </div>
-                ${approveBtn('uat-plan')}
+                ${approveBtn('uat-plan')}${chatBtn('uat-plan')}${skipBtn('uat-plan')}
             </div>`;
         }
 
@@ -540,7 +673,7 @@ function renderArtifactCards(data) {
                         <div class="qa-subcard-title">${escapeHtml(displayName)}${approvedBadge}</div>
                         <div class="qa-subcard-desc">${desc}</div>
                     </div>
-                    ${approveBtn('test-cases')}
+                    ${approveBtn('test-cases')}${chatBtn('test-cases')}${skipBtn('test-cases')}
                 </div>`;
             }
         }
@@ -603,7 +736,7 @@ function renderArtifactCards(data) {
                             <div class="qa-subcard-title">${escapeHtml(displayName)}${approvedBadge}</div>
                             <div class="qa-subcard-desc">Detailed test cases for ${escapeHtml(sys.name)}</div>
                         </div>
-                        ${approveBtn('test-cases')}
+                        ${approveBtn('test-cases')}${chatBtn('test-cases')}${skipBtn('test-cases')}
                     </div>`;
                 }
             }
@@ -624,10 +757,12 @@ function renderArtifactCards(data) {
     html += '</div>';
     detailContent.innerHTML = html;
 
-    // Wire sub-card clicks (but not approve button clicks)
+    // Wire sub-card clicks (but not approve/chat/skip button clicks)
     detailContent.querySelectorAll('.qa-subcard').forEach(card => {
         card.addEventListener('click', (e) => {
             if (e.target.closest('.qa-approve-btn')) return;
+            if (e.target.closest('.qa-chat-btn')) return;
+            if (e.target.closest('.qa-skip-btn')) return;
             showRunDocument(card.dataset.doc);
         });
     });
@@ -637,6 +772,22 @@ function renderArtifactCards(data) {
         btn.addEventListener('click', (e) => {
             e.stopPropagation();
             approveQAPhase(currentRunId, btn.dataset.phase);
+        });
+    });
+
+    // Wire chat button clicks
+    detailContent.querySelectorAll('.qa-chat-btn').forEach(btn => {
+        btn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            openQAChatModal(currentRunId, btn.dataset.phase);
+        });
+    });
+
+    // Wire skip button clicks
+    detailContent.querySelectorAll('.qa-skip-btn').forEach(btn => {
+        btn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            skipQAPhase(currentRunId, btn.dataset.phase);
         });
     });
 
