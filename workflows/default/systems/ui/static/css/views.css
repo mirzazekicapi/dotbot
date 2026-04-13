@@ -3651,6 +3651,52 @@
     color: var(--bg-panel, #0a0a0a);
 }
 
+/* Chat button on artifact cards */
+.qa-chat-btn {
+    flex-shrink: 0;
+    margin-left: 4px;
+    padding: 4px 10px;
+    font-size: 10px;
+    font-weight: 700;
+    font-family: var(--font-mono);
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    background: transparent;
+    color: var(--color-secondary, #e8a030);
+    border: 1px solid var(--color-secondary, #e8a030);
+    border-radius: 2px;
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s;
+}
+
+.qa-chat-btn:hover {
+    background: var(--color-secondary, #e8a030);
+    color: var(--bg-panel, #0a0a0a);
+}
+
+/* Skip button on artifact cards */
+.qa-skip-btn {
+    flex-shrink: 0;
+    margin-left: 4px;
+    padding: 4px 10px;
+    font-size: 10px;
+    font-weight: 700;
+    font-family: var(--font-mono);
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    background: transparent;
+    color: var(--color-text-dim, #666);
+    border: 1px solid var(--color-text-dim, #666);
+    border-radius: 2px;
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s;
+}
+
+.qa-skip-btn:hover {
+    background: var(--color-text-dim, #666);
+    color: var(--bg-panel, #0a0a0a);
+}
+
 /* Approved badge shown after approval */
 .qa-approved-badge {
     display: inline-block;

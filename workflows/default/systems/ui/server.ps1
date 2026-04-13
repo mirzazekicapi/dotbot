@@ -1636,6 +1636,219 @@ try {
                     break
                 }
 
+                "/api/qa/skip" {
+                    if ($method -eq "POST") {
+                        $contentType = "application/json; charset=utf-8"
+                        $reader = New-Object System.IO.StreamReader($request.InputStream)
+                        $body = $reader.ReadToEnd() | ConvertFrom-Json
+                        $reader.Close()
+
+                        $skipRunId = $body.run_id
+                        $skipPhase = $body.phase
+
+                        if (-not $skipRunId -or -not $skipPhase) {
+                            $content = @{ success = $false; error = "run_id and phase are required" } | ConvertTo-Json -Compress
+                        } else {
+                            $skipRunsDir = Join-Path $botRoot ".control\qa-runs"
+                            $skipMetaPath = Join-Path $skipRunsDir "$skipRunId.json"
+                            if (-not (Test-Path $skipMetaPath)) {
+                                $content = @{ success = $false; error = "Run not found: $skipRunId" } | ConvertTo-Json -Compress
+                            } else {
+                                $skipMeta = Get-Content $skipMetaPath -Raw | ConvertFrom-Json
+                                $skipOutputDir = ".bot/workspace/product/qa-runs/$skipRunId"
+                                $skipWfName = if ($skipMeta.workflow_name) { $skipMeta.workflow_name } else { $skipRunId }
+
+                                # Reconstruct context block from saved metadata
+                                $skipContext = "## QA Run Context`n`nRun ID: $skipRunId`nOutput Directory: $skipOutputDir/`nJira Tickets: $($skipMeta.jira_keys)"
+                                if ($skipMeta.confluence_urls) { $skipContext += "`nConfluence Pages: $($skipMeta.confluence_urls)" }
+                                if ($skipMeta.instructions) { $skipContext += "`nAdditional Instructions: $($skipMeta.instructions)" }
+                                $skipContext += "`n"
+
+                                # Ensure approvals object exists
+                                if (-not $skipMeta.PSObject.Properties['approvals']) {
+                                    $skipMeta | Add-Member -NotePropertyName "approvals" -NotePropertyValue ([PSCustomObject]@{ test_plan = $null; uat_plan = $null; test_cases = $null }) -Force
+                                }
+
+                                $skipNewTasks = @()
+                                switch ($skipPhase) {
+                                    "test-plan" {
+                                        $skipMeta.approvals | Add-Member -NotePropertyName "test_plan" -NotePropertyValue "skipped" -Force
+                                        $skipNewTasks = @(
+                                            @{
+                                                name = "Generate UAT Plan [$skipRunId]"
+                                                type = "prompt_template"
+                                                prompt = "recipes/prompts/04-generate-uat-plan.md"
+                                                description = "Generate UAT plan in business-friendly language for non-technical testers.`n`n$skipContext"
+                                                priority = 4
+                                                skip_analysis = $true
+                                                skip_worktree = $true
+                                                outputs = @("$skipOutputDir/uat-plan.md")
+                                            }
+                                        )
+                                    }
+                                    "uat-plan" {
+                                        $skipMeta.approvals | Add-Member -NotePropertyName "uat_plan" -NotePropertyValue "skipped" -Force
+                                        $skipNewTasks = @(
+                                            @{
+                                                name = "Generate Per-System Plans [$skipRunId]"
+                                                type = "prompt_template"
+                                                prompt = "recipes/prompts/05-generate-system-plans.md"
+                                                description = "Generate per-system test plans for multi-system tickets. Skip if single system.`n`n$skipContext"
+                                                priority = 5
+                                                skip_analysis = $true
+                                                skip_worktree = $true
+                                                condition = "$skipOutputDir/systems.json"
+                                            }
+                                            @{
+                                                name = "Generate Test Cases [$skipRunId]"
+                                                type = "prompt_template"
+                                                prompt = "recipes/prompts/06-generate-test-cases.md"
+                                                description = "Generate detailed technical test cases per system.`n`n$skipContext"
+                                                priority = 6
+                                                skip_analysis = $true
+                                                skip_worktree = $true
+                                                depends_on = @("Generate Per-System Plans [$skipRunId]")
+                                            }
+                                        )
+                                    }
+                                    "test-cases" {
+                                        $skipMeta.approvals | Add-Member -NotePropertyName "test_cases" -NotePropertyValue "skipped" -Force
+                                        $skipNewTasks = @(
+                                            @{
+                                                name = "Validate Coverage [$skipRunId]"
+                                                type = "prompt_template"
+                                                prompt = "recipes/prompts/07-validate-coverage.md"
+                                                description = "Validate traceability and write completion marker.`n`n$skipContext"
+                                                priority = 7
+                                                skip_analysis = $true
+                                                skip_worktree = $true
+                                                outputs = @("$skipOutputDir/pipeline-complete.json")
+                                            }
+                                        )
+                                    }
+                                }
+
+                                $skipCreated = @()
+                                foreach ($td in $skipNewTasks) {
+                                    $skipCreated += New-WorkflowTask -ProjectBotDir $botRoot -WorkflowName $skipWfName -TaskDef $td
+                                }
+
+                                $skipLaunch = Start-ProcessLaunch -Type 'task-runner' -WorkflowName $skipWfName -Continue $true -Description "QA: $($skipMeta.jira_keys)"
+                                $skipMeta.status = "processing"
+                                $skipMeta | Add-Member -NotePropertyName "process_id" -NotePropertyValue $skipLaunch.process_id -Force
+                                $skipMeta | Add-Member -NotePropertyName "pid" -NotePropertyValue $skipLaunch.pid -Force
+                                $skipMeta | Add-Member -NotePropertyName "approval_phase" -NotePropertyValue $null -Force
+                                $skipMeta | ConvertTo-Json -Depth 4 | Set-Content $skipMetaPath -Encoding UTF8
+
+                                $content = @{ success = $true; phase = $skipPhase; tasks_created = $skipCreated.Count } | ConvertTo-Json -Compress
+                            }
+                        }
+                    } else {
+                        $statusCode = 405
+                        $content = @{ success = $false; error = "Method not allowed" } | ConvertTo-Json -Compress
+                    }
+                    break
+                }
+
+                "/api/qa/chat" {
+                    if ($method -eq "POST") {
+                        $contentType = "application/json; charset=utf-8"
+                        $reader = New-Object System.IO.StreamReader($request.InputStream)
+                        $body = $reader.ReadToEnd() | ConvertFrom-Json
+                        $reader.Close()
+
+                        $chatRunId = $body.run_id
+                        $chatPhase = $body.phase
+                        $chatComment = $body.comment
+
+                        if (-not $chatRunId -or -not $chatPhase -or -not $chatComment) {
+                            $content = @{ success = $false; error = "run_id, phase, and comment are required" } | ConvertTo-Json -Compress
+                        } else {
+                            $chatRunsDir = Join-Path $botRoot ".control\qa-runs"
+                            $chatMetaPath = Join-Path $chatRunsDir "$chatRunId.json"
+                            if (-not (Test-Path $chatMetaPath)) {
+                                $content = @{ success = $false; error = "Run not found: $chatRunId" } | ConvertTo-Json -Compress
+                            } else {
+                                $chatMeta = Get-Content $chatMetaPath -Raw | ConvertFrom-Json
+                                $chatOutputDir = ".bot/workspace/product/qa-runs/$chatRunId"
+                                $chatOutputDirFull = Join-Path $botRoot "workspace\product\qa-runs\$chatRunId"
+                                $chatWfName = if ($chatMeta.workflow_name) { $chatMeta.workflow_name } else { $chatRunId }
+
+                                # Reconstruct context block from saved metadata
+                                $chatContext = "## QA Run Context`n`nRun ID: $chatRunId`nOutput Directory: $chatOutputDir/`nJira Tickets: $($chatMeta.jira_keys)"
+                                if ($chatMeta.confluence_urls) { $chatContext += "`nConfluence Pages: $($chatMeta.confluence_urls)" }
+                                if ($chatMeta.instructions) { $chatContext += "`nAdditional Instructions: $($chatMeta.instructions)" }
+                                $chatContext += "`n"
+
+                                $chatTaskDef = $null
+                                switch ($chatPhase) {
+                                    "test-plan" {
+                                        $existingFile = Join-Path $chatOutputDirFull "test-plan.md"
+                                        if (Test-Path $existingFile) { Remove-Item $existingFile -Force }
+                                        $chatTaskDef = @{
+                                            name = "Regenerate Test Plan [$chatRunId]"
+                                            type = "prompt_template"
+                                            prompt = "recipes/prompts/03-generate-test-plan.md"
+                                            description = "Generate the overall technical test plan with 14 sections.`n`n$chatContext`n## User Feedback`n`n$chatComment"
+                                            priority = 3
+                                            skip_analysis = $true
+                                            skip_worktree = $true
+                                            outputs = @("$chatOutputDir/test-plan.md")
+                                        }
+                                    }
+                                    "uat-plan" {
+                                        $existingFile = Join-Path $chatOutputDirFull "uat-plan.md"
+                                        if (Test-Path $existingFile) { Remove-Item $existingFile -Force }
+                                        $chatTaskDef = @{
+                                            name = "Regenerate UAT Plan [$chatRunId]"
+                                            type = "prompt_template"
+                                            prompt = "recipes/prompts/04-generate-uat-plan.md"
+                                            description = "Generate UAT plan in business-friendly language for non-technical testers.`n`n$chatContext`n## User Feedback`n`n$chatComment"
+                                            priority = 4
+                                            skip_analysis = $true
+                                            skip_worktree = $true
+                                            outputs = @("$chatOutputDir/uat-plan.md")
+                                        }
+                                    }
+                                    "test-cases" {
+                                        $existingCasesDir = Join-Path $chatOutputDirFull "test-cases"
+                                        if (Test-Path $existingCasesDir) {
+                                            Get-ChildItem $existingCasesDir -Filter "*.md" -ErrorAction SilentlyContinue | Remove-Item -Force
+                                        }
+                                        $chatTaskDef = @{
+                                            name = "Regenerate Test Cases [$chatRunId]"
+                                            type = "prompt_template"
+                                            prompt = "recipes/prompts/06-generate-test-cases.md"
+                                            description = "Generate detailed technical test cases per system.`n`n$chatContext`n## User Feedback`n`n$chatComment"
+                                            priority = 6
+                                            skip_analysis = $true
+                                            skip_worktree = $true
+                                        }
+                                    }
+                                }
+
+                                if (-not $chatTaskDef) {
+                                    $content = @{ success = $false; error = "Unknown phase: $chatPhase" } | ConvertTo-Json -Compress
+                                } else {
+                                    $chatCreated = New-WorkflowTask -ProjectBotDir $botRoot -WorkflowName $chatWfName -TaskDef $chatTaskDef
+                                    $chatLaunch = Start-ProcessLaunch -Type 'task-runner' -WorkflowName $chatWfName -Continue $true -Description "QA Chat: $($chatMeta.jira_keys)"
+                                    $chatMeta.status = "processing"
+                                    $chatMeta | Add-Member -NotePropertyName "process_id" -NotePropertyValue $chatLaunch.process_id -Force
+                                    $chatMeta | Add-Member -NotePropertyName "pid" -NotePropertyValue $chatLaunch.pid -Force
+                                    $chatMeta | Add-Member -NotePropertyName "approval_phase" -NotePropertyValue $null -Force
+                                    $chatMeta | ConvertTo-Json -Depth 4 | Set-Content $chatMetaPath -Encoding UTF8
+
+                                    $content = @{ success = $true; phase = $chatPhase; task_id = $chatCreated.id } | ConvertTo-Json -Compress
+                                }
+                            }
+                        }
+                    } else {
+                        $statusCode = 405
+                        $content = @{ success = $false; error = "Method not allowed" } | ConvertTo-Json -Compress
+                    }
+                    break
+                }
+
                 "/api/qa/run-tasks" {
                     $contentType = "application/json; charset=utf-8"
                     $runId = $request.QueryString["run"]
@@ -1788,10 +2001,12 @@ try {
                                         $runMeta.status = "completed"
                                         $runMeta.completed_at = (Get-Date -Format "o")
 
-                                        # Count scenarios and test cases
-                                        $planContent = Get-Content $testPlanPath -Raw
-                                        $scenarioMatches = [regex]::Matches($planContent, '\b(I-\d+|E-\d+|UAT-\d+)\b')
-                                        $runMeta.scenario_count = ($scenarioMatches | ForEach-Object { $_.Value } | Sort-Object -Unique).Count
+                                        # Count scenarios and test cases (test-plan.md may be absent if skipped)
+                                        if (Test-Path $testPlanPath) {
+                                            $planContent = Get-Content $testPlanPath -Raw
+                                            $scenarioMatches = [regex]::Matches($planContent, '\b(I-\d+|E-\d+|UAT-\d+)\b')
+                                            $runMeta.scenario_count = ($scenarioMatches | ForEach-Object { $_.Value } | Sort-Object -Unique).Count
+                                        }
 
                                         $tcDir = Join-Path $runOutputDir "test-cases"
                                         if (Test-Path $tcDir) {

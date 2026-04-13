@@ -1663,6 +1663,33 @@
         </div>
     </div>
 
+    <!-- QA Chat Modal -->
+    <div class="modal-overlay" id="qa-chat-modal">
+        <div class="modal">
+            <div class="modal-header">
+                <h2 class="modal-title">Refine</h2>
+                <button class="modal-close"><!-- Close --></button>
+            </div>
+            <div class="modal-body">
+                <div class="task-create-form">
+                    <div class="form-group">
+                        <label class="form-label">What would you like to change?</label>
+                        <textarea class="form-textarea" id="qa-chat-comment" rows="5" placeholder="Add more edge cases for the payment flow, include negative test scenarios, focus on the API layer..."></textarea>
+                        <div class="form-hint">Describe your requested changes and the plan will be regenerated with your feedback.</div>
+                    </div>
+                    <div class="form-hint" id="qa-chat-status" style="min-height: 16px;"></div>
+                </div>
+            </div>
+            <div class="modal-footer task-create-footer">
+                <button class="ctrl-btn" id="qa-chat-close-btn">Close</button>
+                <button class="ctrl-btn primary" id="qa-chat-send-btn">
+                    <span class="btn-text">Send</span>
+                    <span class="btn-loading" style="display: none;">Sending...</span>
+                </button>
+            </div>
+        </div>
+    </div>
+
     <!-- Analyse Project Modal -->
     <div class="modal-overlay" id="analyse-modal">
         <div class="modal modal-wide">
