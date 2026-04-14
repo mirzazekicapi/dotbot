@@ -15,7 +15,7 @@ Write `{output_directory}/test-plan.md`
 
 ## Instructions
 
-Apply the `write-test-plan` skill (read `.bot/workflows/qa/recipes/skills/write-test-plan/SKILL.md`) using all gathered context:
+Apply the `write-test-plan` skill (read `.bot/workflows/qa-via-jira/recipes/skills/write-test-plan/SKILL.md`) using all gathered context:
 - Jira requirements as the primary input
 - Detected systems from `systems.json` (organize scenarios by system)
 - Confluence pages as supplementary context

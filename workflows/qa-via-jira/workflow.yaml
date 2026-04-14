@@ -1,4 +1,4 @@
-name: qa
+name: qa-via-jira
 version: "1.0"
 description: >-
   QA test planning workflow. Fetches Jira requirements, detects affected systems,

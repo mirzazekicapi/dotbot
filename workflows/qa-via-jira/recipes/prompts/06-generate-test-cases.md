@@ -24,7 +24,7 @@ All test cases in one consolidated file:
 
 ## Instructions
 
-Apply the `write-test-cases` skill (read `.bot/workflows/qa/recipes/skills/write-test-cases/SKILL.md`).
+Apply the `write-test-cases` skill (read `.bot/workflows/qa-via-jira/recipes/skills/write-test-cases/SKILL.md`).
 
 ### For multi-system tickets
 

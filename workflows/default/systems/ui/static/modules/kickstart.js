@@ -279,7 +279,7 @@ function renderWorkflowCardGrid(container) {
     }
 
     // Hide workflow card grid when QA is the only workflow (QA has its own section)
-    if (names.length === 1 && names[0] === 'qa') {
+    if (names.length === 1 && names[0] === 'qa-via-jira') {
         renderQAOverviewSection(container);
         return;
     }
@@ -1261,7 +1261,8 @@ function initQAGenerateModal() {
                     body: JSON.stringify({
                         jira_keys: jiraKeys,
                         confluence_urls: confluenceInput ? confluenceInput.value.trim() : '',
-                        instructions: instructionsInput ? instructionsInput.value.trim() : ''
+                        instructions: instructionsInput ? instructionsInput.value.trim() : '',
+                        approval_mode: document.getElementById('qa-modal-approval')?.checked || false
                     })
                 });
                 const data = await response.json();

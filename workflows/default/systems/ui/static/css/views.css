@@ -3739,3 +3739,91 @@
     font-size: 12px;
     color: var(--color-text-dim);
 }
+
+/* Revert button */
+.qa-revert-btn {
+    flex-shrink: 0;
+    margin-left: 4px;
+    padding: 4px 10px;
+    font-size: 10px;
+    font-weight: 700;
+    font-family: var(--font-mono);
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    background: transparent;
+    color: var(--color-secondary, #e8a030);
+    border: 1px solid var(--color-secondary, #e8a030);
+    border-radius: 2px;
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s;
+}
+
+.qa-revert-btn:hover {
+    background: var(--color-secondary, #e8a030);
+    color: var(--bg-panel, #0a0a0a);
+}
+
+/* Chat history in modal */
+.qa-chat-history {
+    margin-bottom: 12px;
+    padding-bottom: 12px;
+    border-bottom: 1px solid var(--bezel-edge);
+    max-height: 150px;
+    overflow-y: auto;
+}
+
+.qa-chat-history-label {
+    font-size: 9px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--color-text-dim);
+    margin-bottom: 6px;
+}
+
+.qa-chat-history-msg {
+    font-size: 11px;
+    color: var(--color-text);
+    padding: 4px 0;
+    border-bottom: 1px solid rgba(255,255,255,0.03);
+}
+
+.qa-chat-history-time {
+    font-size: 9px;
+    color: var(--color-text-dim);
+    margin-right: 6px;
+}
+
+/* QA tab notification badge */
+.qa-tab-badge {
+    display: inline-block;
+    background: var(--color-accent, #ff4444);
+    color: white;
+    font-size: 9px;
+    font-weight: 700;
+    min-width: 14px;
+    height: 14px;
+    line-height: 14px;
+    text-align: center;
+    border-radius: 7px;
+    margin-left: 4px;
+    padding: 0 3px;
+}
+
+/* Bulk approve */
+.qa-bulk-approve {
+    padding: 8px 16px;
+    text-align: right;
+    border-bottom: 1px solid var(--bezel-edge);
+    margin-bottom: 4px;
+}
+
+/* Skipped badge */
+.qa-skipped-badge {
+    display: inline-block;
+    font-size: 9px;
+    font-weight: 600;
+    color: var(--color-text-dim);
+    margin-left: 6px;
+    opacity: 0.7;
+}

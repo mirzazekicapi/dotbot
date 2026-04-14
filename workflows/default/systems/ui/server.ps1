@@ -1439,8 +1439,24 @@ try {
                             if ($instructions) { $contextBlock += "`nAdditional Instructions: $instructions" }
                             $contextBlock += "`n"
 
-                            # Phase 1 tasks only: Fetch → Detect Systems → Generate Test Plan
-                            # Subsequent phases are unlocked when each phase is approved via /api/qa/approve
+                            # Determine approval mode: request body > settings > default (false)
+                            $approvalMode = $false
+                            $qaSettingsPath = Join-Path $botRoot "settings\settings.default.json"
+                            if (-not (Test-Path $qaSettingsPath)) { $qaSettingsPath = Join-Path $botRoot "defaults\settings.default.json" }
+                            if (Test-Path $qaSettingsPath) {
+                                try {
+                                    $qaSettings = Get-Content $qaSettingsPath -Raw | ConvertFrom-Json
+                                    if ($qaSettings.qa -and $null -ne $qaSettings.qa.approval_mode) {
+                                        $approvalMode = [bool]$qaSettings.qa.approval_mode
+                                    }
+                                } catch {}
+                            }
+                            # Per-run override from request body
+                            if ($null -ne $body.approval_mode) {
+                                $approvalMode = [bool]$body.approval_mode
+                            }
+
+                            # Build task definitions based on approval mode
                             $qaTaskDefs = @(
                                 @{
                                     name = "Fetch Jira Context [$runId]"
@@ -1478,6 +1494,56 @@ try {
                                 }
                             )
 
+                            # Auto-flow mode: create ALL tasks upfront (no approval gates)
+                            if (-not $approvalMode) {
+                                $qaTaskDefs += @(
+                                    @{
+                                        name = "Generate UAT Plan [$runId]"
+                                        type = "prompt_template"
+                                        prompt = "recipes/prompts/04-generate-uat-plan.md"
+                                        description = "Generate UAT plan in business-friendly language for non-technical testers.`n`n$contextBlock"
+                                        priority = 4
+                                        skip_analysis = $true
+                                        skip_worktree = $true
+                                        depends_on = @("Generate Test Plan [$runId]")
+                                        outputs = @("$outputDir/uat-plan.md")
+                                    }
+                                    @{
+                                        name = "Generate Per-System Plans [$runId]"
+                                        type = "prompt_template"
+                                        prompt = "recipes/prompts/05-generate-system-plans.md"
+                                        description = "Generate per-system test plans for multi-system tickets. Skip if single system.`n`n$contextBlock"
+                                        priority = 5
+                                        skip_analysis = $true
+                                        skip_worktree = $true
+                                        depends_on = @("Generate Test Plan [$runId]")
+                                        condition = "$outputDir/systems.json"
+                                    }
+                                    @{
+                                        name = "Generate Test Cases [$runId]"
+                                        type = "prompt_template"
+                                        prompt = "recipes/prompts/06-generate-test-cases.md"
+                                        description = "Generate detailed technical test cases per system.`n`n$contextBlock"
+                                        priority = 6
+                                        skip_analysis = $true
+                                        skip_worktree = $true
+                                        depends_on = @("Generate Per-System Plans [$runId]", "Generate UAT Plan [$runId]")
+                                    }
+                                    @{
+                                        name = "Validate Coverage [$runId]"
+                                        type = "prompt_template"
+                                        prompt = "recipes/prompts/07-validate-coverage.md"
+                                        description = "Validate traceability and write completion marker.`n`n$contextBlock"
+                                        priority = 7
+                                        skip_analysis = $true
+                                        skip_worktree = $true
+                                        depends_on = @("Generate Test Cases [$runId]")
+                                        outputs = @("$outputDir/pipeline-complete.json")
+                                    }
+                                )
+                            }
+                            # Approval mode: only Phase 1 tasks created. Subsequent phases unlocked via /api/qa/approve
+
                             # Create tasks via New-WorkflowTask
                             $createdTasks = @()
                             foreach ($td in $qaTaskDefs) {
@@ -1496,6 +1562,7 @@ try {
                                 instructions = $instructions
                                 status = "processing"
                                 workflow_name = $wfName
+                                approval_mode = $approvalMode
                                 process_id = $launchResult.process_id
                                 pid = $launchResult.pid
                                 created_at = (Get-Date -Format "o")
@@ -1780,16 +1847,42 @@ try {
                                 if ($chatMeta.instructions) { $chatContext += "`nAdditional Instructions: $($chatMeta.instructions)" }
                                 $chatContext += "`n"
 
+                                # --- Save chat message to history ---
+                                $chatHistDir = Join-Path $chatOutputDirFull "chat-history"
+                                if (-not (Test-Path $chatHistDir)) { New-Item -Path $chatHistDir -ItemType Directory -Force | Out-Null }
+                                $chatHistFile = Join-Path $chatHistDir "$chatPhase.json"
+                                $chatHistory = @()
+                                if (Test-Path $chatHistFile) {
+                                    try { $chatHistory = @(Get-Content $chatHistFile -Raw | ConvertFrom-Json) } catch { $chatHistory = @() }
+                                }
+                                $chatHistory += @{ timestamp = (Get-Date -Format "o"); comment = $chatComment }
+                                $chatHistory | ConvertTo-Json -Depth 3 | Set-Content $chatHistFile -Encoding UTF8
+
+                                # Build full conversation history for the task description
+                                $chatHistoryBlock = "## Conversation History`n`n"
+                                foreach ($msg in $chatHistory) {
+                                    $chatHistoryBlock += "**[$($msg.timestamp)]** $($msg.comment)`n`n"
+                                }
+                                $chatHistoryBlock += "## Latest Feedback`n`n$chatComment"
+
+                                # --- Version existing artifact before replacing ---
+                                $versionsDir = Join-Path $chatOutputDirFull ".versions"
+                                if (-not (Test-Path $versionsDir)) { New-Item -Path $versionsDir -ItemType Directory -Force | Out-Null }
+
                                 $chatTaskDef = $null
                                 switch ($chatPhase) {
                                     "test-plan" {
                                         $existingFile = Join-Path $chatOutputDirFull "test-plan.md"
-                                        if (Test-Path $existingFile) { Remove-Item $existingFile -Force }
+                                        if (Test-Path $existingFile) {
+                                            $vNum = @(Get-ChildItem $versionsDir -Filter "test-plan.v*.md" -ErrorAction SilentlyContinue).Count + 1
+                                            Copy-Item $existingFile (Join-Path $versionsDir "test-plan.v$vNum.md") -Force
+                                            Remove-Item $existingFile -Force
+                                        }
                                         $chatTaskDef = @{
                                             name = "Regenerate Test Plan [$chatRunId]"
                                             type = "prompt_template"
                                             prompt = "recipes/prompts/03-generate-test-plan.md"
-                                            description = "Generate the overall technical test plan with 14 sections.`n`n$chatContext`n## User Feedback`n`n$chatComment"
+                                            description = "Generate the overall technical test plan with 14 sections.`n`n$chatContext`n$chatHistoryBlock"
                                             priority = 3
                                             skip_analysis = $true
                                             skip_worktree = $true
@@ -1798,12 +1891,16 @@ try {
                                     }
                                     "uat-plan" {
                                         $existingFile = Join-Path $chatOutputDirFull "uat-plan.md"
-                                        if (Test-Path $existingFile) { Remove-Item $existingFile -Force }
+                                        if (Test-Path $existingFile) {
+                                            $vNum = @(Get-ChildItem $versionsDir -Filter "uat-plan.v*.md" -ErrorAction SilentlyContinue).Count + 1
+                                            Copy-Item $existingFile (Join-Path $versionsDir "uat-plan.v$vNum.md") -Force
+                                            Remove-Item $existingFile -Force
+                                        }
                                         $chatTaskDef = @{
                                             name = "Regenerate UAT Plan [$chatRunId]"
                                             type = "prompt_template"
                                             prompt = "recipes/prompts/04-generate-uat-plan.md"
-                                            description = "Generate UAT plan in business-friendly language for non-technical testers.`n`n$chatContext`n## User Feedback`n`n$chatComment"
+                                            description = "Generate UAT plan in business-friendly language for non-technical testers.`n`n$chatContext`n$chatHistoryBlock"
                                             priority = 4
                                             skip_analysis = $true
                                             skip_worktree = $true
@@ -1813,13 +1910,16 @@ try {
                                     "test-cases" {
                                         $existingCasesDir = Join-Path $chatOutputDirFull "test-cases"
                                         if (Test-Path $existingCasesDir) {
+                                            $vNum = @(Get-ChildItem $versionsDir -Filter "test-cases.v*" -Directory -ErrorAction SilentlyContinue).Count + 1
+                                            $vCasesDir = Join-Path $versionsDir "test-cases.v$vNum"
+                                            Copy-Item $existingCasesDir $vCasesDir -Recurse -Force
                                             Get-ChildItem $existingCasesDir -Filter "*.md" -ErrorAction SilentlyContinue | Remove-Item -Force
                                         }
                                         $chatTaskDef = @{
                                             name = "Regenerate Test Cases [$chatRunId]"
                                             type = "prompt_template"
                                             prompt = "recipes/prompts/06-generate-test-cases.md"
-                                            description = "Generate detailed technical test cases per system.`n`n$chatContext`n## User Feedback`n`n$chatComment"
+                                            description = "Generate detailed technical test cases per system.`n`n$chatContext`n$chatHistoryBlock"
                                             priority = 6
                                             skip_analysis = $true
                                             skip_worktree = $true
@@ -1838,9 +1938,67 @@ try {
                                     $chatMeta | Add-Member -NotePropertyName "approval_phase" -NotePropertyValue $null -Force
                                     $chatMeta | ConvertTo-Json -Depth 4 | Set-Content $chatMetaPath -Encoding UTF8
 
-                                    $content = @{ success = $true; phase = $chatPhase; task_id = $chatCreated.id } | ConvertTo-Json -Compress
+                                    $content = @{ success = $true; phase = $chatPhase; task_id = $chatCreated.id; version = $vNum } | ConvertTo-Json -Compress
                                 }
                             }
+                        }
+                    } else {
+                        $statusCode = 405
+                        $content = @{ success = $false; error = "Method not allowed" } | ConvertTo-Json -Compress
+                    }
+                    break
+                }
+
+                "/api/qa/revert" {
+                    if ($method -eq "POST") {
+                        $contentType = "application/json; charset=utf-8"
+                        $reader = New-Object System.IO.StreamReader($request.InputStream)
+                        $body = $reader.ReadToEnd() | ConvertFrom-Json
+                        $reader.Close()
+
+                        $revertRunId = $body.run_id
+                        $revertPhase = $body.phase
+
+                        if (-not $revertRunId -or -not $revertPhase) {
+                            $content = @{ success = $false; error = "run_id and phase are required" } | ConvertTo-Json -Compress
+                        } else {
+                            $revertOutputDir = Join-Path $botRoot "workspace\product\qa-runs\$revertRunId"
+                            $revertVersionsDir = Join-Path $revertOutputDir ".versions"
+
+                            $reverted = $false
+                            switch ($revertPhase) {
+                                "test-plan" {
+                                    $versions = @(Get-ChildItem $revertVersionsDir -Filter "test-plan.v*.md" -ErrorAction SilentlyContinue | Sort-Object Name)
+                                    if ($versions.Count -gt 0) {
+                                        $latest = $versions[-1]
+                                        Copy-Item $latest.FullName (Join-Path $revertOutputDir "test-plan.md") -Force
+                                        Remove-Item $latest.FullName -Force
+                                        $reverted = $true
+                                    }
+                                }
+                                "uat-plan" {
+                                    $versions = @(Get-ChildItem $revertVersionsDir -Filter "uat-plan.v*.md" -ErrorAction SilentlyContinue | Sort-Object Name)
+                                    if ($versions.Count -gt 0) {
+                                        $latest = $versions[-1]
+                                        Copy-Item $latest.FullName (Join-Path $revertOutputDir "uat-plan.md") -Force
+                                        Remove-Item $latest.FullName -Force
+                                        $reverted = $true
+                                    }
+                                }
+                                "test-cases" {
+                                    $versions = @(Get-ChildItem $revertVersionsDir -Filter "test-cases.v*" -Directory -ErrorAction SilentlyContinue | Sort-Object Name)
+                                    if ($versions.Count -gt 0) {
+                                        $latest = $versions[-1]
+                                        $targetCasesDir = Join-Path $revertOutputDir "test-cases"
+                                        if (Test-Path $targetCasesDir) { Get-ChildItem $targetCasesDir -Filter "*.md" | Remove-Item -Force }
+                                        Copy-Item "$($latest.FullName)\*" $targetCasesDir -Recurse -Force
+                                        Remove-Item $latest.FullName -Recurse -Force
+                                        $reverted = $true
+                                    }
+                                }
+                            }
+
+                            $content = @{ success = $reverted; phase = $revertPhase } | ConvertTo-Json -Compress
                         }
                     } else {
                         $statusCode = 405
@@ -1955,9 +2113,9 @@ try {
                                         $hasActiveTasks = ($runTasks | Where-Object { $_.status -in @("todo", "in-progress") }).Count -gt 0
                                         if ($allDone) { $stage = "Completing..." }
 
-                                        # Detect awaiting-approval: no active tasks, pipeline not complete, approval gates pending
-                                        # Note: $allDone can be true here (all phase-1 tasks done) — we still need to check approval gates
-                                        if (-not $hasActiveTasks -and $runTasks.Count -gt 0) {
+                                        # Detect awaiting-approval: only for approval_mode runs
+                                        $isApprovalMode = $runMeta.PSObject.Properties['approval_mode'] -and [bool]$runMeta.approval_mode
+                                        if ($isApprovalMode -and -not $hasActiveTasks -and $runTasks.Count -gt 0) {
                                             $pipelineCompletePath2 = Join-Path $runOutputDir "pipeline-complete.json"
                                             if (-not (Test-Path $pipelineCompletePath2)) {
                                                 $approvals2 = if ($runMeta.PSObject.Properties['approvals']) { $runMeta.approvals } else { $null }
@@ -2234,6 +2392,28 @@ try {
                         $approvals = if ($meta -and $meta.PSObject.Properties['approvals']) { $meta.approvals } else { $null }
                         $approvalPhase = if ($meta -and $meta.PSObject.Properties['approval_phase']) { $meta.approval_phase } else { $null }
 
+                        # Version info (for revert button)
+                        $versions = @{}
+                        $versionsDir = Join-Path $runOutputDir ".versions"
+                        if (Test-Path $versionsDir) {
+                            $versions = @{
+                                test_plan = @(Get-ChildItem $versionsDir -Filter "test-plan.v*.md" -ErrorAction SilentlyContinue).Count
+                                uat_plan = @(Get-ChildItem $versionsDir -Filter "uat-plan.v*.md" -ErrorAction SilentlyContinue).Count
+                                test_cases = @(Get-ChildItem $versionsDir -Filter "test-cases.v*" -Directory -ErrorAction SilentlyContinue).Count
+                            }
+                        }
+
+                        # Chat history (for modal display)
+                        $chatHistories = @{}
+                        $chatHistDir = Join-Path $runOutputDir "chat-history"
+                        if (Test-Path $chatHistDir) {
+                            foreach ($histFile in @(Get-ChildItem $chatHistDir -Filter "*.json" -ErrorAction SilentlyContinue)) {
+                                try {
+                                    $chatHistories[$histFile.BaseName] = @(Get-Content $histFile.FullName -Raw | ConvertFrom-Json)
+                                } catch {}
+                            }
+                        }
+
                         $content = @{
                             jira_keys = $jiraKeys
                             status = $runStatus
@@ -2245,6 +2425,9 @@ try {
                             progress = $progress
                             approvals = $approvals
                             approval_phase = $approvalPhase
+                            approval_mode = if ($meta -and $meta.PSObject.Properties['approval_mode']) { [bool]$meta.approval_mode } else { $false }
+                            versions = $versions
+                            chat_history = $chatHistories
                         } | ConvertTo-Json -Depth 6 -Compress
                     }
                     break

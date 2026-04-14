@@ -24,6 +24,30 @@ function openQAChatModal(runId, phase) {
     if (title) title.textContent = `Refine ${label}`;
     if (textarea) textarea.value = '';
     if (status) { status.textContent = ''; }
+
+    // Render chat history if available
+    let historyEl = modal ? modal.querySelector('.qa-chat-history') : null;
+    if (!historyEl && modal) {
+        historyEl = document.createElement('div');
+        historyEl.className = 'qa-chat-history';
+        const body = modal.querySelector('.modal-body .task-create-form');
+        if (body) body.insertBefore(historyEl, body.firstChild);
+    }
+    if (historyEl) {
+        const history = currentRunData?.chat_history?.[phase] || [];
+        if (history.length > 0) {
+            let histHtml = '<div class="qa-chat-history-label">Previous feedback</div>';
+            for (const msg of history) {
+                const time = msg.timestamp ? new Date(msg.timestamp).toLocaleTimeString() : '';
+                histHtml += `<div class="qa-chat-history-msg"><span class="qa-chat-history-time">${escapeHtml(time)}</span> ${escapeHtml(msg.comment)}</div>`;
+            }
+            historyEl.innerHTML = histHtml;
+            historyEl.style.display = '';
+        } else {
+            historyEl.style.display = 'none';
+        }
+    }
+
     if (modal) modal.classList.add('visible');
     if (textarea) setTimeout(() => textarea.focus(), 50);
 }
@@ -161,6 +185,10 @@ async function loadQARuns() {
         if (hasActive) {
             startQAPoll();
         }
+
+        // Update QA tab badge for runs awaiting approval
+        const awaitingCount = runs.filter(r => r.status === 'awaiting-approval').length;
+        updateQATabBadge(awaitingCount);
     } catch (e) {
         console.error('Failed to load QA runs:', e);
     }
@@ -486,6 +514,55 @@ async function skipQAPhase(runId, phase) {
 }
 
 /**
+ * Revert an artifact to its previous version
+ */
+async function revertQAPhase(runId, phase) {
+    const phaseLabels = { 'test-plan': 'Test Plan', 'uat-plan': 'UAT Plan', 'test-cases': 'Test Cases' };
+    const label = phaseLabels[phase] || phase;
+    if (!confirm(`Revert ${label} to previous version?`)) return;
+
+    try {
+        const res = await fetch(`${API_BASE}/api/qa/revert`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ run_id: runId, phase })
+        });
+        const data = await res.json();
+        if (data.success) {
+            showToast(`${label} reverted to previous version`, 'success');
+            await showRunDetail(runId);
+        } else {
+            showToast('No previous version to revert to', 'error');
+        }
+    } catch (e) {
+        showToast('Revert request failed', 'error');
+    }
+}
+
+/**
+ * Approve all pending phases at once
+ */
+async function bulkApproveQA(runId) {
+    const phases = ['test-plan', 'uat-plan', 'test-cases'];
+    const approvals = currentRunData?.approvals || {};
+
+    for (const phase of phases) {
+        const key = phase.replace('-', '_');
+        if (!approvals[key]) {
+            // Check if the artifact exists before approving
+            const hasArtifact = (phase === 'test-plan' && currentRunData?.test_plan) ||
+                (phase === 'uat-plan' && currentRunData?.uat_plan) ||
+                (phase === 'test-cases' && currentRunData?.test_cases?.length > 0);
+            if (hasArtifact) {
+                await approveQAPhase(runId, phase);
+                // Small delay between approvals to avoid race conditions
+                await new Promise(r => setTimeout(r, 500));
+            }
+        }
+    }
+}
+
+/**
  * Show detail view for a specific run
  */
 // Store current run data and ID for sub-navigation
@@ -595,11 +672,15 @@ function renderArtifactCards(data) {
     // Approval state helpers
     const approvals = data.approvals || {};
     const approvalPhase = data.approval_phase || null;
-    const isAwaitingApproval = data.status === 'awaiting-approval';
+    const isApprovalMode = !!data.approval_mode;
+    const isAwaitingApproval = isApprovalMode && data.status === 'awaiting-approval';
 
-    const testPlanApproved = !!(approvals.test_plan);
-    const uatPlanApproved = !!(approvals.uat_plan);
-    const testCasesApproved = !!(approvals.test_cases);
+    const testPlanApproved = approvals.test_plan && approvals.test_plan !== 'skipped';
+    const testPlanSkipped = approvals.test_plan === 'skipped';
+    const uatPlanApproved = approvals.uat_plan && approvals.uat_plan !== 'skipped';
+    const uatPlanSkipped = approvals.uat_plan === 'skipped';
+    const testCasesApproved = approvals.test_cases && approvals.test_cases !== 'skipped';
+    const testCasesSkipped = approvals.test_cases === 'skipped';
 
     // Render an approve button for a given phase (only shown when that phase needs approval)
     function approveBtn(phase) {
@@ -622,7 +703,18 @@ function renderArtifactCards(data) {
         return `<button class="qa-skip-btn" data-phase="${phase}" title="Skip this artifact and continue to the next step">Skip</button>`;
     }
 
-    let html = '<div class="qa-subcards">';
+    // Render a revert button (only shown when versions exist for this phase)
+    function revertBtn(phase) {
+        const versionKey = phase.replace('-', '_');
+        const vCount = data.versions?.[versionKey] || 0;
+        if (vCount === 0) return '';
+        return `<button class="qa-revert-btn" data-phase="${phase}" title="Revert to previous version (${vCount} version${vCount > 1 ? 's' : ''} available)">Revert</button>`;
+    }
+
+    // Bulk approve button (shown when awaiting approval)
+    const bulkApproveHtml = isAwaitingApproval ? `<div class="qa-bulk-approve"><button class="qa-approve-btn" id="qa-bulk-approve-btn" title="Approve all pending phases">Approve All</button></div>` : '';
+
+    let html = '<div class="qa-subcards">' + bulkApproveHtml;
 
     const hasUatPlan = !!data.uat_plan;
 
@@ -637,27 +729,27 @@ function renderArtifactCards(data) {
         if (hasOverallPlan) {
             const planTitle = isMultiSystem ? 'Overall Test Plan' : 'Test Plan';
             const planDesc = isMultiSystem ? 'High-level test strategy across all systems' : 'Test strategy, scenarios, and coverage';
-            const approvedBadge = testPlanApproved ? '<span class="qa-approved-badge">&#10003; Approved</span>' : '';
+            const approvedBadge = testPlanApproved ? '<span class="qa-approved-badge">&#10003; Approved</span>' : testPlanSkipped ? '<span class="qa-skipped-badge">&#8594; Skipped</span>' : '';
             html += `<div class="qa-subcard" data-doc="test-plan">
                 <div class="qa-subcard-icon">TP</div>
                 <div class="qa-subcard-info">
                     <div class="qa-subcard-title">${planTitle}${approvedBadge}</div>
                     <div class="qa-subcard-desc">${planDesc}</div>
                 </div>
-                ${approveBtn('test-plan')}${chatBtn('test-plan')}${skipBtn('test-plan')}
+                ${approveBtn('test-plan')}${chatBtn('test-plan')}${skipBtn('test-plan')}${revertBtn('test-plan')}
             </div>`;
         }
 
         if (hasUatPlan) {
             const uatTitle = isMultiSystem ? 'Overall UAT Plan' : 'UAT Plan';
-            const approvedBadge = uatPlanApproved ? '<span class="qa-approved-badge">&#10003; Approved</span>' : '';
+            const approvedBadge = uatPlanApproved ? '<span class="qa-approved-badge">&#10003; Approved</span>' : uatPlanSkipped ? '<span class="qa-skipped-badge">&#8594; Skipped</span>' : '';
             html += `<div class="qa-subcard qa-subcard-uat" data-doc="uat-plan">
                 <div class="qa-subcard-icon qa-icon-uat">UAT</div>
                 <div class="qa-subcard-info">
                     <div class="qa-subcard-title">${uatTitle}${approvedBadge}</div>
                     <div class="qa-subcard-desc">Business-friendly test scenarios for non-technical testers</div>
                 </div>
-                ${approveBtn('uat-plan')}${chatBtn('uat-plan')}${skipBtn('uat-plan')}
+                ${approveBtn('uat-plan')}${chatBtn('uat-plan')}${skipBtn('uat-plan')}${revertBtn('uat-plan')}
             </div>`;
         }
 
@@ -666,14 +758,14 @@ function renderArtifactCards(data) {
                 const displayName = tc.name.replace(/-/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
                 const icon = isMultiSystem ? 'E2E' : 'TC';
                 const desc = isMultiSystem ? 'Cross-system end-to-end test cases' : 'Detailed test cases with steps and expected results';
-                const approvedBadge = testCasesApproved ? '<span class="qa-approved-badge">&#10003; Approved</span>' : '';
+                const approvedBadge = testCasesApproved ? '<span class="qa-approved-badge">&#10003; Approved</span>' : testCasesSkipped ? '<span class="qa-skipped-badge">&#8594; Skipped</span>' : '';
                 html += `<div class="qa-subcard" data-doc="tc:${escapeHtml(tc.name)}">
                     <div class="qa-subcard-icon">${icon}</div>
                     <div class="qa-subcard-info">
                         <div class="qa-subcard-title">${escapeHtml(displayName)}${approvedBadge}</div>
                         <div class="qa-subcard-desc">${desc}</div>
                     </div>
-                    ${approveBtn('test-cases')}${chatBtn('test-cases')}${skipBtn('test-cases')}
+                    ${approveBtn('test-cases')}${chatBtn('test-cases')}${skipBtn('test-cases')}${revertBtn('test-cases')}
                 </div>`;
             }
         }
@@ -702,9 +794,8 @@ function renderArtifactCards(data) {
                     if (tcMatches) sysTcCount += new Set(tcMatches).size;
                 }
             }
-            const countBadge = (sysScCount > 0 || sysTcCount > 0) ? `<span class="qa-system-tc-count">${sysScCount} SC / ${sysTcCount} TC</span>` : '';
             html += '<div class="qa-system-group">';
-            html += `<div class="qa-system-header"><span class="qa-system-collapse">&#9660;</span><span class="qa-system-name">${escapeHtml(sys.name)}</span>${badge}${countBadge}</div>`;
+            html += `<div class="qa-system-header"><span class="qa-system-collapse">&#9660;</span><span class="qa-system-name">${escapeHtml(sys.name)}</span>${badge}</div>`;
 
             if (hasPlan) {
                 html += `<div class="qa-subcard" data-doc="sys:${escapeHtml(sys.id)}:test-plan">
@@ -729,14 +820,14 @@ function renderArtifactCards(data) {
             if (hasCases) {
                 for (const tc of sys.test_cases) {
                     const displayName = tc.name.replace(/-/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
-                    const approvedBadge = testCasesApproved ? '<span class="qa-approved-badge">&#10003; Approved</span>' : '';
+                    const approvedBadge = testCasesApproved ? '<span class="qa-approved-badge">&#10003; Approved</span>' : testCasesSkipped ? '<span class="qa-skipped-badge">&#8594; Skipped</span>' : '';
                     html += `<div class="qa-subcard" data-doc="sys:${escapeHtml(sys.id)}:tc:${escapeHtml(tc.name)}">
                         <div class="qa-subcard-icon">TC</div>
                         <div class="qa-subcard-info">
                             <div class="qa-subcard-title">${escapeHtml(displayName)}${approvedBadge}</div>
                             <div class="qa-subcard-desc">Detailed test cases for ${escapeHtml(sys.name)}</div>
                         </div>
-                        ${approveBtn('test-cases')}${chatBtn('test-cases')}${skipBtn('test-cases')}
+                        ${approveBtn('test-cases')}${chatBtn('test-cases')}${skipBtn('test-cases')}${revertBtn('test-cases')}
                     </div>`;
                 }
             }
@@ -763,6 +854,7 @@ function renderArtifactCards(data) {
             if (e.target.closest('.qa-approve-btn')) return;
             if (e.target.closest('.qa-chat-btn')) return;
             if (e.target.closest('.qa-skip-btn')) return;
+            if (e.target.closest('.qa-revert-btn')) return;
             showRunDocument(card.dataset.doc);
         });
     });
@@ -790,6 +882,23 @@ function renderArtifactCards(data) {
             skipQAPhase(currentRunId, btn.dataset.phase);
         });
     });
+
+    // Wire revert button clicks
+    detailContent.querySelectorAll('.qa-revert-btn').forEach(btn => {
+        btn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            revertQAPhase(currentRunId, btn.dataset.phase);
+        });
+    });
+
+    // Wire bulk approve button
+    const bulkBtn = document.getElementById('qa-bulk-approve-btn');
+    if (bulkBtn) {
+        bulkBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            bulkApproveQA(currentRunId);
+        });
+    }
 
     // Wire collapsible system group headers
     detailContent.querySelectorAll('.qa-system-header').forEach(header => {
@@ -1180,9 +1289,12 @@ function showRunList() {
 
     if (runList) runList.style.display = '';
     if (runDetail) runDetail.style.display = 'none';
-    // Restore KB sidebar
-    if (cachedKBData) renderKBSidebar(cachedKBData);
-    else if (sidebar) sidebar.innerHTML = '';
+
+    // Hide TOC and search (they belong to document view)
+    const toc = document.getElementById('qa-toc');
+    if (toc) toc.style.display = 'none';
+    const searchBox = document.getElementById('qa-search-box');
+    if (searchBox) searchBox.style.display = 'none';
     // Reset back button to default (go to run list)
     if (backBtn) backBtn.onclick = () => showRunList();
 }
@@ -1291,6 +1403,26 @@ function parseJiraInput(raw) {
 /**
  * Escape HTML entities
  */
+/**
+ * Update QA tab badge with awaiting approval count
+ */
+function updateQATabBadge(count) {
+    const tabBtn = document.getElementById('qa-tab-btn');
+    if (!tabBtn) return;
+    let badge = tabBtn.querySelector('.qa-tab-badge');
+    if (count > 0) {
+        if (!badge) {
+            badge = document.createElement('span');
+            badge.className = 'qa-tab-badge';
+            tabBtn.appendChild(badge);
+        }
+        badge.textContent = count;
+        badge.style.display = '';
+    } else if (badge) {
+        badge.style.display = 'none';
+    }
+}
+
 function escapeHtml(str) {
     if (!str) return '';
     return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');

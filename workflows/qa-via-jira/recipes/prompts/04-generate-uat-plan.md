@@ -15,7 +15,7 @@ Write `{output_directory}/uat-plan.md`
 
 ## Instructions
 
-Apply the `write-uat-plan` skill (read `.bot/workflows/qa/recipes/skills/write-uat-plan/SKILL.md`).
+Apply the `write-uat-plan` skill (read `.bot/workflows/qa-via-jira/recipes/skills/write-uat-plan/SKILL.md`).
 
 The UAT plan is the **only document** that contains UAT scenarios. The technical test plan and technical test cases do NOT include UAT content.
 

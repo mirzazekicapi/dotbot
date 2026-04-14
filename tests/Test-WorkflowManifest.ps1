@@ -611,7 +611,7 @@ Write-Host "  ──────────────────────
 if (-not $hasYaml) {
     Write-TestResult -Name "Workflow YAML schema tests" -Status Skip -Message "powershell-yaml not installed"
 } else {
-    $workflowProfiles = @("default", "kickstart-via-jira", "kickstart-via-pr")
+    $workflowProfiles = @("default", "kickstart-via-jira", "kickstart-via-pr", "qa-via-jira")
 
     foreach ($wfProfile in $workflowProfiles) {
         $workflowPath = Join-Path $repoRoot "workflows\$wfProfile\workflow.yaml"
