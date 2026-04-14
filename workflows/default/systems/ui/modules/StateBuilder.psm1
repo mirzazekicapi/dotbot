@@ -15,6 +15,8 @@ $script:Config = @{
     ProcessesDir = $null
 }
 
+Import-Module (Join-Path $PSScriptRoot "..\..\runtime\modules\ConsoleSequenceSanitizer.psm1")
+
 function Initialize-StateBuilder {
     param(
         [Parameter(Mandatory)] [string]$BotRoot,
@@ -372,7 +374,6 @@ function Get-BotState {
 
     # Get upcoming tasks (up to 100 in priority order for infinite scroll)
     $upcomingTasks = @()
-    $totalUpcoming = $todoTasks.Count
     if ($todoTasks.Count -gt 0) {
         $upcomingTasks = $todoTasks |
             ForEach-Object {
@@ -434,6 +435,12 @@ function Get-BotState {
                     type = $_.type
                 }
             }
+    }
+
+    # When in-progress/ is empty, currentTask may fall back to a task from analysing/.
+    # Exclude that task from the analysing list to prevent duplicate cards in the UI.
+    if ($currentTask -and $inProgressTasks.Count -eq 0) {
+        $analysingTasksList = @($analysingTasksList | Where-Object { $_.id -ne $currentTask.id })
     }
 
     # Build per-workflow task counts from all task lists
@@ -526,6 +533,7 @@ function Get-BotState {
         foreach ($pf in $procFiles) {
             try {
                 $proc = Get-Content $pf.FullName -Raw | ConvertFrom-Json
+                $proc = Update-ProcessHeartbeatFields -Process $proc
 
                 # Count processes waiting for interview answers
                 if ($proc.status -eq 'needs-input' -and $proc.pending_questions) {

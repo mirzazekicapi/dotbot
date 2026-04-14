@@ -82,6 +82,20 @@ if (Test-Path $dotBotLogPath) {
 Import-Module (Join-Path $botRoot "systems\runtime\modules\DotBotTheme.psm1") -Force
 $t = Get-DotBotTheme
 
+# Test-ManifestCondition lives in ManifestCondition.psm1 and is needed by
+# Get-WorkflowFormConfig (called from /api/info). workflow-manifest.ps1 imports
+# it transitively, but dot-source + module scoping made the function invisible
+# to handlers in some runs. Mirror task-get-next/script.ps1: explicit absolute
+# path import + Get-Command assertion so failure is loud at startup, not 500
+# per request.
+$manifestConditionModule = Join-Path $botRoot "systems\runtime\modules\ManifestCondition.psm1"
+if (-not (Get-Module ManifestCondition)) {
+    Import-Module $manifestConditionModule -Force -DisableNameChecking -Global
+}
+if (-not (Get-Command Test-ManifestCondition -ErrorAction SilentlyContinue)) {
+    throw "Test-ManifestCondition not available after importing $manifestConditionModule. Re-run 'pwsh install.ps1' (dotbot repo) or 'dotbot init' (target project) to refresh .bot/ files."
+}
+
 # Write selected port so go.ps1 (and other tools) can discover it
 $Port.ToString() | Set-Content (Join-Path $controlDir "ui-port") -NoNewline -Encoding UTF8
 
@@ -98,11 +112,13 @@ Import-Module (Join-Path $PSScriptRoot "modules\ReferenceCache.psm1") -Force
 Import-Module (Join-Path $PSScriptRoot "modules\SettingsAPI.psm1") -Force
 Import-Module (Join-Path $PSScriptRoot "modules\ControlAPI.psm1") -Force
 Import-Module (Join-Path $PSScriptRoot "modules\ProductAPI.psm1") -Force
-Import-Module (Join-Path $PSScriptRoot "modules\TaskAPI.psm1") -Force
+# TaskAPI intentionally exports Delete-RoadmapTask for UI/back-compat, so disable verb-name warnings here.
+Import-Module (Join-Path $PSScriptRoot "modules\TaskAPI.psm1") -Force -DisableNameChecking
 Import-Module (Join-Path $PSScriptRoot "modules\ProcessAPI.psm1") -Force
 Import-Module (Join-Path $PSScriptRoot "modules\StateBuilder.psm1") -Force
 Import-Module (Join-Path $PSScriptRoot "modules\NotificationPoller.psm1") -Force
 Import-Module (Join-Path $PSScriptRoot "modules\DecisionAPI.psm1") -Force
+Import-Module (Join-Path $PSScriptRoot "modules\InboxWatcher.psm1") -Force
 
 # Import workflow manifest utilities (for installed workflows API)
 . (Join-Path $botRoot "systems\runtime\modules\workflow-manifest.ps1")
@@ -120,6 +136,7 @@ Initialize-ProcessAPI -ProcessesDir $processesDir -BotRoot $botRoot -ControlDir 
 Initialize-StateBuilder -BotRoot $botRoot -ControlDir $controlDir -ProcessesDir $processesDir
 Initialize-NotificationPoller -BotRoot $botRoot
 Initialize-DecisionAPI -BotRoot $botRoot
+Initialize-InboxWatcher -BotRoot $botRoot
 
 # Request counter for single-line logging
 $script:requestCount = 0
@@ -161,14 +178,14 @@ if (Test-Path $staticRoot) {
     Write-Phosphor " ✓" -Color Green
 } else {
     Write-Phosphor " ⚠" -Color Amber
-    Write-Status "Static directory not found: $staticRoot" -Type Warn
+    Write-BotLog -Level Warn -Message "Static directory not found: $staticRoot"
 }
 
 # Pre-warm reference cache (makes first Workflow tab file click instant)
 if (-not (Test-CacheValidity)) {
     Build-ReferenceCache | Out-Null
 } else {
-    Write-Status "Reference cache is valid (skipping rebuild)" -Type Success
+    Write-BotLog -Level Debug -ForceDisplay -Message "Reference cache is valid (skipping rebuild)"
 }
 
 # HTTP listener
@@ -178,14 +195,14 @@ Write-Phosphor "› Starting listener..." -Color Cyan -NoNewline
 try {
     $listener.Start()
     Write-Phosphor " ✓" -Color Green
-    Write-BotLog -Level Info -Message "Press Ctrl+C to stop"
+    Write-BotLog -Level Debug -ForceDisplay -Message "Press Ctrl+C to stop"
     Write-Separator -Width 70
 } catch {
     Write-Phosphor " ✗" -Color Red
     if ($_.Exception.Message -match 'conflicts with an existing registration') {
-        Write-Status "Port $Port is already in use. Try a different port: .\server.ps1 -Port <number>" -Type Error
+        Write-BotLog -Level Error -Message "Port $Port is already in use. Try a different port: .\server.ps1 -Port <number>"
     } else {
-        Write-Status "Error starting listener: $($_.Exception.Message)" -Type Error
+        Write-BotLog -Level Error -Message "Error starting listener" -Exception $_
     }
     exit 1
 }
@@ -300,6 +317,97 @@ function Add-StaticAssetVersions {
     })
 }
 
+# ---------------------------------------------------------------------------
+# Workflow form configuration helper
+# ---------------------------------------------------------------------------
+# Builds the kickstart dialog config for a workflow manifest. Used by both
+# /api/info (active/default workflow) and /api/workflows/{name}/form
+# (per-workflow lookup) so the modal can be re-populated when the user
+# selects a workflow other than the alphabetically-first one.
+function Get-WorkflowFormConfig {
+    param(
+        [Parameter(Mandatory)]
+        [string]$ProjectRoot,
+        [Parameter(Mandatory = $false)]
+        [object]$Manifest
+    )
+
+    $result = @{
+        dialog = $null
+        phases = $null
+        mode   = $null
+    }
+
+    if (-not $Manifest) { return $result }
+
+    $form = if ($Manifest -is [System.Collections.IDictionary]) { $Manifest['form'] } else { $Manifest.form }
+
+    $formModes = $null
+    if ($form) {
+        $formModes = if ($form -is [System.Collections.IDictionary]) { $form['modes'] } else { $form.modes }
+    }
+
+    $kickstartDialog = $null
+    $activeMode = $null
+
+    if ($formModes -and $formModes.Count -gt 0) {
+        foreach ($mode in $formModes) {
+            $modeCondition = if ($mode -is [System.Collections.IDictionary]) { $mode['condition'] } else { $mode.condition }
+            if (Test-ManifestCondition -ProjectRoot $ProjectRoot -Condition $modeCondition) {
+                $activeMode = @{}
+                foreach ($key in @('id', 'label', 'description', 'button', 'prompt_placeholder', 'show_interview', 'show_files', 'show_prompt', 'show_auto_workflow', 'default_prompt', 'hidden', 'interview_label', 'interview_hint')) {
+                    $val = if ($mode -is [System.Collections.IDictionary]) { $mode[$key] } else { $mode.$key }
+                    if ($null -ne $val) { $activeMode[$key] = $val }
+                }
+                $kickstartDialog = @{
+                    description        = $activeMode['description']
+                    show_prompt        = if ($null -ne $activeMode['show_prompt']) { [bool]$activeMode['show_prompt'] } else { $true }
+                    show_files         = if ($null -ne $activeMode['show_files']) { [bool]$activeMode['show_files'] } else { $true }
+                    show_interview     = if ($null -ne $activeMode['show_interview']) { [bool]$activeMode['show_interview'] } else { $true }
+                    show_auto_workflow = if ($null -ne $activeMode['show_auto_workflow']) { [bool]$activeMode['show_auto_workflow'] } else { $true }
+                    default_prompt     = $activeMode['default_prompt']
+                }
+                foreach ($key in @('interview_label', 'interview_hint', 'prompt_placeholder')) {
+                    if ($activeMode[$key]) { $kickstartDialog[$key] = "$($activeMode[$key])" }
+                }
+                break
+            }
+        }
+    } elseif ($form) {
+        $formDesc = if ($form -is [System.Collections.IDictionary]) { $form['description'] } else { $form.description }
+        if ($formDesc) {
+            $formShowPrompt = if ($form -is [System.Collections.IDictionary]) { $form['show_prompt'] } else { $form.show_prompt }
+            $formShowFiles = if ($form -is [System.Collections.IDictionary]) { $form['show_files'] } else { $form.show_files }
+            $formShowInterview = if ($form -is [System.Collections.IDictionary]) { $form['show_interview'] } else { $form.show_interview }
+            $formShowAutoWorkflow = if ($form -is [System.Collections.IDictionary]) { $form['show_auto_workflow'] } else { $form.show_auto_workflow }
+            $formDefaultPrompt = if ($form -is [System.Collections.IDictionary]) { $form['default_prompt'] } else { $form.default_prompt }
+            $kickstartDialog = @{
+                description        = "$formDesc"
+                show_prompt        = if ($null -ne $formShowPrompt) { [bool]$formShowPrompt } else { $true }
+                show_files         = if ($null -ne $formShowFiles) { [bool]$formShowFiles } else { $true }
+                show_interview     = if ($null -ne $formShowInterview) { [bool]$formShowInterview } else { $true }
+                show_auto_workflow = if ($null -ne $formShowAutoWorkflow) { [bool]$formShowAutoWorkflow } else { $true }
+                default_prompt     = "$formDefaultPrompt"
+            }
+            foreach ($key in @('interview_label', 'interview_hint', 'prompt_placeholder')) {
+                $val = if ($form -is [System.Collections.IDictionary]) { $form[$key] } else { $form.$key }
+                if ($val) { $kickstartDialog[$key] = "$val" }
+            }
+        }
+    }
+
+    $kickstartPhases = $null
+    $tasks = if ($Manifest -is [System.Collections.IDictionary]) { $Manifest['tasks'] } else { $Manifest.tasks }
+    if ($tasks -and $tasks.Count -gt 0) {
+        $kickstartPhases = @(Convert-ManifestTasksToPhases -Tasks $tasks)
+    }
+
+    $result.dialog = $kickstartDialog
+    $result.phases = $kickstartPhases
+    $result.mode   = $activeMode
+    return $result
+}
+
 try {
     while ($listener.IsListening) {
         $context = $listener.GetContext()
@@ -310,30 +418,14 @@ try {
         $method = $request.HttpMethod
         $url = $request.Url.LocalPath
 
-        # Request logging - polling endpoints use single-line overwrite, others get newlines
         $script:requestCount++
-
-        # Refresh theme periodically (every 100 requests) to pick up UI changes
-        if ($script:requestCount % 100 -eq 0) {
-            if (Update-DotBotTheme) {
-                $t = Get-DotBotTheme
-            }
-        }
-
-        $isPollingEndpoint = $url -in @('/api/state', '/api/activity/tail', '/api/git-status', '/api/processes') -or $url -like '/api/process/*/output'
-        $logLine = "$($t.Bezel)[$timestamp]$($t.Reset) $($t.Label)$method$($t.Reset) $($t.Cyan)$url$($t.Reset) $($t.Bezel)(#$script:requestCount)$($t.Reset)"
-
-        if ($isPollingEndpoint) {
-            # Skip logging for high-frequency polling endpoints to avoid log bloat
-        } else {
-            Write-BotLog -Level Debug -Message ""
-            Write-BotLog -Level Info -Message "$logLine"
-        }
+        Write-BotLog -Level Debug -ForceDisplay -Message "[$timestamp] $method $url (#$script:requestCount)"
 
         # Route handler
         $statusCode = 200
         $contentType = "text/html; charset=utf-8"
         $content = ""
+        $binaryContent = $null
 
         # CSRF protection: require X-Dotbot-Request header on state-changing requests.
         # Browsers enforce CORS preflight for custom headers, blocking cross-origin attacks.
@@ -400,67 +492,18 @@ try {
                         } catch { Write-BotLog -Level Debug -Message "Failed to read settings for workflow name" -Exception $_ }
                     }
 
-                    # Read kickstart dialog + phases from workflow manifest (primary source)
+                    # Read kickstart dialog + phases from workflow manifest (primary source).
+                    # Delegated to Get-WorkflowFormConfig so /api/workflows/{name}/form can
+                    # share the same logic for per-workflow lookups (issue #235).
                     $kickstartDialog = $null
                     $kickstartPhases = $null
                     $activeMode = $null
                     $manifest = Get-ActiveWorkflowManifest -BotRoot $botRoot
                     if ($manifest) {
-                        $form = $manifest.form
-
-                        # Evaluate form.modes if declared (condition-driven CTA)
-                        $formModes = $null
-                        if ($form) {
-                            $formModes = if ($form -is [System.Collections.IDictionary]) { $form['modes'] } else { $form.modes }
-                        }
-                        if ($formModes -and $formModes.Count -gt 0) {
-                            foreach ($mode in $formModes) {
-                                $modeCondition = if ($mode -is [System.Collections.IDictionary]) { $mode['condition'] } else { $mode.condition }
-                                if (Test-ManifestCondition -ProjectRoot $projectRoot -Condition $modeCondition) {
-                                    $activeMode = @{}
-                                    foreach ($key in @('id', 'label', 'description', 'button', 'prompt_placeholder', 'show_interview', 'show_files', 'show_prompt', 'show_auto_workflow', 'default_prompt', 'hidden', 'interview_label', 'interview_hint')) {
-                                        $val = if ($mode -is [System.Collections.IDictionary]) { $mode[$key] } else { $mode.$key }
-                                        if ($null -ne $val) { $activeMode[$key] = $val }
-                                    }
-                                    # Map mode fields to kickstartDialog shape for backward compat
-                                    $kickstartDialog = @{
-                                        description = $activeMode['description']
-                                        show_prompt = if ($null -ne $activeMode['show_prompt']) { [bool]$activeMode['show_prompt'] } else { $true }
-                                        show_files = if ($null -ne $activeMode['show_files']) { [bool]$activeMode['show_files'] } else { $true }
-                                        show_interview = if ($null -ne $activeMode['show_interview']) { [bool]$activeMode['show_interview'] } else { $true }
-                                        default_prompt = $activeMode['default_prompt']
-                                    }
-                                    foreach ($key in @('interview_label', 'interview_hint', 'prompt_placeholder')) {
-                                        if ($activeMode[$key]) { $kickstartDialog[$key] = "$($activeMode[$key])" }
-                                    }
-                                    break
-                                }
-                            }
-                        } elseif ($form) {
-                            # No modes — use flat form fields
-                            $formDesc = if ($form -is [System.Collections.IDictionary]) { $form['description'] } else { $form.description }
-                            if ($formDesc) {
-                                $formShowPrompt = if ($form -is [System.Collections.IDictionary]) { $form['show_prompt'] } else { $form.show_prompt }
-                                $formShowFiles = if ($form -is [System.Collections.IDictionary]) { $form['show_files'] } else { $form.show_files }
-                                $formShowInterview = if ($form -is [System.Collections.IDictionary]) { $form['show_interview'] } else { $form.show_interview }
-                                $formDefaultPrompt = if ($form -is [System.Collections.IDictionary]) { $form['default_prompt'] } else { $form.default_prompt }
-                                $kickstartDialog = @{
-                                    description = "$formDesc"
-                                    show_prompt = if ($null -ne $formShowPrompt) { [bool]$formShowPrompt } else { $true }
-                                    show_files = if ($null -ne $formShowFiles) { [bool]$formShowFiles } else { $true }
-                                    show_interview = if ($null -ne $formShowInterview) { [bool]$formShowInterview } else { $true }
-                                    default_prompt = "$formDefaultPrompt"
-                                }
-                                foreach ($key in @('interview_label', 'interview_hint', 'prompt_placeholder')) {
-                                    $val = if ($form -is [System.Collections.IDictionary]) { $form[$key] } else { $form.$key }
-                                    if ($val) { $kickstartDialog[$key] = "$val" }
-                                }
-                            }
-                        }
-                        # Phases from manifest tasks
-                        if ($manifest.tasks -and $manifest.tasks.Count -gt 0) {
-                            $kickstartPhases = @(Convert-ManifestTasksToPhases -Tasks $manifest.tasks)
-                        }
+                        $formConfig = Get-WorkflowFormConfig -ProjectRoot $projectRoot -Manifest $manifest
+                        $kickstartDialog = $formConfig.dialog
+                        $kickstartPhases = $formConfig.phases
+                        $activeMode = $formConfig.mode
                         if (-not $workflowName) { $workflowName = $manifest.name }
                     }
 
@@ -493,6 +536,86 @@ try {
                         kickstart_mode = $activeMode
                         installed_workflows = $installedWorkflows
                     } | ConvertTo-Json -Depth 5 -Compress
+                    break
+                }
+
+                "/api/project/summary" {
+                    # POST-only: this endpoint is side-effecting (reads project files and
+                    # invokes the LLM provider, burning tokens/compute). Routing it through
+                    # POST means the global CSRF check at the top of this handler rejects
+                    # cross-origin requests that lack `X-Dotbot-Request: 1`. Browsers
+                    # enforce CORS preflight for custom headers, so a malicious web page
+                    # cannot silently trigger provider calls against localhost.
+                    if ($method -ne "POST") {
+                        $statusCode = 405
+                        $contentType = "application/json; charset=utf-8"
+                        $content = @{ success = $false; error = "Method not allowed; use POST" } | ConvertTo-Json -Compress
+                        break
+                    }
+                    $contentType = "application/json; charset=utf-8"
+                    try {
+                        # Gather project documentation for context
+                        $docContext = ""
+                        $sources = @()
+                        foreach ($docFile in @("CLAUDE.md", "README.md")) {
+                            $docPath = Join-Path $projectRoot $docFile
+                            if (Test-Path -LiteralPath $docPath) {
+                                $raw = Get-Content -LiteralPath $docPath -Raw -ErrorAction SilentlyContinue
+                                if ($raw) {
+                                    $cap = [System.Math]::Min($raw.Length, 3000)
+                                    $docContext += "`n--- $docFile ---`n$($raw.Substring(0, $cap))`n"
+                                    $sources += $docFile
+                                }
+                            }
+                        }
+                        # Also check package.json / *.csproj for name+description
+                        $pkgJson = Join-Path $projectRoot "package.json"
+                        if (Test-Path -LiteralPath $pkgJson) {
+                            $raw = Get-Content -LiteralPath $pkgJson -Raw -ErrorAction SilentlyContinue
+                            if ($raw) {
+                                $cap = [System.Math]::Min($raw.Length, 1500)
+                                $docContext += "`n--- package.json ---`n$($raw.Substring(0, $cap))`n"
+                                $sources += "package.json"
+                            }
+                        }
+                        foreach ($csproj in @(Get-ChildItem -Path $projectRoot -Filter "*.csproj" -Recurse -Depth 2 -ErrorAction SilentlyContinue | Select-Object -First 2)) {
+                            $raw = Get-Content -LiteralPath $csproj.FullName -Raw -ErrorAction SilentlyContinue
+                            if ($raw) {
+                                $raw = $raw.Substring(0, [System.Math]::Min($raw.Length, 1500))
+                                $relPath = $csproj.FullName.Replace($projectRoot, "").TrimStart("\", "/")
+                                $docContext += "`n--- $relPath ---`n$raw`n"
+                                $sources += $relPath
+                            }
+                        }
+
+                        if (-not $docContext) {
+                            $content = @{ success = $false; error = "No project documentation found (no README.md, CLAUDE.md, or package.json)" } | ConvertTo-Json -Compress
+                        } else {
+                            # Import ProviderCLI and invoke a one-shot summary
+                            $providerModule = Join-Path $botRoot "systems\runtime\ProviderCLI\ProviderCLI.psm1"
+                            Import-Module $providerModule -Force -ErrorAction Stop
+
+                            $summaryPrompt = @"
+You are a project analyst. Based on the documentation below, write a concise project description (2-4 sentences) that covers:
+- What the project is and what problem it solves
+- Who it's for (target users)
+- Key technologies used
+
+Return ONLY the description paragraph, no headings, no bullet points, no markdown formatting. Write in third person.
+
+$docContext
+"@
+                            $summary = $summaryPrompt | Invoke-Provider
+                            if ($summary) {
+                                $summary = $summary.Trim()
+                                $content = @{ success = $true; summary = $summary; sources = $sources } | ConvertTo-Json -Depth 3 -Compress
+                            } else {
+                                $content = @{ success = $false; error = "Provider returned empty response" } | ConvertTo-Json -Compress
+                            }
+                        }
+                    } catch {
+                        $content = @{ success = $false; error = "Summary generation failed: $($_.Exception.Message)" } | ConvertTo-Json -Compress
+                    }
                     break
                 }
 
@@ -546,7 +669,7 @@ try {
                         try {
                             $result = Start-GitCommitAndPush
                             $content = $result | ConvertTo-Json -Compress
-                            Write-Status "Git commit-and-push launched as process (PID: $($result.pid))" -Type Info
+                            Write-BotLog -Level Info -Message "Git commit-and-push launched as process (PID: $($result.pid))"
                         } catch {
                             $statusCode = 500
                             $content = @{ success = $false; error = "Failed to start commit: $($_.Exception.Message)" } | ConvertTo-Json -Compress
@@ -564,7 +687,7 @@ try {
                     $contentType = "application/json; charset=utf-8"
                     $result = Get-AetherScanResult
                     if ($result.found) {
-                        Write-Status "Aether conduit discovered: $($result.conduit) (ID: $($result.id))" -Type Success
+                        Write-BotLog -Level Info -Message "Aether conduit discovered: $($result.conduit) (ID: $($result.id))"
                     }
                     $content = $result | ConvertTo-Json -Compress
                     break
@@ -2677,7 +2800,7 @@ try {
                                                         path = $relPath
                                                     }
                                                 } catch {
-                                                    Write-BotLog "Failed to save kickstart attachment '$safeName': $($_.Exception.Message)"
+                                                    Write-BotLog -Level 'Warn' -Message "Failed to save kickstart attachment '$safeName'" -Exception $_
                                                 }
                                             }
                                             if ($attachMeta.Count -gt 0) {
@@ -2858,6 +2981,20 @@ try {
                     $defaultName = if ($defaultManifest) { $defaultManifest.name } else { 'default' }
                     $skipDefault = $installedWfNames -contains $defaultName
 
+                    # Also skip default when an overlay workflow was applied during init
+                    if (-not $skipDefault) {
+                        $settingsFile = Join-Path $botRoot "settings\settings.default.json"
+                        if (Test-Path $settingsFile) {
+                            try {
+                                $sd = Get-Content $settingsFile -Raw | ConvertFrom-Json
+                                $activeWf = if ($sd.PSObject.Properties['workflow']) { $sd.workflow } else { $sd.profile }
+                                if ($activeWf -and $activeWf -ne 'default' -and $activeWf -ne $defaultName) {
+                                    $skipDefault = $true
+                                }
+                            } catch { Write-BotLog -Level 'Debug' -Message 'Failed to read settings for workflow check' -Exception $_ }
+                        }
+                    }
+
                     if (-not $skipDefault) {
                         $defaultTasks = if ($tasksByWorkflow.ContainsKey('__default__')) { $tasksByWorkflow['__default__'] } else { @{ todo = 0; in_progress = 0; done = 0; total = 0 } }
 
@@ -2950,17 +3087,135 @@ try {
                     break
                 }
 
+                { $_ -like "/api/workflows/*/form" } {
+                    if ($method -eq "GET") {
+                        $contentType = "application/json; charset=utf-8"
+                        try {
+                            $wfName = ($url -replace "^/api/workflows/", "" -replace "/form$", "")
+                            # Validate workflow name to prevent path traversal
+                            if ($wfName -notmatch '^[a-zA-Z0-9_-]+$') {
+                                $statusCode = 400
+                                $content = @{ success = $false; error = "Invalid workflow name: $wfName" } | ConvertTo-Json -Compress
+                                break
+                            }
+
+                            # Resolve workflow directory: installed workflows live at .bot/workflows/{name}/,
+                            # the default/profile workflow at .bot/ root.
+                            $wfDir = Join-Path $botRoot "workflows\$wfName"
+                            if (-not (Test-Path $wfDir)) {
+                                $defaultYaml = Join-Path $botRoot "workflow.yaml"
+                                $defaultManifest = if (Test-Path -LiteralPath $defaultYaml) { Read-WorkflowManifest -WorkflowDir $botRoot } else { $null }
+                                $defaultName = if ($defaultManifest -and $defaultManifest.name) { $defaultManifest.name } else { 'default' }
+                                if ($wfName -eq $defaultName -or $wfName -eq 'default') {
+                                    $wfDir = $botRoot
+                                }
+                            }
+
+                            if (-not (Test-Path (Join-Path $wfDir "workflow.yaml"))) {
+                                $statusCode = 404
+                                $content = @{ success = $false; error = "Workflow not found: $wfName" } | ConvertTo-Json -Compress
+                            } else {
+                                $manifest = Read-WorkflowManifest -WorkflowDir $wfDir
+                                $formConfig = Get-WorkflowFormConfig -ProjectRoot $projectRoot -Manifest $manifest
+                                $content = @{
+                                    success = $true
+                                    workflow = $wfName
+                                    dialog = $formConfig.dialog
+                                    phases = $formConfig.phases
+                                    mode = $formConfig.mode
+                                } | ConvertTo-Json -Depth 5 -Compress
+                            }
+                        } catch {
+                            $statusCode = 500
+                            $content = @{ success = $false; error = "Failed to load workflow form: $($_.Exception.Message)" } | ConvertTo-Json -Compress
+                        }
+                    } else {
+                        $statusCode = 405
+                        $content = @{ success = $false; error = "Method not allowed" } | ConvertTo-Json -Compress
+                    }
+                    break
+                }
+
                 { $_ -like "/api/workflows/*/run" } {
                     if ($method -eq "POST") {
                         $contentType = "application/json; charset=utf-8"
                         try {
                             $wfName = ($url -replace "^/api/workflows/", "" -replace "/run$", "")
+                            # Validate workflow name to prevent path traversal
+                            if ($wfName -notmatch '^[a-zA-Z0-9_-]+$') {
+                                $statusCode = 400
+                                $content = @{ success = $false; error = "Invalid workflow name: $wfName" } | ConvertTo-Json -Compress
+                                break
+                            }
+                            # Default workflow lives at .bot/ root; installed workflows at .bot/workflows/{name}/
                             $wfDir = Join-Path $botRoot "workflows\$wfName"
-
                             if (-not (Test-Path $wfDir)) {
+                                # Inline manifest read — Get-CachedManifest may not be defined yet
+                                $defaultYaml = Join-Path $botRoot "workflow.yaml"
+                                $defaultManifest = if (Test-Path -LiteralPath $defaultYaml) { Read-WorkflowManifest -WorkflowDir $botRoot } else { $null }
+                                $defaultName = if ($defaultManifest -and $defaultManifest.name) { $defaultManifest.name } else { 'default' }
+                                if ($wfName -eq $defaultName -or $wfName -eq 'default') {
+                                    $wfDir = $botRoot
+                                    $wfName = $defaultName
+                                }
+                            }
+
+                            if (-not (Test-Path (Join-Path $wfDir "workflow.yaml"))) {
                                 $statusCode = 404
                                 $content = @{ success = $false; error = "Workflow not found: $wfName" } | ConvertTo-Json -Compress
                             } else {
+                                # Read optional form data (prompt, files) from request body
+                                $body = $null
+                                try {
+                                    $reader = New-Object System.IO.StreamReader($request.InputStream)
+                                    $rawBody = $reader.ReadToEnd()
+                                    $reader.Close()
+                                    if ($rawBody) { $body = $rawBody | ConvertFrom-Json }
+                                } catch {
+                                    if ($rawBody) {
+                                        $statusCode = 400
+                                        $content = @{ success = $false; error = "Invalid JSON in request body: $($_.Exception.Message)" } | ConvertTo-Json -Compress
+                                        break
+                                    }
+                                    $body = $null
+                                }
+
+                                # Save briefing files if provided
+                                $failedFiles = 0
+                                if ($body -and $body.files) {
+                                    $briefingDir = Join-Path $botRoot "workspace\product\briefing"
+                                    if (-not (Test-Path $briefingDir)) {
+                                        New-Item -Path $briefingDir -ItemType Directory -Force | Out-Null
+                                    }
+                                    foreach ($file in @($body.files)) {
+                                        if (-not $file -or -not $file.name -or -not $file.content) { continue }
+                                        # Sanitize filename: strip path components, remove invalid chars, handle Windows reserved names
+                                        $safeName = [System.IO.Path]::GetFileName([string]$file.name)
+                                        $safeName = $safeName.Trim().TrimEnd('.', ' ')
+                                        $invalidCharsPattern = [Regex]::Escape((-join [System.IO.Path]::GetInvalidFileNameChars()))
+                                        $safeName = [Regex]::Replace($safeName, "[$invalidCharsPattern]", '_')
+                                        if ([string]::IsNullOrWhiteSpace($safeName)) { $safeName = "upload.bin" }
+                                        if ($safeName -match '^(?i:(con|prn|aux|nul|com[1-9]|lpt[1-9]))(\..*)?$') { $safeName = "_$safeName" }
+                                        try {
+                                            $decoded = [Convert]::FromBase64String([string]$file.content)
+                                            $filePath = Join-Path $briefingDir $safeName
+                                            [System.IO.File]::WriteAllBytes($filePath, $decoded)
+                                        } catch {
+                                            $failedFiles++
+                                            continue
+                                        }
+                                    }
+                                }
+
+                                # Save user prompt for task prompt injection (canonical path used by ProductAPI/runtime)
+                                if ($body -and $body.prompt) {
+                                    $launchersDir = Join-Path $botRoot ".control\launchers"
+                                    if (-not (Test-Path $launchersDir)) {
+                                        New-Item -Path $launchersDir -ItemType Directory -Force | Out-Null
+                                    }
+                                    $body.prompt | Set-Content -Path (Join-Path $launchersDir "kickstart-prompt.txt") -Encoding UTF8 -NoNewline
+                                }
+
                                 $manifest = Read-WorkflowManifest -WorkflowDir $wfDir
 
                                 # Clear tasks if rerun: fresh
@@ -2983,13 +3238,17 @@ try {
 
                                 # Start-ProcessLaunch auto-detects max_concurrent for workflow type
                                 $launchResult = Start-ProcessLaunch -Type 'task-runner' -Continue $true -Description "Workflow: $wfName" -WorkflowName $wfName
-                                $content = @{
+                                # NOTE: do not assign to $response here — that variable holds the HttpListenerResponse
+                                # used by the outer write loop. Shadowing it causes the response to never be sent.
+                                $runResponse = @{
                                     success = $true
                                     workflow = $wfName
                                     tasks_created = $createdTasks.Count
                                     slots_launched = $launchResult.slots_launched
                                     process_id = $launchResult.process_id
-                                } | ConvertTo-Json -Compress
+                                }
+                                if ($failedFiles -gt 0) { $runResponse.files_failed = $failedFiles }
+                                $content = $runResponse | ConvertTo-Json -Compress
                             }
                         } catch {
                             $statusCode = 500
@@ -3250,9 +3509,17 @@ try {
                             ".css" { "text/css; charset=utf-8" }
                             ".js" { "application/javascript; charset=utf-8" }
                             ".json" { "application/json; charset=utf-8" }
+                            ".svg" { "image/svg+xml" }
+                            ".ico" { "image/x-icon" }
+                            ".png" { "image/png" }
                             default { "application/octet-stream" }
                         }
-                        $content = Get-Content -LiteralPath $filePath -Raw
+                        $isBinary = $extension -in @('.ico', '.png', '.gif', '.jpg', '.jpeg', '.woff', '.woff2')
+                        if ($isBinary) {
+                            $binaryContent = [System.IO.File]::ReadAllBytes($filePath)
+                        } else {
+                            $content = Get-Content -LiteralPath $filePath -Raw
+                        }
                     } else {
                         $statusCode = 404
                         $content = "Not found: $url"
@@ -3262,11 +3529,7 @@ try {
         } catch {
             $statusCode = 500
             $content = "Server error: $($_.Exception.Message)"
-            Write-BotLog -Level Debug -Message ""
-            Write-Status "[$timestamp] ERROR: $($_.Exception.Message)" -Type Error
-            Write-BotLog -Level Error -Message "  Script: $($_.InvocationInfo.ScriptName)"
-            Write-BotLog -Level Error -Message "  Line: $($_.InvocationInfo.ScriptLineNumber)"
-            Write-BotLog -Level Error -Message "  Statement: $($_.InvocationInfo.Line.Trim())"
+            Write-BotLog -Level Error -Message "Route handler error: $($_.Exception.Message)" -Exception $_
         }
         } # end CSRF-safe block
 
@@ -3282,7 +3545,11 @@ try {
                 $response.Headers['Pragma'] = 'no-cache'
                 $response.Headers['Expires'] = '0'
             }
-            $buffer = [System.Text.Encoding]::UTF8.GetBytes($content)
+            if ($null -ne $binaryContent) {
+                $buffer = $binaryContent
+            } else {
+                $buffer = [System.Text.Encoding]::UTF8.GetBytes($content)
+            }
             $response.ContentLength64 = $buffer.Length
             if ($null -ne $response.OutputStream) {
                 $response.OutputStream.Write($buffer, 0, $buffer.Length)
@@ -3292,8 +3559,7 @@ try {
             if ($_.Exception.Message -match "network name is no longer available|connection was forcibly closed|broken pipe") {
                 # Silent handling for expected disconnects
             } else {
-                Write-BotLog -Level Debug -Message ""
-                Write-Status "Response write failed: $($_.Exception.Message)" -Type Warn
+                Write-BotLog -Level Warn -Message "Response write failed" -Exception $_
             }
             try { $response.Close() } catch { Write-BotLog -Level Debug -Message "Cleanup: failed to close response" -Exception $_ }
         }
@@ -3306,6 +3572,13 @@ try {
         Write-BotLog -Level Debug -Message "Cleanup: failed to stop file watchers" -Exception $_
     }
 
+    # Stop inbox watchers
+    try {
+        Stop-InboxWatcher
+    } catch {
+        Write-BotLog -Level Warn -Message "Cleanup: failed to stop inbox watcher: $_"
+    }
+
     # Safely stop listener if it's still running
     if ($listener -and $listener.IsListening) {
         try {
@@ -3315,5 +3588,5 @@ try {
             Write-BotLog -Level Debug -Message "Cleanup: failed to stop HTTP listener" -Exception $_
         }
     }
-    Write-Status "Server stopped" -Type Warn
+    Write-BotLog -Level Info -Message "Server stopped"
 }

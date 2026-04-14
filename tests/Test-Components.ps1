@@ -122,6 +122,28 @@ if (Test-Path $instanceIdModule) {
     Write-TestResult -Name "InstanceId module exists" -Status Fail -Message "Module not found at $instanceIdModule"
 }
 
+$worktreeManagerModule = Join-Path $botDir "systems\runtime\modules\WorktreeManager.psm1"
+if (Test-Path $worktreeManagerModule) {
+    Import-Module $worktreeManagerModule -Force
+
+    Add-Content -Path (Join-Path $testProject ".gitignore") -Value ".serena/"
+    $serenaCacheDir = Join-Path $testProject ".serena\cache"
+    New-Item -Path $serenaCacheDir -ItemType Directory -Force | Out-Null
+    Set-Content -Path (Join-Path $serenaCacheDir "index.json") -Value '{"cache":true}'
+    Set-Content -Path (Join-Path $testProject ".env") -Value "DOTBOT_TEST=1"
+
+    $gitignoredCopyPaths = @(Get-GitignoredCopyPaths -ProjectRoot $testProject)
+
+    Assert-True -Name "Get-GitignoredCopyPaths keeps ignored env files" `
+        -Condition ($gitignoredCopyPaths -contains ".env") `
+        -Message "Expected .env to be copied into worktrees"
+    Assert-True -Name "Get-GitignoredCopyPaths excludes legacy .serena caches" `
+        -Condition (-not ($gitignoredCopyPaths -contains ".serena/cache/index.json")) `
+        -Message "Legacy .serena cache contents should stay excluded from worktree copies"
+} else {
+    Write-TestResult -Name "WorktreeManager module exists" -Status Fail -Message "Module not found at $worktreeManagerModule"
+}
+
 $promptBuilderScript = Join-Path $botDir "systems\runtime\modules\prompt-builder.ps1"
 if (Test-Path $promptBuilderScript) {
     . $promptBuilderScript
@@ -184,6 +206,215 @@ if (Test-Path $extractCommitInfoScript) {
         -Message "Expected workspace_short_id a1b2c3d4 from full GUID bot tag"
 } else {
     Write-TestResult -Name "Extract-CommitInfo module exists" -Status Fail -Message "Module not found at $extractCommitInfoScript"
+}
+
+Write-Host ""
+
+# PROCESS STATUS SANITIZATION
+# ═══════════════════════════════════════════════════════════════════
+
+Write-Host "  PROCESS STATUS SANITIZATION" -ForegroundColor Cyan
+Write-Host "  ────────────────────────────────────────────" -ForegroundColor DarkGray
+
+$fileWatcherModule = Join-Path $botDir "systems\ui\modules\FileWatcher.psm1"
+$controlApiModule = Join-Path $botDir "systems\ui\modules\ControlAPI.psm1"
+$processApiModule = Join-Path $botDir "systems\ui\modules\ProcessAPI.psm1"
+$stateBuilderModule = Join-Path $botDir "systems\ui\modules\StateBuilder.psm1"
+$steeringHeartbeatScript = Join-Path $botDir "systems\mcp\tools\steering-heartbeat\script.ps1"
+$dotBotLogModule = Join-Path $botDir "systems\runtime\modules\DotBotLog.psm1"
+$consoleSanitizerModule = Join-Path $botDir "systems\runtime\modules\ConsoleSequenceSanitizer.psm1"
+$testControlDir = Join-Path $botDir ".control"
+$testProcessesDir = Join-Path $testControlDir "processes"
+$testLogsDir = Join-Path $testControlDir "logs"
+
+if ((Test-Path $fileWatcherModule) -and (Test-Path $controlApiModule) -and (Test-Path $processApiModule) -and (Test-Path $stateBuilderModule) -and (Test-Path $steeringHeartbeatScript) -and (Test-Path $dotBotLogModule) -and (Test-Path $consoleSanitizerModule)) {
+    Import-Module $consoleSanitizerModule -Force
+    Import-Module $dotBotLogModule -Force
+    Import-Module $fileWatcherModule -Force
+    Import-Module $controlApiModule -Force
+    Import-Module $processApiModule -Force
+    Import-Module $stateBuilderModule -Force
+    $global:DotbotProjectRoot = $testProject
+    . $steeringHeartbeatScript
+
+    if (-not (Test-Path $testLogsDir)) {
+        New-Item -Path $testLogsDir -ItemType Directory -Force | Out-Null
+    }
+    if (-not (Test-Path $testProcessesDir)) {
+        New-Item -Path $testProcessesDir -ItemType Directory -Force | Out-Null
+    }
+    Initialize-DotBotLog -LogDir $testLogsDir -ControlDir $testControlDir -ProjectRoot $testProject
+    Initialize-FileWatchers -BotRoot $botDir
+    Initialize-ControlAPI -ControlDir $testControlDir -ProcessesDir $testProcessesDir -BotRoot $botDir
+    Initialize-ProcessAPI -ProcessesDir $testProcessesDir -BotRoot $botDir -ControlDir $testControlDir
+    Initialize-StateBuilder -BotRoot $botDir -ControlDir $testControlDir -ProcessesDir $testProcessesDir
+
+    $testProcId = "proc-ansi-sanitize"
+    $testProcFile = Join-Path $testProcessesDir "$testProcId.json"
+    $testActivityFile = Join-Path $testProcessesDir "$testProcId.activity.jsonl"
+    $globalActivityFile = Join-Path $testControlDir "activity.jsonl"
+    $esc = [char]27
+
+    try {
+        @{
+            id = $testProcId
+            type = "execution"
+            status = "running"
+            pid = $PID
+            started_at = (Get-Date).ToUniversalTime().ToString("o")
+            last_heartbeat = (Get-Date).ToUniversalTime().ToString("o")
+            last_whisper_index = 0
+            heartbeat_status = $null
+            heartbeat_next_action = $null
+        } | ConvertTo-Json -Depth 10 | Set-Content -Path $testProcFile -Encoding utf8NoBOM
+
+        $heartbeatResult = Invoke-SteeringHeartbeat -Arguments @{
+            session_id = "test-session-ansi"
+            process_id = $testProcId
+            status = "${esc}[38;2;56;52;44mIdle${esc}[0m"
+            next_action = "${esc}[38;2;112;104;92mWait${esc}[0m"
+        }
+
+        Assert-True -Name "steering_heartbeat accepts ANSI-bearing status text" `
+            -Condition ($heartbeatResult.success -eq $true) `
+            -Message "Expected heartbeat tool to succeed"
+
+        $storedProc = Get-Content $testProcFile -Raw | ConvertFrom-Json
+        Assert-Equal -Name "steering_heartbeat strips ANSI from stored heartbeat_status" `
+            -Expected "Idle" `
+            -Actual $storedProc.heartbeat_status
+        Assert-Equal -Name "steering_heartbeat strips ANSI from stored heartbeat_next_action" `
+            -Expected "Wait" `
+            -Actual $storedProc.heartbeat_next_action
+        Assert-Equal -Name "Console sanitizer preserves plain bracketed text" `
+            -Expected "[1]" `
+            -Actual (ConvertTo-SanitizedConsoleText "[1]")
+        Assert-Equal -Name "Console sanitizer preserves bracketed words" `
+            -Expected "[kickstart] phase 1" `
+            -Actual (ConvertTo-SanitizedConsoleText "[kickstart] phase 1")
+        Assert-True -Name "Console sanitizer strips parameterless orphaned reset fragment" `
+            -Condition ($null -eq (ConvertTo-SanitizedConsoleText "[m")) `
+            -Message "Expected parameterless reset fragment to be removed"
+
+        $heartbeatBlankResult = Invoke-SteeringHeartbeat -Arguments @{
+            session_id = "test-session-ansi"
+            process_id = $testProcId
+            status = "${esc}[0m"
+            next_action = "${esc}[0m"
+        }
+
+        Assert-True -Name "steering_heartbeat accepts control-only heartbeat updates" `
+            -Condition ($heartbeatBlankResult.success -eq $true) `
+            -Message "Expected heartbeat tool to succeed"
+
+        $storedProc = Get-Content $testProcFile -Raw | ConvertFrom-Json
+        Assert-True -Name "steering_heartbeat normalizes empty heartbeat_status to null" `
+            -Condition ($null -eq $storedProc.heartbeat_status) `
+            -Message "Expected heartbeat_status to be null after sanitization"
+        Assert-True -Name "steering_heartbeat normalizes empty heartbeat_next_action to null" `
+            -Condition ($null -eq $storedProc.heartbeat_next_action) `
+            -Message "Expected heartbeat_next_action to be null after sanitization"
+
+        $storedProc.heartbeat_status = "[38;2;56;52;44mIdle[0m"
+        $storedProc.heartbeat_next_action = "[38;2;112;104;92mWait[0m"
+        $storedProc | ConvertTo-Json -Depth 10 | Set-Content -Path $testProcFile -Encoding utf8NoBOM
+
+        $listedProc = @((Get-ProcessList).processes | Where-Object { $_.id -eq $testProcId }) | Select-Object -First 1
+        Assert-Equal -Name "Get-ProcessList strips orphaned ANSI fragments from heartbeat_status" `
+            -Expected "Idle" `
+            -Actual $listedProc.heartbeat_status
+        Assert-Equal -Name "Get-ProcessList strips orphaned ANSI fragments from heartbeat_next_action" `
+            -Expected "Wait" `
+            -Actual $listedProc.heartbeat_next_action
+
+        Clear-StateCache
+        $state = Get-BotState
+        Assert-Equal -Name "Get-BotState exposes sanitized execution status" `
+            -Expected "Idle" `
+            -Actual $state.instances.execution.status
+        Assert-Equal -Name "Get-BotState exposes sanitized execution next_action" `
+            -Expected "Wait" `
+            -Actual $state.instances.execution.next_action
+
+        $storedProc.heartbeat_status = "[0m"
+        $storedProc.heartbeat_next_action = "[0m"
+        $storedProc | ConvertTo-Json -Depth 10 | Set-Content -Path $testProcFile -Encoding utf8NoBOM
+
+        $listedProc = @((Get-ProcessList).processes | Where-Object { $_.id -eq $testProcId }) | Select-Object -First 1
+        Assert-True -Name "Get-ProcessList normalizes empty heartbeat_status to null" `
+            -Condition ($null -eq $listedProc.heartbeat_status) `
+            -Message "Expected heartbeat_status to be null after sanitization"
+        Assert-True -Name "Get-ProcessList normalizes empty heartbeat_next_action to null" `
+            -Condition ($null -eq $listedProc.heartbeat_next_action) `
+            -Message "Expected heartbeat_next_action to be null after sanitization"
+
+        Clear-StateCache
+        $state = Get-BotState
+        Assert-True -Name "Get-BotState normalizes empty execution status to null" `
+            -Condition ($null -eq $state.instances.execution.status) `
+            -Message "Expected execution status to be null after sanitization"
+        Assert-True -Name "Get-BotState normalizes empty execution next_action to null" `
+            -Condition ($null -eq $state.instances.execution.next_action) `
+            -Message "Expected execution next_action to be null after sanitization"
+
+        $storedProc.status = "running"
+        $storedProc.pid = 999999
+        $storedProc | Add-Member -NotePropertyName failed_at -NotePropertyValue $null -Force
+        $storedProc | Add-Member -NotePropertyName error -NotePropertyValue $null -Force
+        $storedProc.heartbeat_status = "[38;2;56;52;44mIdle[0m"
+        $storedProc.heartbeat_next_action = "[0m"
+        $storedProc | ConvertTo-Json -Depth 10 | Set-Content -Path $testProcFile -Encoding utf8NoBOM
+
+        $listedProc = @((Get-ProcessList).processes | Where-Object { $_.id -eq $testProcId }) | Select-Object -First 1
+        $rewrittenProc = Get-Content $testProcFile -Raw | ConvertFrom-Json
+        Assert-Equal -Name "dead PID rewrite persists sanitized heartbeat_status" `
+            -Expected "Idle" `
+            -Actual $rewrittenProc.heartbeat_status
+        Assert-True -Name "dead PID rewrite persists null heartbeat_next_action" `
+            -Condition ($null -eq $rewrittenProc.heartbeat_next_action) `
+            -Message "Expected heartbeat_next_action to be null after dead PID rewrite"
+        Assert-Equal -Name "dead PID rewrite returns stopped process" `
+            -Expected "stopped" `
+            -Actual $listedProc.status
+
+        @(
+            (@{
+                timestamp = (Get-Date).ToUniversalTime().ToString("o")
+                type = "text"
+                message = "[38;2;56;52;44m[12:28:39][0m [38;2;112;104;92mGET[0m [kickstart]"
+            } | ConvertTo-Json -Compress)
+        ) | Set-Content -Path $testActivityFile -Encoding utf8NoBOM
+
+        $outputData = Get-ProcessOutput -ProcessId $testProcId -Position 0 -Tail 50
+        Assert-Equal -Name "Get-ProcessOutput strips ANSI fragments from activity messages" `
+            -Expected "[12:28:39] GET [kickstart]" `
+            -Actual $outputData.events[0].message
+
+        @(
+            (@{
+                timestamp = (Get-Date).ToUniversalTime().ToString("o")
+                type = "text"
+                message = "[38;2;56;52;44m[12:28:39][0m [38;2;112;104;92mGET[0m [kickstart]"
+            } | ConvertTo-Json -Compress)
+        ) | Set-Content -Path $globalActivityFile -Encoding utf8NoBOM
+
+        $activityTail = Get-ActivityTail -Position 0 -TailLines 50
+        Assert-Equal -Name "Get-ActivityTail strips ANSI fragments from global activity messages" `
+            -Expected "[12:28:39] GET [kickstart]" `
+            -Actual $activityTail.events[0].message
+    } finally {
+        if (Test-Path $testProcFile) {
+            Remove-Item $testProcFile -Force -ErrorAction SilentlyContinue
+        }
+        if (Test-Path $testActivityFile) {
+            Remove-Item $testActivityFile -Force -ErrorAction SilentlyContinue
+        }
+        if (Test-Path $globalActivityFile) {
+            Remove-Item $globalActivityFile -Force -ErrorAction SilentlyContinue
+        }
+    }
+} else {
+    Write-TestResult -Name "Process status sanitization test modules exist" -Status Fail -Message "One or more UI/process modules were not found in $botDir"
 }
 
 Write-Host ""
@@ -1208,7 +1439,7 @@ if ($providerCliLoaded) {
     if ($codexConfig -and $codexConfig.permission_modes) {
         $codexAutoArgs = $null
         try {
-            $codexAutoArgs = Build-ProviderCliArgs -Config $codexConfig -Prompt "test" -ModelId "gpt-5.2-codex" -Streaming $false -PermissionMode "full-auto"
+            $codexAutoArgs = Build-ProviderCliArgs -Config $codexConfig -Prompt "test" -ModelId "gpt-5.4" -Streaming $false -PermissionMode "full-auto"
         } catch { Write-Verbose "Build args failed: $_" }
 
         if ($codexAutoArgs) {
@@ -1225,7 +1456,7 @@ if ($providerCliLoaded) {
     if ($geminiConfig -and $geminiConfig.permission_modes) {
         $geminiEditArgs = $null
         try {
-            $geminiEditArgs = Build-ProviderCliArgs -Config $geminiConfig -Prompt "test" -ModelId "gemini-2.5-pro" -Streaming $false -PermissionMode "auto_edit"
+            $geminiEditArgs = Build-ProviderCliArgs -Config $geminiConfig -Prompt "test" -ModelId "gemini-3-pro-preview" -Streaming $false -PermissionMode "auto_edit"
         } catch { Write-Verbose "Build args failed: $_" }
 
         if ($geminiEditArgs) {
@@ -1321,8 +1552,460 @@ if (Test-Path $notifModule) {
     Assert-True -Name "Get-TaskNotificationResponse returns null when disabled" `
         -Condition ($null -eq $pollResult) `
         -Message "Expected null"
+
+    # ── Send-SplitProposalNotification tests ─────────────────────────
+    $mockSplitTask = [PSCustomObject]@{ id = "split-test-1"; name = "Refactor auth" }
+    $mockSplitProposal = [PSCustomObject]@{
+        reason = "Task is too large"
+        proposed_at = "2026-01-15T10:00:00Z"
+        sub_tasks = @(
+            [PSCustomObject]@{ name = "Extract middleware"; effort = "S"; description = "Pull out auth middleware" },
+            [PSCustomObject]@{ name = "Add token rotation"; effort = "M"; description = "Implement refresh tokens" }
+        )
+    }
+
+    $splitResult = Send-SplitProposalNotification -TaskContent $mockSplitTask -SplitProposal $mockSplitProposal -Settings $settings
+    Assert-True -Name "Send-SplitProposalNotification returns not-configured when disabled" `
+        -Condition ($splitResult.success -eq $false) `
+        -Message "Expected success=false, got $($splitResult.success)"
+
+    # Test empty sub_tasks guard
+    $emptySplitProposal = [PSCustomObject]@{
+        reason = "Should fail"
+        proposed_at = "2026-01-15T10:00:00Z"
+        sub_tasks = @()
+    }
+    $emptyResult = Send-SplitProposalNotification -TaskContent $mockSplitTask -SplitProposal $emptySplitProposal -Settings $settings
+    Assert-True -Name "Send-SplitProposalNotification rejects empty sub_tasks" `
+        -Condition ($emptyResult.success -eq $false -and $emptyResult.reason -match "no sub-tasks") `
+        -Message "Expected failure with 'no sub-tasks' reason, got: $($emptyResult.reason)"
+
+    # Test missing proposed_at guard
+    $noPropAtProposal = [PSCustomObject]@{
+        reason = "Should fail"
+        sub_tasks = @(
+            [PSCustomObject]@{ name = "Some task"; effort = "S" }
+        )
+    }
+    $noPropAtResult = Send-SplitProposalNotification -TaskContent $mockSplitTask -SplitProposal $noPropAtProposal -Settings $settings
+    Assert-True -Name "Send-SplitProposalNotification rejects missing proposed_at" `
+        -Condition ($noPropAtResult.success -eq $false -and $noPropAtResult.reason -match "proposed_at") `
+        -Message "Expected failure with 'proposed_at' reason, got: $($noPropAtResult.reason)"
+
+    # Test template structure with enabled settings (mock REST to verify shape)
+    $enabledSettings = [PSCustomObject]@{
+        enabled = $true; server_url = "http://localhost:9999"; api_key = "test-key"
+        channel = "teams"; recipients = @("user@example.com")
+        project_name = "test-proj"; project_description = "desc"; instance_id = ""
+    }
+    $templateCapture = $null
+    function global:Invoke-RestMethod {
+        param([string]$Method = 'Get', [string]$Uri, [string]$Body, $Headers, $ContentType, $TimeoutSec)
+        if ($Uri -match '/api/templates$') {
+            $global:templateCapture = $Body | ConvertFrom-Json
+            return @{}
+        }
+        if ($Uri -match '/api/instances$') {
+            return @{}
+        }
+        throw "Unexpected URI: $Uri"
+    }
+    $splitTemplateResult = try {
+        Send-SplitProposalNotification -TaskContent $mockSplitTask -SplitProposal $mockSplitProposal -Settings $enabledSettings
+    } finally {
+        Remove-Item -Path 'function:global:Invoke-RestMethod' -ErrorAction SilentlyContinue
+    }
+    $templateCapture = $global:templateCapture
+    Assert-True -Name "Send-SplitProposalNotification returns success with mock server" `
+        -Condition ($splitTemplateResult.success -eq $true) `
+        -Message "Expected success=true, got: $($splitTemplateResult | ConvertTo-Json -Depth 5)"
+
+    if ($templateCapture) {
+        Assert-True -Name "Split template title contains task name" `
+            -Condition ($templateCapture.title -match "Refactor auth") `
+            -Message "Expected title to contain task name, got: $($templateCapture.title)"
+
+        Assert-True -Name "Split template has 2 options (Approve/Reject)" `
+            -Condition ($templateCapture.options.Count -eq 2) `
+            -Message "Expected 2 options, got $($templateCapture.options.Count)"
+
+        $optionKeys = @($templateCapture.options | ForEach-Object { $_.key })
+        Assert-True -Name "Split template options are 'approve' and 'reject'" `
+            -Condition ($optionKeys -contains 'approve' -and $optionKeys -contains 'reject') `
+            -Message "Expected approve/reject keys, got: $($optionKeys -join ', ')"
+
+        Assert-True -Name "Split template context contains reason" `
+            -Condition ($templateCapture.context -match "too large") `
+            -Message "Expected context to contain reason"
+
+        Assert-True -Name "Split template context contains sub-task names" `
+            -Condition ($templateCapture.context -match "Extract middleware" -and $templateCapture.context -match "Add token rotation") `
+            -Message "Expected context to list sub-tasks"
+
+        Assert-True -Name "Split template has questionId (deterministic GUID)" `
+            -Condition ($null -ne $templateCapture.questionId -and $templateCapture.questionId.Length -eq 36) `
+            -Message "Expected 36-char GUID questionId, got: $($templateCapture.questionId)"
+
+        Assert-True -Name "Split template disables free-text (Approve/Reject binary)" `
+            -Condition ($templateCapture.responseSettings.allowFreeText -eq $false) `
+            -Message "Expected allowFreeText=false for split proposal, got: $($templateCapture.responseSettings.allowFreeText)"
+    }
 } else {
     Write-TestResult -Name "NotificationClient module exists" -Status Fail -Message "Module not found at $notifModule"
+}
+
+# ═══════════════════════════════════════════════════════════════════
+# MERGE CONFLICT ESCALATION MODULE TESTS (issue #224)
+# ═══════════════════════════════════════════════════════════════════
+Write-Host ""
+Write-Host "--- MergeConflictEscalation Module ---" -ForegroundColor Cyan
+
+$mergeEscModule = Join-Path $botDir "systems\runtime\modules\MergeConflictEscalation.psm1"
+
+if (Test-Path $mergeEscModule) {
+    Import-Module $mergeEscModule -Force
+
+    # Ensure the helper is exported
+    $cmd = Get-Command Move-TaskToMergeConflictNeedsInput -ErrorAction SilentlyContinue
+    Assert-True -Name "Move-TaskToMergeConflictNeedsInput is exported" `
+        -Condition ($null -ne $cmd) `
+        -Message "Expected exported function"
+
+    # Build an isolated workspace with a fake done/ task
+    $mceWorkspace = Join-Path ([System.IO.Path]::GetTempPath()) "dotbot-mce-$([System.Guid]::NewGuid().ToString().Substring(0,8))"
+    $mceDone = Join-Path $mceWorkspace "done"
+    $mceNeedsInput = Join-Path $mceWorkspace "needs-input"
+    New-Item -ItemType Directory -Force -Path $mceDone | Out-Null
+
+    $fakeTaskId = "abc12345"
+    # Seed an open execution session on the task so the session-close path is
+    # actually exercised. The runtime parent nulls $env:CLAUDE_SESSION_ID before
+    # the squash-merge step, so the helper must source the session id from
+    # $taskContent.execution_sessions, NOT from the env var.
+    $fakeTaskJson = @{
+        id                 = $fakeTaskId
+        name               = "Fake merge-conflict task"
+        status             = "done"
+        created_at         = "2026-04-11T00:00:00.0000000Z"
+        updated_at         = "2026-04-11T00:00:00.0000000Z"
+        execution_sessions = @(
+            @{ id = "exec-session-1"; started_at = "2026-04-11T00:00:01Z"; ended_at = $null }
+        )
+    } | ConvertTo-Json -Depth 10
+    $fakeTaskFile = Join-Path $mceDone "$fakeTaskId.json"
+    Set-Content -Path $fakeTaskFile -Value $fakeTaskJson -Encoding UTF8
+
+    # NB: PSCustomObject branch of conflict_files extraction is defensive only —
+    # Complete-TaskWorktree returns a [hashtable] in production (WorktreeManager.psm1
+    # 652/707/747/771/816/909/917). The hashtable regression test below is the one
+    # that pins production behaviour.
+    $fakeMergeResult = [PSCustomObject]@{
+        success        = $false
+        message        = "conflict in 2 files"
+        conflict_files = @("src/foo.cs", "src/bar.cs")
+    }
+    $fakeWorktreePath = "C:\worktrees\dotbot\task-$fakeTaskId-fake"
+
+    # Point DotbotProjectRoot at the isolated temp workspace that has no `.bot/` —
+    # `Test-Path` on NotificationClient.psm1 fails, so the notification branch short-circuits
+    # to notified=$false deterministically, regardless of the developer's $testProject config.
+    # NB: we pass `-BotRoot $mceBotRoot` explicitly to mirror how the runtime wires the helper
+    # (Invoke-WorkflowProcess / Invoke-ExecutionProcess pass the `.bot` directory, NOT the
+    # project root). This pins the regression: if the helper ever treats `$BotRoot` as a
+    # project root again and appends `.bot`, these tests fail instead of passing vacuously.
+    $mceBotRoot = Join-Path $mceWorkspace ".bot"
+    $savedDotbotRoot = $global:DotbotProjectRoot
+    $savedSessionEnv = $env:CLAUDE_SESSION_ID
+    $global:DotbotProjectRoot = $mceWorkspace
+    $env:CLAUDE_SESSION_ID = $null
+
+    try {
+        $result = Move-TaskToMergeConflictNeedsInput `
+            -TaskId $fakeTaskId `
+            -TasksBaseDir $mceWorkspace `
+            -MergeResult $fakeMergeResult `
+            -WorktreePath $fakeWorktreePath `
+            -BotRoot $mceBotRoot
+
+        Assert-True -Name "Move-TaskToMergeConflictNeedsInput returns success" `
+            -Condition ($result.success -eq $true) `
+            -Message "Expected success=true"
+
+        Assert-True -Name "Task file moved out of done/" `
+            -Condition (-not (Test-Path $fakeTaskFile)) `
+            -Message "Original file still exists in done/"
+
+        $newPath = Join-Path $mceNeedsInput "$fakeTaskId.json"
+        Assert-True -Name "Task file created in needs-input/" `
+            -Condition (Test-Path $newPath) `
+            -Message "Expected file at $newPath"
+
+        if (Test-Path $newPath) {
+            $moved = Get-Content $newPath -Raw | ConvertFrom-Json
+
+            Assert-True -Name "Status transitioned to needs-input" `
+                -Condition ($moved.status -eq "needs-input") `
+                -Message "Expected status=needs-input, got $($moved.status)"
+
+            Assert-True -Name "pending_question.id is merge-conflict" `
+                -Condition ($moved.pending_question.id -eq "merge-conflict") `
+                -Message "Expected id=merge-conflict"
+
+            Assert-True -Name "pending_question has 3 options (A/B/C)" `
+                -Condition (@($moved.pending_question.options).Count -eq 3) `
+                -Message "Expected 3 options, got $(@($moved.pending_question.options).Count)"
+
+            $keys = @($moved.pending_question.options | ForEach-Object { $_.key }) -join ","
+            Assert-True -Name "pending_question option keys are A,B,C" `
+                -Condition ($keys -eq "A,B,C") `
+                -Message "Expected A,B,C, got $keys"
+
+            Assert-True -Name "pending_question recommendation is A" `
+                -Condition ($moved.pending_question.recommendation -eq "A") `
+                -Message "Expected recommendation=A"
+
+            Assert-True -Name "pending_question context includes conflict files" `
+                -Condition ($moved.pending_question.context -match "src/foo\.cs" -and $moved.pending_question.context -match "src/bar\.cs") `
+                -Message "Expected conflict file names in context"
+
+            Assert-True -Name "pending_question context includes worktree path" `
+                -Condition ($moved.pending_question.context -match [regex]::Escape($fakeWorktreePath)) `
+                -Message "Expected worktree path in context"
+        }
+
+        # No .bot/ under $mceWorkspace → NotificationClient not found → notified=$false deterministically
+        Assert-True -Name "Escalation reports notified=false when NotificationClient absent" `
+            -Condition ($result.notified -eq $false) `
+            -Message "Expected notified=false when .bot/systems/mcp/modules/NotificationClient.psm1 is missing"
+
+        Assert-True -Name "Escalation reason is 'NotificationClient module not found'" `
+            -Condition ($result.notification_reason -eq "NotificationClient module not found") `
+            -Message "Expected reason='NotificationClient module not found', got '$($result.notification_reason)'"
+
+        # notification_silent must be $true for a project that hasn't opted in,
+        # so the wrapper's call sites stay quiet on every escalation.
+        Assert-True -Name "Escalation reports notification_silent=true when no module" `
+            -Condition ($result.notification_silent -eq $true) `
+            -Message "Expected notification_silent=true (project never opted in)"
+
+        # Session-close: when SessionTracking.psm1 is unavailable under the temp
+        # workspace, the helper must NOT throw and must still complete the file
+        # move. The execution_sessions array must therefore survive untouched
+        # (still exists, still has the open entry) — the close-with-module branch
+        # is exercised explicitly in the notified=$true block below by stubbing
+        # SessionTracking alongside NotificationClient.
+        if (Test-Path $newPath) {
+            $movedNoSession = Get-Content $newPath -Raw | ConvertFrom-Json
+            Assert-True -Name "Session-close: helper survives missing SessionTracking module" `
+                -Condition ($movedNoSession.execution_sessions -and @($movedNoSession.execution_sessions).Count -eq 1) `
+                -Message "Expected execution_sessions to survive helper run"
+        }
+
+        # Missing-task case: calling again with a task id that is no longer in done/
+        $missingResult = Move-TaskToMergeConflictNeedsInput `
+            -TaskId "does-not-exist" `
+            -TasksBaseDir $mceWorkspace `
+            -MergeResult $fakeMergeResult `
+            -WorktreePath $fakeWorktreePath `
+            -BotRoot $mceBotRoot
+        Assert-True -Name "Missing task returns success=false" `
+            -Condition ($missingResult.success -eq $false) `
+            -Message "Expected success=false when task file not found in done/"
+
+        # --- Regression: hashtable shape (matches Complete-TaskWorktree's real return) ---
+        # Previously the helper probed $MergeResult.PSObject.Properties['conflict_files'],
+        # which is $null for [hashtable], so conflict_files were silently dropped from the
+        # pending_question context and from the Teams card. (issue #224 review defect #2)
+        $fakeTaskId2 = "hash1234"
+        $fakeTaskJson2 = @{
+            id         = $fakeTaskId2
+            name       = "Fake hashtable merge-conflict task"
+            status     = "done"
+            created_at = "2026-04-11T00:00:00.0000000Z"
+            updated_at = "2026-04-11T00:00:00.0000000Z"
+        } | ConvertTo-Json -Depth 10
+        $fakeTaskFile2 = Join-Path $mceDone "$fakeTaskId2.json"
+        Set-Content -Path $fakeTaskFile2 -Value $fakeTaskJson2 -Encoding UTF8
+
+        $fakeMergeResultHashtable = @{
+            success        = $false
+            message        = "conflict in 2 files"
+            conflict_files = @("src/hash-foo.cs", "src/hash-bar.cs")
+        }
+        $fakeWorktreePath2 = "C:\worktrees\dotbot\task-$fakeTaskId2-fake"
+
+        $resultHash = Move-TaskToMergeConflictNeedsInput `
+            -TaskId $fakeTaskId2 `
+            -TasksBaseDir $mceWorkspace `
+            -MergeResult $fakeMergeResultHashtable `
+            -WorktreePath $fakeWorktreePath2 `
+            -BotRoot $mceBotRoot
+
+        Assert-True -Name "Hashtable MergeResult: escalation returns success" `
+            -Condition ($resultHash.success -eq $true) `
+            -Message "Expected success=true for hashtable shape"
+
+        $newPath2 = Join-Path $mceNeedsInput "$fakeTaskId2.json"
+        if (Test-Path $newPath2) {
+            $movedHash = Get-Content $newPath2 -Raw | ConvertFrom-Json
+            Assert-True -Name "Hashtable MergeResult: context includes both conflict files" `
+                -Condition ($movedHash.pending_question.context -match "src/hash-foo\.cs" -and $movedHash.pending_question.context -match "src/hash-bar\.cs") `
+                -Message "Expected hashtable conflict_files to appear in pending_question.context (regression for issue #224 review defect #2)"
+        } else {
+            Write-TestResult -Name "Hashtable MergeResult: task file created in needs-input/" -Status Fail -Message "Expected file at $newPath2"
+        }
+
+        # --- notified=$true path: stub NotificationClient under the temp root ---
+        # Materialise a fake .bot/systems/mcp/modules/NotificationClient.psm1 so the
+        # helper's Test-Path succeeds and Send-TaskNotification returns a canned
+        # success payload. This is the direct unit-level guarantee for issue #224:
+        # without it, the entire success branch (Add-Member notification, second
+        # JSON write, notification metadata persistence) would be untested.
+        $stubModulesDir = Join-Path $mceWorkspace ".bot\systems\mcp\modules"
+        New-Item -ItemType Directory -Force -Path $stubModulesDir | Out-Null
+        $stubModulePath = Join-Path $stubModulesDir "NotificationClient.psm1"
+        $stubModuleContent = @'
+function Get-NotificationSettings {
+    return [pscustomobject]@{ enabled = $true }
+}
+function Send-TaskNotification {
+    param($TaskContent, $PendingQuestion)
+    return @{
+        success     = $true
+        question_id = 'q-test'
+        instance_id = 'i-test'
+        channel     = 'teams'
+        project_id  = 'p-test'
+    }
+}
+Export-ModuleMember -Function 'Get-NotificationSettings','Send-TaskNotification'
+'@
+        Set-Content -Path $stubModulePath -Value $stubModuleContent -Encoding UTF8
+
+        # Also stub SessionTracking.psm1 so the helper's session-close branch is
+        # exercised end-to-end (review defect #1: helper used to read $env:CLAUDE_SESSION_ID
+        # which is always null in the runtime parent — must source from execution_sessions).
+        $stubSessionPath = Join-Path $stubModulesDir "SessionTracking.psm1"
+        $stubSessionContent = @'
+function Close-SessionOnTask {
+    param($TaskContent, $SessionId, $Phase)
+    if (-not $SessionId) { return }
+    $arrayName = "${Phase}_sessions"
+    if (-not $TaskContent.PSObject.Properties[$arrayName]) { return }
+    foreach ($s in $TaskContent.$arrayName) {
+        if ($s.id -eq $SessionId -and -not $s.ended_at) {
+            $s | Add-Member -NotePropertyName ended_at -NotePropertyValue '2026-04-11T12:34:56Z' -Force
+            break
+        }
+    }
+}
+Export-ModuleMember -Function 'Close-SessionOnTask'
+'@
+        Set-Content -Path $stubSessionPath -Value $stubSessionContent -Encoding UTF8
+
+        # Seed the task with an open execution session so Close-SessionOnTask has
+        # a target. Note: NO $env:CLAUDE_SESSION_ID — the helper must source the
+        # session id from execution_sessions only.
+        $fakeTaskId3 = "notif001"
+        $fakeTaskJson3 = @{
+            id                 = $fakeTaskId3
+            name               = "Fake notify merge-conflict task"
+            status             = "done"
+            created_at         = "2026-04-11T00:00:00Z"
+            updated_at         = "2026-04-11T00:00:00Z"
+            execution_sessions = @(
+                @{ id = "exec-notif-001"; started_at = "2026-04-11T00:00:01Z"; ended_at = $null }
+            )
+        } | ConvertTo-Json -Depth 10
+        $fakeTaskFile3 = Join-Path $mceDone "$fakeTaskId3.json"
+        Set-Content -Path $fakeTaskFile3 -Value $fakeTaskJson3 -Encoding UTF8
+
+        # Env var already nulled and captured by the outer block — do not re-capture
+        # here or the finally would wipe the developer's real shell var.
+
+        $resultNotif = Move-TaskToMergeConflictNeedsInput `
+            -TaskId $fakeTaskId3 `
+            -TasksBaseDir $mceWorkspace `
+            -MergeResult $fakeMergeResult `
+            -WorktreePath $fakeWorktreePath `
+            -BotRoot $mceBotRoot
+
+        Assert-True -Name "Notified path: escalation returns success" `
+            -Condition ($resultNotif.success -eq $true) `
+            -Message "Expected success=true"
+
+        Assert-True -Name "Notified path: notified=true" `
+            -Condition ($resultNotif.notified -eq $true) `
+            -Message "Expected notified=true when NotificationClient stub returns success"
+
+        Assert-True -Name "Notified path: reason is 'Notification dispatched'" `
+            -Condition ($resultNotif.notification_reason -eq "Notification dispatched") `
+            -Message "Expected notification_reason='Notification dispatched', got '$($resultNotif.notification_reason)'"
+
+        $newPath3 = Join-Path $mceNeedsInput "$fakeTaskId3.json"
+        if (Test-Path $newPath3) {
+            $movedNotif = Get-Content $newPath3 -Raw | ConvertFrom-Json
+
+            Assert-True -Name "Notified path: notification.question_id persisted" `
+                -Condition ($movedNotif.notification.question_id -eq "q-test") `
+                -Message "Expected notification.question_id='q-test'"
+
+            Assert-True -Name "Notified path: notification.channel persisted" `
+                -Condition ($movedNotif.notification.channel -eq "teams") `
+                -Message "Expected notification.channel='teams'"
+
+            Assert-True -Name "Notified path: notification.instance_id persisted" `
+                -Condition ($movedNotif.notification.instance_id -eq "i-test") `
+                -Message "Expected notification.instance_id='i-test'"
+
+            # Timestamp format guard for review defect #2 — second-precision, trailing Z.
+            # NB: ConvertFrom-Json auto-coerces ISO 8601 strings to [datetime], which then
+            # round-trips through local culture and breaks the regex. Pin the *on-disk*
+            # serialised form by grepping the raw JSON text instead.
+            $rawNotifJson = Get-Content $newPath3 -Raw
+            $tsPattern = '"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z"'
+            Assert-True -Name "Notified path: notification.sent_at is second-precision (on disk)" `
+                -Condition ($rawNotifJson -match "(?s)`"sent_at`"\s*:\s*$tsPattern") `
+                -Message "Expected sent_at to be serialised as second-precision UTC string"
+
+            Assert-True -Name "Notified path: pending_question.asked_at is second-precision (on disk)" `
+                -Condition ($rawNotifJson -match "(?s)`"asked_at`"\s*:\s*$tsPattern") `
+                -Message "Expected asked_at to be serialised as second-precision UTC string"
+
+            # Session-close: helper must have stamped ended_at on the open
+            # execution_sessions entry by sourcing its id from the task content
+            # (NOT from $env:CLAUDE_SESSION_ID, which is empty in this test).
+            $execSessions = @($movedNotif.execution_sessions)
+            Assert-True -Name "Session-close: execution_sessions still has 1 entry" `
+                -Condition ($execSessions.Count -eq 1) `
+                -Message "Expected single execution session entry"
+
+            if ($execSessions.Count -eq 1) {
+                Assert-True -Name "Session-close: ended_at populated on previously-open session" `
+                    -Condition ($null -ne $execSessions[0].ended_at -and "$($execSessions[0].ended_at)") `
+                    -Message "Expected ended_at to be set after escalation; got '$($execSessions[0].ended_at)'"
+
+                Assert-True -Name "Session-close: id matches the seeded open session" `
+                    -Condition ($execSessions[0].id -eq "exec-notif-001") `
+                    -Message "Expected id=exec-notif-001, got '$($execSessions[0].id)'"
+            }
+        } else {
+            Write-TestResult -Name "Notified path: task file created in needs-input/" -Status Fail -Message "Expected file at $newPath3"
+        }
+
+    } finally {
+        # Unload the stub so it cannot leak into later tests that rely on the real module.
+        # Must run in finally: $ErrorActionPreference=Stop means any assertion failure
+        # above would otherwise skip cleanup and shadow the real NotificationClient
+        # in subsequent tests.
+        Remove-Module NotificationClient -Force -ErrorAction SilentlyContinue
+        Remove-Module SessionTracking -Force -ErrorAction SilentlyContinue
+        if ($null -ne $savedSessionEnv) { $env:CLAUDE_SESSION_ID = $savedSessionEnv } else { Remove-Item Env:CLAUDE_SESSION_ID -ErrorAction SilentlyContinue }
+        $global:DotbotProjectRoot = $savedDotbotRoot
+        Remove-Item -Path $mceWorkspace -Recurse -Force -ErrorAction SilentlyContinue
+    }
+} else {
+    Write-TestResult -Name "MergeConflictEscalation module exists" -Status Fail -Message "Module not found at $mergeEscModule"
 }
 
 # ═══════════════════════════════════════════════════════════════════
@@ -1357,6 +2040,109 @@ if (Test-Path $pollerModule) {
     Assert-True -Name "Invoke-NotificationPollTick no-op when no tasks" `
         -Condition (-not $pollTickError) `
         -Message "Should not throw with empty needs-input"
+
+    # ── Invoke-SplitTransitionFromNotification tests ─────────────────
+    $needsInputDir = Join-Path $botDir "workspace" "tasks" "needs-input"
+    $analysingDir  = Join-Path $botDir "workspace" "tasks" "analysing"
+    if (-not (Test-Path $needsInputDir)) {
+        New-Item -ItemType Directory -Force -Path $needsInputDir | Out-Null
+    }
+
+    # --- Reject path test ---
+    $rejectTask = [PSCustomObject]@{
+        id = "split-reject-test"
+        name = "Task to reject"
+        status = "needs-input"
+        split_proposal = [PSCustomObject]@{
+            reason = "Too big"
+            sub_tasks = @([PSCustomObject]@{ name = "Sub A" })
+            proposed_at = "2026-01-15T10:00:00Z"
+        }
+        notification = [PSCustomObject]@{
+            question_id = "q-reject"; instance_id = "i-reject"; channel = "teams"; project_id = "proj1"
+        }
+        updated_at = "2026-01-15T10:00:00Z"
+    }
+    $rejectFile = Join-Path $needsInputDir "split-reject-test.json"
+    $rejectTask | ConvertTo-Json -Depth 20 | Set-Content -Path $rejectFile -Encoding UTF8
+    $rejectFileInfo = Get-Item $rejectFile
+
+    $rejectError = $false
+    try {
+        Invoke-SplitTransitionFromNotification -TaskFile $rejectFileInfo -TaskContent $rejectTask `
+            -AnswerKey 'reject' -BotRoot $botDir
+    } catch {
+        $rejectError = $true
+    }
+    Assert-True -Name "Invoke-SplitTransitionFromNotification reject does not throw" `
+        -Condition (-not $rejectError) `
+        -Message "Reject path threw an error"
+
+    Assert-PathNotExists -Name "Reject: task removed from needs-input" -Path $rejectFile
+
+    $rejectedFile = Join-Path $analysingDir "split-reject-test.json"
+    Assert-PathExists -Name "Reject: task moved to analysing" -Path $rejectedFile
+
+    if (Test-Path $rejectedFile) {
+        $rejectedContent = Get-Content -Path $rejectedFile -Raw | ConvertFrom-Json
+        Assert-True -Name "Reject: split_proposal.status is 'rejected'" `
+            -Condition ($rejectedContent.split_proposal.status -eq 'rejected') `
+            -Message "Expected 'rejected', got '$($rejectedContent.split_proposal.status)'"
+        Assert-True -Name "Reject: split_proposal.answered_via is 'notification'" `
+            -Condition ($rejectedContent.split_proposal.answered_via -eq 'notification') `
+            -Message "Expected 'notification', got '$($rejectedContent.split_proposal.answered_via)'"
+        Assert-True -Name "Reject: notification metadata cleared" `
+            -Condition ($null -eq $rejectedContent.notification) `
+            -Message "Expected notification=null"
+        Assert-True -Name "Reject: task status is 'analysing'" `
+            -Condition ($rejectedContent.status -eq 'analysing') `
+            -Message "Expected 'analysing', got '$($rejectedContent.status)'"
+        # Cleanup
+        Remove-Item -Path $rejectedFile -Force -ErrorAction SilentlyContinue
+    }
+
+    # --- Invalid key test (no-op) ---
+    $invalidKeyTask = [PSCustomObject]@{
+        id = "split-invalid-test"
+        name = "Task with bad key"
+        status = "needs-input"
+        split_proposal = [PSCustomObject]@{
+            reason = "Reason"; sub_tasks = @([PSCustomObject]@{ name = "Sub" })
+            proposed_at = "2026-01-15T10:00:00Z"
+        }
+        notification = [PSCustomObject]@{
+            question_id = "q-inv"; instance_id = "i-inv"; channel = "teams"; project_id = "proj1"
+        }
+        updated_at = "2026-01-15T10:00:00Z"
+    }
+    $invalidFile = Join-Path $needsInputDir "split-invalid-test.json"
+    $invalidKeyTask | ConvertTo-Json -Depth 20 | Set-Content -Path $invalidFile -Encoding UTF8
+    $invalidFileInfo = Get-Item $invalidFile
+
+    $invalidError = $false
+    try {
+        Invoke-SplitTransitionFromNotification -TaskFile $invalidFileInfo -TaskContent $invalidKeyTask `
+            -AnswerKey 'maybe' -BotRoot $botDir
+    } catch {
+        $invalidError = $true
+    }
+    Assert-True -Name "Invoke-SplitTransitionFromNotification ignores invalid key" `
+        -Condition (-not $invalidError) `
+        -Message "Invalid key should not throw"
+
+    Assert-PathExists -Name "Invalid key: task stays in needs-input" -Path $invalidFile
+
+    if (Test-Path $invalidFile) {
+        $invalidContent = Get-Content -Path $invalidFile -Raw | ConvertFrom-Json
+        Assert-True -Name "Invalid key: notification metadata cleared (prevents poll loop)" `
+            -Condition ($null -eq $invalidContent.notification) `
+            -Message "Expected notification=null after invalid-key ignore"
+        Assert-True -Name "Invalid key: split_proposal preserved" `
+            -Condition ($null -ne $invalidContent.split_proposal -and $invalidContent.split_proposal.reason -eq 'Reason') `
+            -Message "Expected split_proposal preserved"
+    }
+    # Cleanup
+    Remove-Item -Path $invalidFile -Force -ErrorAction SilentlyContinue
 } else {
     Write-TestResult -Name "NotificationPoller module exists" -Status Fail -Message "Module not found at $pollerModule"
 }
@@ -1973,6 +2759,9 @@ if (Test-Path $productApiModule) {
         Set-Content -Path (Join-Path $productDir "roadmap-overview.md") -Value "# Roadmap" -Encoding UTF8
         Set-Content -Path (Join-Path $productDir "interview-summary.md") -Value "# Interview Summary" -Encoding UTF8
         Set-Content -Path (Join-Path $briefingDir "pr-context.md") -Value "# Pull Request Context" -Encoding UTF8
+        # JSON files for type/resolution tests
+        Set-Content -Path (Join-Path $productDir "config.json") -Value '{"key":"value"}' -Encoding UTF8
+        Set-Content -Path (Join-Path $productDir "mission.json") -Value '{"title":"Mission JSON"}' -Encoding UTF8
         # Binary file for type/size tests
         [System.IO.File]::WriteAllBytes((Join-Path $productDir "logo.png"), [byte[]](0x89, 0x50, 0x4E, 0x47))
         # .gitkeep should be excluded
@@ -1982,7 +2771,7 @@ if (Test-Path $productApiModule) {
 
         $docs = @((Get-ProductList).docs)
         Assert-Equal -Name "ProductAPI lists nested product docs" `
-            -Expected 5 `
+            -Expected 7 `
             -Actual $docs.Count
         Assert-Equal -Name "ProductAPI keeps mission first in priority order" `
             -Expected "mission" `
@@ -2034,9 +2823,347 @@ if (Test-Path $productApiModule) {
         Assert-True -Name "ProductAPI excludes .gitkeep files" `
             -Condition (-not ($docs.filename -contains 'briefing/.gitkeep')) `
             -Message ".gitkeep should be excluded from product list"
+
+        # JSON document support tests
+        $configJson = $docs | Where-Object { $_.name -eq 'config.json' }
+        Assert-True -Name "ProductAPI includes JSON files in list" `
+            -Condition ($null -ne $configJson) `
+            -Message "JSON file config.json missing from product list"
+        Assert-Equal -Name "ProductAPI returns type=json for JSON files" `
+            -Expected "json" `
+            -Actual $configJson.type
+        Assert-Equal -Name "ProductAPI retains .json extension in name" `
+            -Expected "config.json" `
+            -Actual $configJson.name
+
+        $jsonDoc = Get-ProductDocument -Name "config.json"
+        Assert-True -Name "ProductAPI loads JSON doc by name" `
+            -Condition ($jsonDoc.success -eq $true -and $jsonDoc.content -match 'key') `
+            -Message "JSON doc config.json could not be loaded"
+
+        # .md takes priority over .json when both exist (mission.md + mission.json)
+        $missionResolved = Get-ProductDocument -Name "mission"
+        Assert-True -Name "ProductAPI resolves .md over .json when both exist" `
+            -Condition ($missionResolved.success -eq $true -and $missionResolved.content -match 'Mission') `
+            -Message "Expected mission.md content when requesting by base name"
+
+        # Explicit .json route loads JSON even when .md exists
+        $missionJsonDoc = Get-ProductDocument -Name "mission.json"
+        Assert-True -Name "ProductAPI loads explicit .json route when .md also exists" `
+            -Condition ($missionJsonDoc.success -eq $true -and $missionJsonDoc.content -match 'Mission JSON') `
+            -Message "Expected mission.json content when requested explicitly"
+
+        # ═════════════════════════════════════════════════════════════════
+        # Get-KickstartStatus — script-phase probe + process-type filter
+        # Regression tests for #244: Overview stuck on Task Group Expansion
+        # ═════════════════════════════════════════════════════════════════
+
+        # Set up a fresh, isolated workspace for kickstart status tests so
+        # state doesn't leak into the doc tests above.
+        $kickstartTestRoot = Join-Path ([System.IO.Path]::GetTempPath()) "dotbot-kickstart-status-$([guid]::NewGuid().ToString().Substring(0,8))"
+        $kickstartBotRoot  = Join-Path $kickstartTestRoot ".bot"
+        $kickstartControl  = Join-Path $kickstartBotRoot ".control"
+        $kickstartSettings = Join-Path $kickstartBotRoot "settings"
+        $kickstartTasksDir = Join-Path $kickstartBotRoot "workspace\tasks"
+        $kickstartProductDir = Join-Path $kickstartBotRoot "workspace\product"
+        $kickstartDecisionsDir = Join-Path $kickstartBotRoot "workspace\decisions"
+
+        foreach ($d in @($kickstartControl, (Join-Path $kickstartControl 'processes'), $kickstartSettings, $kickstartProductDir, $kickstartDecisionsDir)) {
+            New-Item -Path $d -ItemType Directory -Force | Out-Null
+        }
+        # Create the full canonical task pipeline dir set (matches
+        # workflow-manifest.ps1 Clear-WorkspaceTaskDirs).
+        foreach ($td in @('todo','analysing','needs-input','analysed','in-progress','done','skipped','cancelled','split')) {
+            New-Item -Path (Join-Path $kickstartTasksDir $td) -ItemType Directory -Force | Out-Null
+        }
+
+        # Mark the first three phases complete via disk artifacts
+        Set-Content -Path (Join-Path $kickstartProductDir 'mission.md') -Value '# Mission' -Encoding UTF8
+        Set-Content -Path (Join-Path $kickstartProductDir 'tech-stack.md') -Value '# Tech' -Encoding UTF8
+        Set-Content -Path (Join-Path $kickstartProductDir 'entity-model.md') -Value '# Entities' -Encoding UTF8
+        Set-Content -Path (Join-Path $kickstartProductDir 'task-groups.json') -Value '{"groups":[]}' -Encoding UTF8
+        Set-Content -Path (Join-Path $kickstartDecisionsDir 'dec-0001.md') -Value '# Decision 1' -Encoding UTF8
+
+        # Minimal legacy kickstart phase list via settings.default.json — the
+        # Get-KickstartStatus fallback path. Avoids needing a YAML parser in
+        # the test environment.
+        $kickstartPhasesJson = @'
+{
+  "kickstart": {
+    "phases": [
+      {
+        "id": "product-documents",
+        "name": "Product Documents",
+        "type": "prompt",
+        "outputs": ["mission.md", "tech-stack.md", "entity-model.md"]
+      },
+      {
+        "id": "generate-decisions",
+        "name": "Generate Decisions",
+        "type": "prompt",
+        "outputs_dir": "decisions",
+        "min_output_count": 1
+      },
+      {
+        "id": "task-groups",
+        "name": "Task Groups",
+        "type": "prompt",
+        "outputs": ["task-groups.json"]
+      },
+      {
+        "id": "task-group-expansion",
+        "name": "Task Group Expansion",
+        "type": "script",
+        "script": "expand-task-groups.ps1",
+        "commit": { "paths": ["workspace/tasks/"] }
+      }
+    ]
+  }
+}
+'@
+        Set-Content -Path (Join-Path $kickstartSettings 'settings.default.json') -Value $kickstartPhasesJson -Encoding UTF8
+
+        # Get-KickstartStatus dot-sources $BotRoot/systems/runtime/modules/workflow-manifest.ps1
+        # and that file imports ManifestCondition.psm1 from the same directory.
+        # Copy both helpers into the test bot root so the integration test can run.
+        $runtimeModulesDir = Join-Path $kickstartBotRoot "systems\runtime\modules"
+        New-Item -Path $runtimeModulesDir -ItemType Directory -Force | Out-Null
+        $repoRootForTest = Split-Path $PSScriptRoot -Parent
+        $realRuntimeModules = Join-Path $repoRootForTest "workflows\default\systems\runtime\modules"
+        Copy-Item -Path (Join-Path $realRuntimeModules 'workflow-manifest.ps1') -Destination $runtimeModulesDir -Force
+        Copy-Item -Path (Join-Path $realRuntimeModules 'ManifestCondition.psm1') -Destination $runtimeModulesDir -Force
+
+        # Re-initialize ProductAPI against the isolated kickstart test root
+        Initialize-ProductAPI -BotRoot $kickstartBotRoot -ControlDir $kickstartControl
+
+        # Helper: invoke the module-private Resolve-PhaseStatusFromOutputs
+        # directly. It's not exported so we use module-scope invocation.
+        $productApiModuleObj = Get-Module ProductAPI
+        $resolvePhaseStatus = {
+            param($Phase, $BotRoot)
+            Resolve-PhaseStatusFromOutputs -Phase $Phase -BotRoot $BotRoot
+        }
+
+        # ── Defect 2: script-phase probe (Resolve-PhaseStatusFromOutputs) ──
+
+        $scriptPhaseCommitTasks = [pscustomobject]@{
+            id = 'task-group-expansion'
+            name = 'Task Group Expansion'
+            type = 'script'
+            script = 'expand-task-groups.ps1'
+            commit = [pscustomobject]@{ paths = @('workspace/tasks/') }
+        }
+
+        # Case A: entirely empty pipeline dirs → pending (was: pending — same)
+        $statusEmpty = & $productApiModuleObj $resolvePhaseStatus $scriptPhaseCommitTasks $kickstartBotRoot
+        Assert-Equal -Name "Resolve-PhaseStatusFromOutputs: empty tasks/ → pending" `
+            -Expected "pending" -Actual $statusEmpty
+
+        # Case B: a task file in tasks/todo/ → completed
+        # (This is the #244 bug: before the fix, returned "pending" because
+        # Get-ChildItem -File on the tasks/ parent had no top-level files.)
+        Set-Content -Path (Join-Path $kickstartTasksDir 'todo/expanded-task-1.json') `
+            -Value '{"id":"t1","name":"test"}' -Encoding UTF8
+        $statusWithTodo = & $productApiModuleObj $resolvePhaseStatus $scriptPhaseCommitTasks $kickstartBotRoot
+        Assert-Equal -Name "Resolve-PhaseStatusFromOutputs: task in tasks/todo/ → completed (#244 regression)" `
+            -Expected "completed" -Actual $statusWithTodo
+
+        # Case C: task only in tasks/done/ (workflow task moved through pipeline) → completed
+        Remove-Item (Join-Path $kickstartTasksDir 'todo/expanded-task-1.json') -Force
+        Set-Content -Path (Join-Path $kickstartTasksDir 'done/expanded-task-1.json') `
+            -Value '{"id":"t1","name":"test"}' -Encoding UTF8
+        $statusWithDone = & $productApiModuleObj $resolvePhaseStatus $scriptPhaseCommitTasks $kickstartBotRoot
+        Assert-Equal -Name "Resolve-PhaseStatusFromOutputs: task in tasks/done/ → completed" `
+            -Expected "completed" -Actual $statusWithDone
+        Remove-Item (Join-Path $kickstartTasksDir 'done/expanded-task-1.json') -Force
+
+        # Case C2: task only in tasks/skipped/ → completed (pipeline-dir list
+        # must stay aligned with the outputs_dir branch, which also counts
+        # skipped + cancelled as evidence the phase ran).
+        Set-Content -Path (Join-Path $kickstartTasksDir 'skipped/expanded-task-s.json') `
+            -Value '{"id":"ts","name":"skipped"}' -Encoding UTF8
+        $statusWithSkipped = & $productApiModuleObj $resolvePhaseStatus $scriptPhaseCommitTasks $kickstartBotRoot
+        Assert-Equal -Name "Resolve-PhaseStatusFromOutputs: task in tasks/skipped/ → completed" `
+            -Expected "completed" -Actual $statusWithSkipped
+        Remove-Item (Join-Path $kickstartTasksDir 'skipped/expanded-task-s.json') -Force
+
+        # Case C3: task only in tasks/cancelled/ → completed
+        Set-Content -Path (Join-Path $kickstartTasksDir 'cancelled/expanded-task-c.json') `
+            -Value '{"id":"tc","name":"cancelled"}' -Encoding UTF8
+        $statusWithCancelled = & $productApiModuleObj $resolvePhaseStatus $scriptPhaseCommitTasks $kickstartBotRoot
+        Assert-Equal -Name "Resolve-PhaseStatusFromOutputs: task in tasks/cancelled/ → completed" `
+            -Expected "completed" -Actual $statusWithCancelled
+        Remove-Item (Join-Path $kickstartTasksDir 'cancelled/expanded-task-c.json') -Force
+
+        # Case C4: task only in tasks/needs-input/ → completed
+        # (Split/needs-input are legitimate pipeline statuses per
+        # workflow-manifest.ps1 Clear-WorkspaceTaskDirs — must be recognized.)
+        Set-Content -Path (Join-Path $kickstartTasksDir 'needs-input/expanded-task-n.json') `
+            -Value '{"id":"tn","name":"needs-input"}' -Encoding UTF8
+        $statusWithNeedsInput = & $productApiModuleObj $resolvePhaseStatus $scriptPhaseCommitTasks $kickstartBotRoot
+        Assert-Equal -Name "Resolve-PhaseStatusFromOutputs: task in tasks/needs-input/ → completed" `
+            -Expected "completed" -Actual $statusWithNeedsInput
+        Remove-Item (Join-Path $kickstartTasksDir 'needs-input/expanded-task-n.json') -Force
+
+        # Case C5: task only in tasks/split/ → completed
+        Set-Content -Path (Join-Path $kickstartTasksDir 'split/expanded-task-sp.json') `
+            -Value '{"id":"tsp","name":"split"}' -Encoding UTF8
+        $statusWithSplit = & $productApiModuleObj $resolvePhaseStatus $scriptPhaseCommitTasks $kickstartBotRoot
+        Assert-Equal -Name "Resolve-PhaseStatusFromOutputs: task in tasks/split/ → completed" `
+            -Expected "completed" -Actual $statusWithSplit
+        Remove-Item (Join-Path $kickstartTasksDir 'split/expanded-task-sp.json') -Force
+
+        # Case D: only .gitkeep sentinels in pipeline dirs → pending
+        # (Sentinels must not trip the probe — that would mask a never-ran state.)
+        Set-Content -Path (Join-Path $kickstartTasksDir 'todo/.gitkeep') -Value '' -Encoding UTF8
+        Set-Content -Path (Join-Path $kickstartTasksDir 'done/.gitkeep') -Value '' -Encoding UTF8
+        $statusOnlyGitkeep = & $productApiModuleObj $resolvePhaseStatus $scriptPhaseCommitTasks $kickstartBotRoot
+        Assert-Equal -Name "Resolve-PhaseStatusFromOutputs: only .gitkeep sentinels → pending" `
+            -Expected "pending" -Actual $statusOnlyGitkeep
+        Remove-Item (Join-Path $kickstartTasksDir 'todo/.gitkeep') -Force
+        Remove-Item (Join-Path $kickstartTasksDir 'done/.gitkeep') -Force
+
+        # Case E: general recursive case — a non-tasks commit path with
+        # committed files nested two levels deep. The old probe used a flat
+        # file count on the top-level dir and would have missed these.
+        $customDir = Join-Path $kickstartBotRoot 'workspace\custom\nested\deep'
+        New-Item -Path $customDir -ItemType Directory -Force | Out-Null
+        Set-Content -Path (Join-Path $customDir 'artifact.txt') -Value 'hello' -Encoding UTF8
+        $scriptPhaseCustom = [pscustomobject]@{
+            id = 'custom-phase'
+            name = 'Custom Phase'
+            type = 'script'
+            script = 'custom.ps1'
+            commit = [pscustomobject]@{ paths = @('workspace/custom/') }
+        }
+        $statusRecursive = & $productApiModuleObj $resolvePhaseStatus $scriptPhaseCustom $kickstartBotRoot
+        Assert-Equal -Name "Resolve-PhaseStatusFromOutputs: nested artifacts → completed (recursive general case)" `
+            -Expected "completed" -Actual $statusRecursive
+
+        # Case F: general recursive case with only .gitkeep → pending
+        Remove-Item (Join-Path $customDir 'artifact.txt') -Force
+        Set-Content -Path (Join-Path $customDir '.gitkeep') -Value '' -Encoding UTF8
+        $statusRecursiveGitkeep = & $productApiModuleObj $resolvePhaseStatus $scriptPhaseCustom $kickstartBotRoot
+        Assert-Equal -Name "Resolve-PhaseStatusFromOutputs: nested .gitkeep only → pending" `
+            -Expected "pending" -Actual $statusRecursiveGitkeep
+
+        # ── Integration: Get-KickstartStatus full-stack ──
+
+        # With a real task file and no process record, all four phases should
+        # report completed via filesystem inference (P1 + P3 working end-to-end).
+        Set-Content -Path (Join-Path $kickstartTasksDir 'todo/expanded-task-1.json') `
+            -Value '{"id":"t1","name":"test"}' -Encoding UTF8
+
+        $statusNoProc = Get-KickstartStatus
+        Assert-Equal -Name "Get-KickstartStatus: overall status with 4 complete phases (no proc)" `
+            -Expected "completed" -Actual $statusNoProc.status
+        $expansionPhase = $statusNoProc.phases | Where-Object { $_.id -eq 'task-group-expansion' }
+        Assert-Equal -Name "Get-KickstartStatus: expansion phase completed via filesystem inference" `
+            -Expected "completed" -Actual $expansionPhase.status
+        Assert-True -Name "Get-KickstartStatus: resume_from is null when all phases complete" `
+            -Condition ([string]::IsNullOrEmpty($statusNoProc.resume_from)) `
+            -Message "Expected resume_from null/empty, got '$($statusNoProc.resume_from)'"
+
+        # ── Defect 1: process-type filter (P2) ──
+
+        $procDir = Join-Path $kickstartControl 'processes'
+
+        # P2 positive: task-runner process with matching workflow_name IS picked up.
+        # This case requires a real YAML manifest so that $workflowName gets
+        # populated inside Get-KickstartStatus (the legacy settings.default.json
+        # fallback leaves workflowName null, which would short-circuit the match).
+        # Skip if powershell-yaml is unavailable in the test environment.
+        $haveYamlModule = $null -ne (Get-Module -ListAvailable powershell-yaml -ErrorAction SilentlyContinue)
+        if ($haveYamlModule) {
+            $manifestDir = Join-Path $kickstartBotRoot "workflows\kickstart-from-scratch"
+            New-Item -Path $manifestDir -ItemType Directory -Force | Out-Null
+            $manifestYaml = @'
+name: kickstart-from-scratch
+version: "1.0"
+description: Test manifest for #244 regression
+tasks:
+  - name: "Product Documents"
+    id: product-documents
+    type: prompt
+    outputs: ["mission.md", "tech-stack.md", "entity-model.md"]
+  - name: "Generate Decisions"
+    id: generate-decisions
+    type: prompt
+    outputs_dir: "decisions"
+    min_output_count: 1
+  - name: "Task Groups"
+    id: task-groups
+    type: prompt
+    outputs: ["task-groups.json"]
+  - name: "Task Group Expansion"
+    id: task-group-expansion
+    type: script
+    script: "expand-task-groups.ps1"
+    outputs_dir: "tasks/todo"
+    min_output_count: 1
+    commit:
+      paths: ["workspace/tasks/"]
+'@
+            Set-Content -Path (Join-Path $manifestDir 'workflow.yaml') -Value $manifestYaml -Encoding UTF8
+
+            $matchingProc = @{
+                id = 'proc-test-match'
+                type = 'task-runner'
+                workflow_name = 'kickstart-from-scratch'
+                status = 'completed'
+                phases = @()
+            } | ConvertTo-Json -Depth 4
+            Set-Content -Path (Join-Path $procDir 'proc-test-match.json') -Value $matchingProc -Encoding UTF8
+            $statusMatch = Get-KickstartStatus
+            Assert-Equal -Name "Get-KickstartStatus P2: task-runner proc with matching workflow_name → process_id populated" `
+                -Expected 'proc-test-match' -Actual $statusMatch.process_id
+            Assert-Equal -Name "Get-KickstartStatus P2: workflow_name surfaced in response" `
+                -Expected 'kickstart-from-scratch' -Actual $statusMatch.workflow_name
+            Remove-Item (Join-Path $procDir 'proc-test-match.json') -Force
+            # Leave the manifest in place for the remaining P2 tests.
+        } else {
+            Write-TestResult -Name "Get-KickstartStatus P2: task-runner proc with matching workflow_name" `
+                -Status Skip -Message "powershell-yaml module not available"
+        }
+
+        # P2 regression: task-runner process with DIFFERENT workflow_name is ignored
+        $otherProc = @{
+            id = 'proc-test-other'
+            type = 'task-runner'
+            workflow_name = 'some-other-workflow'
+            status = 'completed'
+            phases = @()
+        } | ConvertTo-Json -Depth 4
+        Set-Content -Path (Join-Path $procDir 'proc-test-other.json') -Value $otherProc -Encoding UTF8
+        $statusOther = Get-KickstartStatus
+        Assert-True -Name "Get-KickstartStatus P2: task-runner proc with non-matching workflow_name → process_id null" `
+            -Condition ([string]::IsNullOrEmpty($statusOther.process_id)) `
+            -Message "Expected null process_id, got '$($statusOther.process_id)'"
+        Remove-Item (Join-Path $procDir 'proc-test-other.json') -Force
+
+        # P2 compatibility: type=kickstart still works (back-compat)
+        $legacyProc = @{
+            id = 'proc-test-legacy'
+            type = 'kickstart'
+            status = 'completed'
+            phases = @()
+        } | ConvertTo-Json -Depth 4
+        Set-Content -Path (Join-Path $procDir 'proc-test-legacy.json') -Value $legacyProc -Encoding UTF8
+        $statusLegacy = Get-KickstartStatus
+        Assert-Equal -Name "Get-KickstartStatus P2: legacy type=kickstart proc still matched" `
+            -Expected 'proc-test-legacy' -Actual $statusLegacy.process_id
+        Remove-Item (Join-Path $procDir 'proc-test-legacy.json') -Force
+
+        # Cleanup isolated kickstart test root
+        if (Test-Path $kickstartTestRoot) {
+            Remove-Item $kickstartTestRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
     } finally {
         Remove-TestProject -Path $productApiTestProject
         Remove-Module ProductAPI -ErrorAction SilentlyContinue
+        if ($kickstartTestRoot -and (Test-Path $kickstartTestRoot)) {
+            Remove-Item $kickstartTestRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
     }
 } else {
     Write-TestResult -Name "ProductAPI direct tests" -Status Skip -Message "Module not found at $productApiModule"
@@ -2173,6 +3300,342 @@ if (Test-Path $dotBotLogModule) {
 }
 
 # ═══════════════════════════════════════════════════════════════════
+# INBOX WATCHER MODULE TESTS
+# ═══════════════════════════════════════════════════════════════════
+Write-Host ""
+Write-Host "--- InboxWatcher Module ---" -ForegroundColor Cyan
+
+$inboxWatcherModule = Join-Path $botDir "systems\ui\modules\InboxWatcher.psm1"
+
+if (Test-Path $inboxWatcherModule) {
+    # DotBotLog may have been removed by the preceding DotBotLog test section — re-import it
+    if (-not (Get-Module DotBotLog)) {
+        if (Test-Path $dotBotLogModule) { Import-Module $dotBotLogModule -Force }
+    }
+
+    $inboxTestRoot = Join-Path ([IO.Path]::GetTempPath()) "inbox-watcher-test-$([guid]::NewGuid().ToString('N').Substring(0,8))"
+    try {
+        # ── Scaffolding ──────────────────────────────────────────────────
+        $inboxBotRoot  = Join-Path $inboxTestRoot ".bot"
+        $settingsDir   = Join-Path $inboxBotRoot "settings"
+        $controlDir    = Join-Path $inboxBotRoot ".control"
+        $inboxFolder   = Join-Path $inboxBotRoot "workspace" "inbox"
+        $logPath       = Join-Path $controlDir "logs" "inbox-watcher.log"
+
+        foreach ($dir in @($settingsDir, $controlDir, $inboxFolder)) {
+            New-Item -ItemType Directory -Path $dir -Force | Out-Null
+        }
+
+        $defaultSettingsPath  = Join-Path $settingsDir "settings.default.json"
+        $overrideSettingsPath = Join-Path $controlDir "settings.json"
+
+        function Write-InboxSettings {
+            param([object]$Config)
+            $Config | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $defaultSettingsPath -Encoding UTF8
+        }
+
+        function Reset-InboxWatcher {
+            try { Stop-InboxWatcher } catch {}
+            Remove-Module InboxWatcher -ErrorAction SilentlyContinue
+            Import-Module $inboxWatcherModule -Force
+        }
+
+        # Test 1. Config guard-rails — missing file, disabled, empty watchers, malformed JSON ─
+        # None of these reach initialization so $Initialized never flips; one Reset at the end suffices.
+        Import-Module $inboxWatcherModule -Force
+
+        $threw = $false
+        try { Initialize-InboxWatcher -BotRoot $inboxBotRoot } catch { $threw = $true }
+        Assert-True -Name "Guard-rail: no-op when settings file is missing" -Condition (-not $threw)
+
+        Write-InboxSettings @{ file_listener = @{ enabled = $false; watchers = @() } }
+        $threw = $false
+        try { Initialize-InboxWatcher -BotRoot $inboxBotRoot } catch { $threw = $true }
+        Assert-True -Name "Guard-rail: no-op when file_listener is disabled" -Condition (-not $threw)
+
+        Write-InboxSettings @{ file_listener = @{ enabled = $true; watchers = @() } }
+        $threw = $false
+        try { Initialize-InboxWatcher -BotRoot $inboxBotRoot } catch { $threw = $true }
+        Assert-True -Name "Guard-rail: no-op when watchers list is empty" -Condition (-not $threw)
+
+        "{ not valid json" | Set-Content -LiteralPath $defaultSettingsPath -Encoding UTF8
+        $threw = $false
+        try { Initialize-InboxWatcher -BotRoot $inboxBotRoot } catch { $threw = $true }
+        Assert-True -Name "Guard-rail: no-op on malformed settings JSON" -Condition (-not $threw)
+
+        Reset-InboxWatcher
+
+        # Test 2. Override resilience — invalid override falls back; valid override replaces defaults ─
+        Write-InboxSettings @{ file_listener = @{ enabled = $false; watchers = @() } }
+        "{ bad" | Set-Content -LiteralPath $overrideSettingsPath -Encoding UTF8
+        $threw = $false
+        try { Initialize-InboxWatcher -BotRoot $inboxBotRoot } catch { $threw = $true }
+        Assert-True -Name "Override: invalid .control/settings.json falls back to defaults without throw" `
+            -Condition (-not $threw)
+        Remove-Item -LiteralPath $overrideSettingsPath -ErrorAction SilentlyContinue
+        Reset-InboxWatcher
+
+        Write-InboxSettings @{ file_listener = @{ enabled = $false; watchers = @() } }
+        @{ file_listener = @{ enabled = $true; watchers = @() } } |
+            ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $overrideSettingsPath -Encoding UTF8
+        $threw = $false
+        try { Initialize-InboxWatcher -BotRoot $inboxBotRoot } catch { $threw = $true }
+        Assert-True -Name "Override: valid .control/settings.json overrides disabled default without throw" `
+            -Condition (-not $threw)
+        Remove-Item -LiteralPath $overrideSettingsPath -ErrorAction SilentlyContinue
+        Reset-InboxWatcher
+
+        # Test 3. Path security — rooted path and path traversal both rejected silently ─────────
+        $rootedPath = if ($IsWindows) { 'C:\Windows' } else { '/etc' }
+        Write-InboxSettings @{
+            file_listener = @{
+                enabled  = $true
+                watchers = @(
+                    @{ folder = $rootedPath; events = @('created') }
+                    @{ folder = '../../etc'; events = @('created') }
+                )
+            }
+        }
+        $threw = $false
+        try { Initialize-InboxWatcher -BotRoot $inboxBotRoot } catch { $threw = $true }
+        Assert-True -Name "Security: rooted path and path-traversal folder both rejected without throw" `
+            -Condition (-not $threw)
+        Reset-InboxWatcher
+
+        # Test 4. Folder & event validation — nonexistent folder skipped; unknown event warned ──
+        Write-InboxSettings @{
+            file_listener = @{
+                enabled  = $true
+                watchers = @(
+                    @{ folder = 'does-not-exist'; events = @('created') }
+                    @{ folder = 'inbox';          events = @('create')  }   # typo: 'create' not 'created'
+                )
+            }
+        }
+        $threw = $false
+        try { Initialize-InboxWatcher -BotRoot $inboxBotRoot } catch { $threw = $true }
+        Assert-True -Name "Validation: nonexistent folder and unknown event type both skip without throw" `
+            -Condition (-not $threw)
+        Reset-InboxWatcher
+
+        # Test 5. Config defaults — non-numeric max_concurrent and coalesce_window fall back ─────
+        Write-InboxSettings @{
+            file_listener = @{
+                enabled                 = $true
+                max_concurrent          = "bad"
+                coalesce_window_seconds = "bad"
+                watchers                = @(@{ folder = 'inbox'; events = @('created') })
+            }
+        }
+        $threw = $false
+        try { Initialize-InboxWatcher -BotRoot $inboxBotRoot } catch { $threw = $true }
+        Assert-True -Name "Defaults: non-numeric max_concurrent and coalesce_window fall back without throw" `
+            -Condition (-not $threw)
+        Reset-InboxWatcher
+
+        # Test 6. Worker startup — valid config spawns worker, creates log, writes startup entry ─
+        if (Test-Path -LiteralPath $logPath) { Remove-Item -LiteralPath $logPath -Force -ErrorAction SilentlyContinue }
+        Write-InboxSettings @{
+            file_listener = @{
+                enabled  = $true
+                watchers = @(@{ folder = 'inbox'; events = @('created') })
+            }
+        }
+        $threw = $false
+        try { Initialize-InboxWatcher -BotRoot $inboxBotRoot } catch { $threw = $true }
+        Assert-True -Name "Startup: worker starts for valid config without throw" -Condition (-not $threw)
+
+        Start-Sleep -Milliseconds 600   # let worker runspace write its startup log entry
+        Assert-True -Name "Startup: log file created by worker runspace" `
+            -Condition (Test-Path -LiteralPath $logPath)
+        if (Test-Path -LiteralPath $logPath) {
+            $startupLog = Get-Content -LiteralPath $logPath -Raw -ErrorAction SilentlyContinue
+            Assert-True -Name "Startup: log contains 'Worker started' message" `
+                -Condition ($startupLog -match 'Worker started') `
+                -Message "Expected 'Worker started' in log"
+        }
+
+        # Test 7. Lifecycle — re-entrancy guard, stop cleans up, re-init after stop ─────────────
+        # Continues with the running worker from Test 6; no reset needed.
+        $linesBefore = @(Get-Content -LiteralPath $logPath -ErrorAction SilentlyContinue).Count
+        $threw = $false
+        try { Initialize-InboxWatcher -BotRoot $inboxBotRoot } catch { $threw = $true }
+        Start-Sleep -Milliseconds 300
+        $linesAfter = @(Get-Content -LiteralPath $logPath -ErrorAction SilentlyContinue).Count
+        Assert-True -Name "Lifecycle: re-entrancy guard — second init spawns no additional workers" `
+            -Condition ($linesAfter -eq $linesBefore) `
+            -Message "Log grew after 2nd init: before=$linesBefore after=$linesAfter"
+
+        $threw = $false
+        try { Stop-InboxWatcher } catch { $threw = $true }
+        Assert-True -Name "Lifecycle: Stop-InboxWatcher cleans up without throw" -Condition (-not $threw)
+
+        $threw = $false
+        try { Initialize-InboxWatcher -BotRoot $inboxBotRoot } catch { $threw = $true }
+        Assert-True -Name "Lifecycle: re-init after stop succeeds (Initialized flag reset)" -Condition (-not $threw)
+        Stop-InboxWatcher
+
+        # ═══════════════════════════════════════════════════════════════
+        # Behavioral tests — stub launcher satisfies the Test-Path guard
+        # without needing a real dotbot install.
+        # ═══════════════════════════════════════════════════════════════
+        $stubLauncherDir = Join-Path $inboxBotRoot "systems" "runtime"
+        $null = New-Item -ItemType Directory -Force -Path $stubLauncherDir
+        "# test stub — exits immediately" |
+            Set-Content -LiteralPath (Join-Path $stubLauncherDir "launch-process.ps1") -Encoding UTF8
+
+        $launchersDir = Join-Path $controlDir "launchers"
+
+        function Get-NewLog {
+            param([int]$After = 0)
+            if (-not (Test-Path -LiteralPath $logPath)) { return '' }
+            $lines = Get-Content -LiteralPath $logPath -ErrorAction SilentlyContinue
+            if ($null -eq $lines -or $After -ge $lines.Count) { return '' }
+            ($lines[$After..($lines.Count - 1)]) -join "`n"
+        }
+        function Get-LogLineCount {
+            if (-not (Test-Path -LiteralPath $logPath)) { return 0 }
+            @(Get-Content -LiteralPath $logPath -ErrorAction SilentlyContinue).Count
+        }
+
+        $behavSettings = @{
+            file_listener = @{
+                enabled                 = $true
+                coalesce_window_seconds = 1
+                watchers                = @(@{ folder = 'inbox'; events = @('created') })
+            }
+        }
+
+        # Test 8. File detection + launcher creation ──────────────────────────────────────────
+        # Worst-case timing: 2s WaitForChanged timeout + 1s coalesce + 2s next timeout + 2s buffer = 7s
+        Write-InboxSettings $behavSettings
+        Reset-InboxWatcher
+        Initialize-InboxWatcher -BotRoot $inboxBotRoot
+        Start-Sleep -Milliseconds 600   # let runspace reach WaitForChanged before dropping file
+        $mark8 = Get-LogLineCount
+
+        'hello' | Set-Content -LiteralPath (Join-Path $inboxFolder "detect-test.txt") -Encoding UTF8
+        Start-Sleep -Seconds 7
+
+        $log8 = Get-NewLog -After $mark8
+        Assert-True -Name "Detection: worker detects and queues a newly created file" `
+            -Condition ($log8 -match 'Queued.*detect-test\.txt') `
+            -Message "Expected 'Queued.*detect-test.txt'; log: $log8"
+        Assert-True -Name "Detection: task-creation launched after coalesce window" `
+            -Condition ($log8 -match 'Launched:') `
+            -Message "Expected 'Launched:' in log; got: $log8"
+        $launchers8 = @(Get-ChildItem -Path $launchersDir -Filter "inbox-launcher-*.ps1" -File -ErrorAction SilentlyContinue)
+        Assert-True -Name "Detection: inbox-launcher-*.ps1 wrapper created in .control/launchers/" `
+            -Condition ($launchers8.Count -gt 0) `
+            -Message "Expected inbox-launcher-*.ps1 in $launchersDir"
+        if ($launchers8.Count -gt 0) {
+            $wc8 = Get-Content -LiteralPath $launchers8[0].FullName -Raw -ErrorAction SilentlyContinue
+            Assert-True -Name "Detection: launcher wrapper invokes launch-process.ps1 with -Type task-creation" `
+                -Condition ($wc8 -match 'launch-process\.ps1' -and $wc8 -match 'task-creation') `
+                -Message "Wrapper missing launch-process.ps1 or task-creation; content: $wc8"
+        }
+        Stop-InboxWatcher
+        Get-ChildItem -Path $launchersDir -Filter "inbox-*" -ErrorAction SilentlyContinue |
+            Remove-Item -Force -ErrorAction SilentlyContinue
+
+        # Test 9. Debounce + coalescing — shared watcher, two sequential sub-scenarios ──────────
+        Write-InboxSettings @{
+            file_listener = @{
+                enabled                 = $true
+                coalesce_window_seconds = 1
+                watchers                = @(@{ folder = 'inbox'; events = @('created', 'updated') })
+            }
+        }
+        Reset-InboxWatcher
+        Initialize-InboxWatcher -BotRoot $inboxBotRoot
+        Start-Sleep -Milliseconds 600
+
+        # Sub-case A: same file touched twice within 5 s → only one Queued entry (debounced)
+        $mark9a = Get-LogLineCount
+        $debounceFile = Join-Path $inboxFolder "dedup.txt"
+        'v1' | Set-Content -LiteralPath $debounceFile -Encoding UTF8    # first event — queued
+        Start-Sleep -Milliseconds 800                                    # well within 5 s debounce window
+        'v2' | Set-Content -LiteralPath $debounceFile -Encoding UTF8    # second event — debounced
+        Start-Sleep -Seconds 7
+        $log9a = Get-NewLog -After $mark9a
+        Assert-True -Name "Debounce: same file touched twice within 5 s produces only one Queued entry" `
+            -Condition (([regex]::Matches($log9a, 'Queued.*dedup\.txt')).Count -eq 1) `
+            -Message "Expected 1 Queued entry for dedup.txt; log: $log9a"
+
+        # Sub-case B: three files in quick succession → single batch launch for all three
+        Get-ChildItem -Path $launchersDir -Filter "inbox-*" -ErrorAction SilentlyContinue |
+            Remove-Item -Force -ErrorAction SilentlyContinue
+        $mark9b = Get-LogLineCount
+        'a' | Set-Content -LiteralPath (Join-Path $inboxFolder "batch-a.txt") -Encoding UTF8
+        Start-Sleep -Milliseconds 200
+        'b' | Set-Content -LiteralPath (Join-Path $inboxFolder "batch-b.txt") -Encoding UTF8
+        Start-Sleep -Milliseconds 200
+        'c' | Set-Content -LiteralPath (Join-Path $inboxFolder "batch-c.txt") -Encoding UTF8
+        Start-Sleep -Seconds 7
+        $log9b = Get-NewLog -After $mark9b
+        Assert-True -Name "Coalescing: three quick files trigger a single batch launch" `
+            -Condition (([regex]::Matches($log9b, 'Launching task-creation')).Count -eq 1) `
+            -Message "Expected 1 batch launch; log: $log9b"
+        Assert-True -Name "Coalescing: batch launch reports all three files" `
+            -Condition ($log9b -match 'Launching task-creation for 3 file') `
+            -Message "Expected 'for 3 file' in launch log; got: $log9b"
+
+        Stop-InboxWatcher
+        Get-ChildItem -Path $launchersDir -Filter "inbox-*" -ErrorAction SilentlyContinue |
+            Remove-Item -Force -ErrorAction SilentlyContinue
+
+        # Test 10. Filename sanitization + stop boundary ──────────────────────────────────────
+        Write-InboxSettings $behavSettings
+        Reset-InboxWatcher
+        Initialize-InboxWatcher -BotRoot $inboxBotRoot
+        Start-Sleep -Milliseconds 600
+
+        # Sub-case A: backtick and dollar in filename are replaced with underscore in wrapper
+        $mark10a = Get-LogLineCount
+        $unsafeFile = Join-Path $inboxFolder 'test`$name.txt'
+        'payload' | Set-Content -LiteralPath $unsafeFile -Encoding UTF8
+        Start-Sleep -Seconds 7
+        $log10a = Get-NewLog -After $mark10a
+        Assert-True -Name "Sanitization: file with backtick and dollar is detected and queued" `
+            -Condition ($log10a -match 'Queued') `
+            -Message "Expected file to be detected; log: $log10a"
+        $wrappers10 = @(Get-ChildItem -Path $launchersDir -Filter "inbox-launcher-*.ps1" -File -ErrorAction SilentlyContinue)
+        if ($wrappers10.Count -gt 0) {
+            $wc10 = Get-Content -LiteralPath $wrappers10[0].FullName -Raw -ErrorAction SilentlyContinue
+            Assert-True -Name "Sanitization: wrapper replaces backtick and dollar with underscore" `
+                -Condition ($wc10 -match 'test__name\.txt') `
+                -Message "Expected 'test__name.txt' in wrapper; got: $wc10"
+        } else {
+            Write-TestResult -Name "Sanitization: wrapper replaces backtick and dollar with underscore" `
+                -Status Skip -Message "No launcher wrapper found (file detection may have failed)"
+        }
+
+        # Sub-case B: no worker activity after Stop-InboxWatcher
+        Stop-InboxWatcher
+        Start-Sleep -Milliseconds 400   # let runspace fully exit
+        $mark10b = Get-LogLineCount
+        'payload' | Set-Content -LiteralPath (Join-Path $inboxFolder "after-stop.txt") -Encoding UTF8
+        Start-Sleep -Seconds 6
+        $log10b = Get-NewLog -After $mark10b
+        Assert-True -Name "Stop boundary: no file events logged after Stop-InboxWatcher" `
+            -Condition (-not ($log10b -match 'Queued|Launching')) `
+            -Message "Worker still active after stop; new log: $log10b"
+
+        Get-ChildItem -Path $launchersDir -Filter "inbox-*" -ErrorAction SilentlyContinue |
+            Remove-Item -Force -ErrorAction SilentlyContinue
+
+    } finally {
+        try { Stop-InboxWatcher } catch {}
+        Remove-Module InboxWatcher -ErrorAction SilentlyContinue
+        if ($inboxTestRoot -and (Test-Path $inboxTestRoot)) {
+            Remove-Item $inboxTestRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+} else {
+    Write-TestResult -Name "InboxWatcher module exists" -Status Skip -Message "Module not found at $inboxWatcherModule"
+}
+
+# ═══════════════════════════════════════════════════════════════════
 # CLEANUP
 # ═══════════════════════════════════════════════════════════════════
 
@@ -2187,4 +3650,3 @@ $allPassed = Write-TestSummary -LayerName "Layer 2: Components"
 if (-not $allPassed) {
     exit 1
 }
-

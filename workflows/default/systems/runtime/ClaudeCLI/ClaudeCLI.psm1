@@ -482,9 +482,8 @@ function Invoke-ClaudeStream {
         "--output-format", "stream-json"
         "--print"
         "--verbose"
-        "--"
-        $Prompt
     )
+    # Prompt is delivered via stdin after process start to avoid Windows command-line length limits (#167)
 
     # Session ID must be at the start of CLI args for proper parsing
     if ($SessionId) {
@@ -564,6 +563,7 @@ function Invoke-ClaudeStream {
     # Use ArgumentList (.NET 5+ / PS 7+) for platform-correct quoting — no manual escaping
     foreach ($arg in $cliArgs) { $psi.ArgumentList.Add($arg) }
     $psi.UseShellExecute = $false
+    $psi.RedirectStandardInput = $true   # Prompt delivered via stdin to avoid Windows cmd-line length limit (#167)
     $psi.RedirectStandardOutput = $true
     $psi.RedirectStandardError = $true
     $psi.CreateNoWindow = $true
@@ -583,27 +583,98 @@ function Invoke-ClaudeStream {
     $claudeProc.StartInfo = $psi
     $claudeProc.Start() | Out-Null
 
+    # Deliver prompt via stdin to avoid Windows command-line length limits (#167)
+    $claudeProc.StandardInput.Write($Prompt)
+    $claudeProc.StandardInput.Close()
+
     if ($ShowDebugJson) {
         [Console]::Error.WriteLine("$($t.Bezel)[DEBUG] claude started as PID $($claudeProc.Id)$($t.Reset)")
         [Console]::Error.Flush()
     }
 
-    # Drain stderr line-by-line in a background task to prevent buffer deadlock.
-    # Unlike ReadToEndAsync(), this avoids accumulating the full stderr in memory
-    # and surfaces diagnostics when -ShowDebugJson is enabled.
-    $stderrDrain = [System.Threading.Tasks.Task]::Run([Action]{
-        try {
-            while (-not $claudeProc.HasExited) {
-                $line = $claudeProc.StandardError.ReadLine()
-                if ($null -eq $line) { break }
-
-                if ($ShowDebugJson) {
-                    [Console]::Error.WriteLine("$($t.Bezel)[STDERR] $line$($t.Reset)")
-                    [Console]::Error.Flush()
+    # --- Fix C: descendant PID snapshot monitor (Windows only) ---
+    # Periodically walks the process tree starting from claude.exe and records
+    # every descendant PID we ever observe. This snapshot persists after claude.exe
+    # exits (unlike a live ParentProcessId query, which fails post-exit because
+    # Windows does not re-parent orphans to a well-known root). Cleanup in the
+    # finally block iterates the snapshot and kills each PID by number — which
+    # works regardless of whether claude.exe or its intermediate shell hosts are
+    # still alive. This is the only reliable way to kill grandchildren like
+    # `dotnet test` → `vstest.console` → `testhost.exe` that Claude Code spawns
+    # via its Bash tool.
+    #
+    # Win32_Process is WMI and is Windows-only, so the whole monitor is gated on
+    # $IsWindows. On Linux/macOS, claude.exe's children are re-parented to init
+    # (PID 1) on exit and can be reached via pgrep/pkill at teardown if needed —
+    # the snapshot approach is not required there and would just run an
+    # expensive-and-empty CIM query every 2s.
+    $descendantPids = $null
+    $treeMonitorCts = $null
+    $treeMonitor = $null
+    if ($IsWindows) {
+        $descendantPids = [System.Collections.Concurrent.ConcurrentDictionary[int,byte]]::new()
+        $treeMonitorCts = [System.Threading.CancellationTokenSource]::new()
+        $claudePidLocal = $claudeProc.Id
+        $treeMonitor = [System.Threading.Tasks.Task]::Run([Action]{
+            try {
+                while (-not $claudeProc.HasExited -and -not $treeMonitorCts.IsCancellationRequested) {
+                    try {
+                        $allProcs = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue
+                        if ($allProcs) {
+                            # BFS from $claudePidLocal through all known descendants
+                            $known = @{ $claudePidLocal = $true }
+                            foreach ($k in $descendantPids.Keys) { $known[[int]$k] = $true }
+                            $added = $true
+                            while ($added) {
+                                $added = $false
+                                foreach ($p in $allProcs) {
+                                    if ($known.ContainsKey([int]$p.ParentProcessId) -and -not $known.ContainsKey([int]$p.ProcessId) -and $p.ProcessId -ne $PID) {
+                                        $known[[int]$p.ProcessId] = $true
+                                        [void]$descendantPids.TryAdd([int]$p.ProcessId, 0)
+                                        $added = $true
+                                    }
+                                }
+                            }
+                        }
+                    } catch { }
+                    # Poll every 2s — fast enough to catch short-lived children, slow
+                    # enough to keep WMI query cost negligible
+                    [void]$treeMonitorCts.Token.WaitHandle.WaitOne(2000)
                 }
+            } catch { }
+        })
+    }
+
+    # Drain stderr line-by-line in a background task to prevent buffer deadlock.
+    # Uses ReadLineAsync with a 2s timeout so the loop can detect process exit
+    # and cancellation even when the pipe's write-end is held open by an
+    # orphaned grandchild process (e.g. a backgrounded `dotnet test` whose
+    # testhost.exe inherited claude.exe's stderr handle). Synchronous
+    # ReadLine() would block indefinitely on such an orphan-held pipe and
+    # leave the main thread unable to cleanly Dispose the process — see
+    # "Orphaned Background Process Pipeline Deadlock" note above.
+    $stderrDrainCts = [System.Threading.CancellationTokenSource]::new()
+    $stderrDrain = [System.Threading.Tasks.Task]::Run([Action]{
+        $pendingStderrRead = $null
+        try {
+            while (-not $claudeProc.HasExited -and -not $stderrDrainCts.IsCancellationRequested) {
+                if (-not $pendingStderrRead) {
+                    $pendingStderrRead = $claudeProc.StandardError.ReadLineAsync()
+                }
+                if ($pendingStderrRead.Wait(2000)) {
+                    $line = $pendingStderrRead.Result
+                    $pendingStderrRead = $null
+                    if ($null -eq $line) { break }
+
+                    if ($ShowDebugJson) {
+                        [Console]::Error.WriteLine("$($t.Bezel)[STDERR] $line$($t.Reset)")
+                        [Console]::Error.Flush()
+                    }
+                }
+                # else: 2s timeout elapsed — loop back and re-check HasExited / cancellation
             }
         } catch {
-            # Ignore errors from reading stderr after process exit
+            # Ignore errors from reading stderr after process exit or stream disposal
         }
     })
 
@@ -1188,6 +1259,47 @@ function Invoke-ClaudeStream {
         # Restore original output encoding
         [Console]::OutputEncoding = $prevOutputEncoding
 
+        # Signal the stderr drain task to stop and wait briefly. Closing the
+        # StandardError stream unblocks any in-flight ReadLineAsync so the task
+        # can observe the cancellation token. Without this, Process.Dispose()
+        # below can race with a live Task still holding the stream. All errors
+        # are swallowed silently because (a) this runs during cleanup where the
+        # best we can do is move on, and (b) Write-BotLog is in a separate module
+        # that may not be loaded by callers such as the mock-claude test harness.
+        if ($stderrDrainCts) {
+            try { $stderrDrainCts.Cancel() } catch { }
+        }
+        if ($claudeProc -and $claudeProc.StandardError) {
+            try { $claudeProc.StandardError.Close() } catch { }
+        }
+        if ($stderrDrain) {
+            try { [void]$stderrDrain.Wait(3000) } catch { }
+        }
+        if ($stderrDrainCts) {
+            try { $stderrDrainCts.Dispose() } catch { }
+        }
+
+        # Kill all descendant PIDs we captured while claude.exe was alive (Fix C).
+        # This is bullet-proof against re-parenting: the snapshot persists across
+        # claude.exe exit, so we can still terminate orphaned grandchildren.
+        if ($descendantPids -and $descendantPids.Count -gt 0) {
+            try {
+                $pidsToKill = @($descendantPids.Keys) | Where-Object { $_ -ne $claudeProc.Id -and $_ -ne $PID }
+                foreach ($dpid in $pidsToKill) {
+                    try { Stop-Process -Id $dpid -Force -ErrorAction SilentlyContinue } catch { }
+                }
+                if ($ShowDebugJson -and $pidsToKill.Count -gt 0) {
+                    [Console]::Error.WriteLine("$($t.Bezel)[DEBUG] Killed $($pidsToKill.Count) descendant PIDs from snapshot$($t.Reset)")
+                    [Console]::Error.Flush()
+                }
+            } catch { }
+        }
+        if ($treeMonitorCts) {
+            try { $treeMonitorCts.Cancel() } catch { }
+            try { if ($treeMonitor) { [void]$treeMonitor.Wait(1000) } } catch { }
+            try { $treeMonitorCts.Dispose() } catch { }
+        }
+
         # Ensure process is disposed
         if ($claudeProc -and -not $claudeProc.HasExited) {
             try { $claudeProc.Kill($true) } catch { Write-BotLog -Level Debug -Message "Cleanup: failed to kill process" -Exception $_ }
@@ -1240,9 +1352,17 @@ function Invoke-Claude {
         [string[]]$PermissionArgs
     )
 
+    # Resolve claude CLI executable (handles .exe, .cmd, and non-Windows platforms)
+    $claudeCmd = Get-Command claude -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $claudeCmd) {
+        $claudeCmd = Get-Command claude.exe -CommandType Application -ErrorAction Stop | Select-Object -First 1
+    }
+    $claudeExePath = $claudeCmd.Source
+
+    # Prompt delivered via stdin to avoid Windows cmd-line length limit (#167)
     $cliArgs = @(
         "--model", $Model
-        "-p", $Prompt
+        "--print"
     )
 
     if ($PermissionArgs) {
@@ -1250,12 +1370,28 @@ function Invoke-Claude {
     } elseif ($NoPermissions) {
         $cliArgs += "--dangerously-skip-permissions"
     }
-    
+
     if ($SessionId) {
         $cliArgs += "--session-id", $SessionId
     }
 
-    & claude.exe @cliArgs
+    $previousOutputEncoding = $OutputEncoding
+    $previousConsoleInputEncoding = [Console]::InputEncoding
+    $previousConsoleOutputEncoding = [Console]::OutputEncoding
+    $utf8Encoding = [System.Text.UTF8Encoding]::new($false)
+
+    try {
+        $OutputEncoding = $utf8Encoding
+        [Console]::InputEncoding = $utf8Encoding
+        [Console]::OutputEncoding = $utf8Encoding
+
+        $Prompt | & $claudeExePath @cliArgs
+    }
+    finally {
+        $OutputEncoding = $previousOutputEncoding
+        [Console]::InputEncoding = $previousConsoleInputEncoding
+        [Console]::OutputEncoding = $previousConsoleOutputEncoding
+    }
 }
 
 function Get-ClaudeModels {

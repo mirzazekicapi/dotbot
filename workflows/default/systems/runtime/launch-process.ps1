@@ -113,7 +113,6 @@ if ($TaskId -and $TaskId -notmatch '^[a-f0-9]{8}$') {
 
 # Import modules
 Import-Module "$PSScriptRoot\ProviderCLI\ProviderCLI.psm1" -Force
-Import-Module "$PSScriptRoot\ClaudeCLI\ClaudeCLI.psm1" -Force
 Import-Module "$PSScriptRoot\modules\DotBotTheme.psm1" -Force
 Import-Module "$PSScriptRoot\modules\InstanceId.psm1" -Force
 $t = Get-DotBotTheme
@@ -126,7 +125,6 @@ if (-not $env:DOTBOT_VERSION) {
     }
 }
 
-. "$PSScriptRoot\modules\ui-rendering.ps1"
 . "$PSScriptRoot\modules\prompt-builder.ps1"
 . "$PSScriptRoot\modules\rate-limit-handler.ps1"
 
@@ -138,7 +136,6 @@ if ($Type -in @('analysis', 'execution', 'task-runner')) {
     . "$PSScriptRoot\modules\get-failure-reason.ps1"
     Import-Module "$PSScriptRoot\modules\WorktreeManager.psm1" -Force
     . "$PSScriptRoot\modules\test-task-completion.ps1"
-    . "$PSScriptRoot\modules\create-problem-log.ps1"
 
     # MCP tool functions — load ALL tools dynamically (includes workflow-specific ones)
     $mcpToolsDir = Join-Path $PSScriptRoot "..\mcp\tools"

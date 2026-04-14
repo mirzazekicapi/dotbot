@@ -3,8 +3,6 @@
   "workflow": "default",
   "provider": "claude",
   "permission_mode": null,
-  "mcp_enabled": true,
-  "standards_as_warp_rules": true,
   "analysis": {
     "auto_approve_splits": false,
     "split_threshold_effort": "XL",
@@ -28,9 +26,7 @@
   },
   "operations": {
     "file_retry_count": 3,
-    "file_retry_base_ms": 50,
-    "lock_timeout_seconds": 10,
-    "default_port": 8686
+    "file_retry_base_ms": 50
   },
   "logging": {
     "console_level": "Info",
@@ -49,5 +45,16 @@
     "poll_interval_seconds": 30,
     "sync_tasks": true,
     "sync_questions": true
+  },
+  "file_listener": {
+    "enabled": false,
+    "watchers": [
+      {
+        "folder": "product/briefing",
+        "filter": "*",
+        "events": ["created"],
+        "description": "New document in product briefing"
+      }
+    ]
   }
 }

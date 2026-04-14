@@ -31,6 +31,8 @@ function Resolve-ProductDocumentInfo {
 
     $relativePath = [System.IO.Path]::GetRelativePath($ProductDir, $File.FullName) -replace '\\', '/'
     $isMd = $File.Extension -eq '.md'
+    $isJson = $File.Extension -eq '.json'
+    # Only strip .md; JSON/binary keep extension to avoid name collisions (foo.md vs foo.json)
     $name = if ($isMd) { $relativePath -replace '\.md$', '' } else { $relativePath }
     $segments = @($name -split '/')
 
@@ -39,7 +41,7 @@ function Resolve-ProductDocumentInfo {
         Filename = $relativePath
         Depth = [Math]::Max(0, $segments.Count - 1)
         BaseName = $File.BaseName
-        Type = if ($isMd) { 'md' } else { 'binary' }
+        Type = if ($isMd) { 'md' } elseif ($isJson) { 'json' } else { 'binary' }
         Size = $File.Length
     }
 }
@@ -56,8 +58,17 @@ function Resolve-ProductDocumentPath {
     }
 
     $normalizedName = ($decodedName.Trim() -replace '\\', '/').TrimStart('/')
+
+    # Determine extension search order based on the requested name.
+    # If the request explicitly ends with .json, resolve only .json (honor the caller's intent).
+    # If it ends with .md, strip the extension and try .md first then .json.
+    # Otherwise, try .md first then .json (default priority).
+    $explicitJson = $false
     if ($normalizedName.EndsWith('.md', [System.StringComparison]::OrdinalIgnoreCase)) {
         $normalizedName = $normalizedName.Substring(0, $normalizedName.Length - 3)
+    } elseif ($normalizedName.EndsWith('.json', [System.StringComparison]::OrdinalIgnoreCase)) {
+        $explicitJson = $true
+        # Keep normalizedName as-is (includes .json) since JSON names retain their extension
     }
 
     if ([string]::IsNullOrWhiteSpace($normalizedName)) {
@@ -65,11 +76,9 @@ function Resolve-ProductDocumentPath {
     }
 
     $relativePath = ($normalizedName -split '/') -join [System.IO.Path]::DirectorySeparatorChar
-    $candidatePath = Join-Path $ProductDir "$relativePath.md"
 
     try {
         $productDirFull = [System.IO.Path]::GetFullPath($ProductDir)
-        $candidateFull = [System.IO.Path]::GetFullPath($candidatePath)
     } catch {
         return $null
     }
@@ -80,13 +89,67 @@ function Resolve-ProductDocumentPath {
         "$productDirFull$([System.IO.Path]::DirectorySeparatorChar)"
     }
 
-    if ($candidateFull -notlike "$productPrefix*") {
+    if ($explicitJson) {
+        # Explicit .json request — resolve directly without extension loop
+        $candidatePath = Join-Path $ProductDir $relativePath
+        try {
+            $candidateFull = [System.IO.Path]::GetFullPath($candidatePath)
+        } catch {
+            return $null
+        }
+        if ($candidateFull -notlike "$productPrefix*") {
+            return $null
+        }
+        if (Test-Path -LiteralPath $candidateFull) {
+            return @{
+                Name = $normalizedName
+                FullPath = $candidateFull
+            }
+        }
+        return @{
+            Name = $normalizedName
+            FullPath = $candidateFull
+        }
+    }
+
+    # Try extensions in order: .md then .json
+    foreach ($ext in @('.md', '.json')) {
+        $candidatePath = Join-Path $ProductDir "$relativePath$ext"
+        try {
+            $candidateFull = [System.IO.Path]::GetFullPath($candidatePath)
+        } catch {
+            continue
+        }
+
+        if ($candidateFull -notlike "$productPrefix*") {
+            continue
+        }
+
+        if (Test-Path -LiteralPath $candidateFull) {
+            # For .json matches, include extension in the returned name
+            $returnName = if ($ext -eq '.json') { "$normalizedName.json" } else { $normalizedName }
+            return @{
+                Name = $returnName
+                FullPath = $candidateFull
+            }
+        }
+    }
+
+    # Fallback: return .md path so Get-ProductDocument can return a 404
+    $fallbackPath = Join-Path $ProductDir "$relativePath.md"
+    try {
+        $fallbackFull = [System.IO.Path]::GetFullPath($fallbackPath)
+    } catch {
+        return $null
+    }
+
+    if ($fallbackFull -notlike "$productPrefix*") {
         return $null
     }
 
     return @{
         Name = $normalizedName
-        FullPath = $candidateFull
+        FullPath = $fallbackFull
     }
 }
 
@@ -184,8 +247,8 @@ function Get-ProductDocument {
     $productDir = Join-Path $botRoot "workspace\product"
     $resolvedDoc = Resolve-ProductDocumentPath -Name $Name -ProductDir $productDir
 
-    if ($resolvedDoc -and (Test-Path $resolvedDoc.FullPath)) {
-        $docContent = Get-Content -Path $resolvedDoc.FullPath -Raw
+    if ($resolvedDoc -and (Test-Path -LiteralPath $resolvedDoc.FullPath)) {
+        $docContent = Get-Content -LiteralPath $resolvedDoc.FullPath -Raw
         return @{
             success = $true
             name = $resolvedDoc.Name
@@ -566,7 +629,10 @@ function Resolve-PhaseStatusFromOutputs {
         if ($Phase.outputs_dir -match '^tasks/') {
             $taskBaseDir = Join-Path $BotRoot "workspace\tasks"
             $totalTasks = 0
-            foreach ($td in @("todo","analysing","analysed","in-progress","done","skipped","cancelled")) {
+            # Canonical task-pipeline status dirs. Keep in sync with the list
+            # in the script-phase probe below and with workflow-manifest.ps1
+            # (Clear-WorkspaceTaskDirs) which owns the authoritative enumeration.
+            foreach ($td in @('todo','analysing','needs-input','analysed','in-progress','done','skipped','cancelled','split')) {
                 $tdPath = Join-Path $taskBaseDir $td
                 if (Test-Path $tdPath) {
                     $totalTasks += @(Get-ChildItem $tdPath -Filter "*.json" -File -ErrorAction SilentlyContinue).Count
@@ -584,9 +650,45 @@ function Resolve-PhaseStatusFromOutputs {
         if ($commitPaths) {
             foreach ($cp in $commitPaths) {
                 $cpPath = Join-Path $BotRoot $cp
-                if ((Test-Path $cpPath) -and @(Get-ChildItem $cpPath -File -ErrorAction SilentlyContinue).Count -gt 0) {
-                    return "completed"
+                if (-not (Test-Path $cpPath)) { continue }
+
+                # Special-case: a commit path of `workspace/tasks/` (or `tasks/`)
+                # means the phase generates task files into the pipeline dirs.
+                # The top level of tasks/ has no files — only subdirs — so a
+                # flat count always returns 0. Probe the pipeline dirs instead,
+                # matching the semantics of the outputs_dir branch above.
+                # Keep this list in sync with the outputs_dir fallback above
+                # and with workflow-manifest.ps1 (Clear-WorkspaceTaskDirs) which
+                # owns the authoritative enumeration — tasks can legitimately
+                # sit in any of these statuses (incl. needs-input / split)
+                # after generation.
+                $normalized = ($cp -replace '\\','/').Trim('/')
+                if ($normalized -match '^(workspace/)?tasks/?$') {
+                    $taskDirs = @('todo','analysing','needs-input','analysed','in-progress','done','skipped','cancelled','split')
+                    $matched = $false
+                    foreach ($td in $taskDirs) {
+                        $tdPath = Join-Path $cpPath $td
+                        if (Test-Path $tdPath) {
+                            # Short-circuit: stop at the first match to avoid
+                            # enumerating entire pipeline dirs on every UI poll.
+                            $firstTaskFile = Get-ChildItem $tdPath -Filter '*.json' -File -ErrorAction SilentlyContinue |
+                                Select-Object -First 1
+                            if ($null -ne $firstTaskFile) { $matched = $true; break }
+                        }
+                    }
+                    if ($matched) { return "completed" }
+                    continue
                 }
+
+                # General case: check for any real file under the commit path,
+                # ignoring .gitkeep sentinels. Recurse so a commit path that
+                # points at a directory-of-directories still registers real
+                # committed artifacts underneath, but stop at the first match
+                # to avoid materializing the full file list on every UI poll.
+                $firstFile = Get-ChildItem $cpPath -File -Recurse -ErrorAction SilentlyContinue |
+                             Where-Object { $_.Name -ne '.gitkeep' } |
+                             Select-Object -First 1
+                if ($firstFile) { return "completed" }
             }
         }
     }
@@ -711,7 +813,15 @@ function Get-KickstartStatus {
         foreach ($pf in $procFiles) {
             try {
                 $pData = Get-Content $pf.FullName -Raw | ConvertFrom-Json
-                if ($pData.type -eq 'kickstart') {
+                # Accept both 'kickstart' (UI-launched kickstart flow) and
+                # 'task-runner' processes whose workflow_name matches the
+                # active manifest (generic workflow-runner launching a
+                # kickstart-style workflow). Either one is the authoritative
+                # record for this kickstart run.
+                $isKickstart = $pData.type -eq 'kickstart'
+                $isWorkflowRunner = $pData.type -eq 'task-runner' -and $workflowName -and
+                                    $pData.workflow_name -eq $workflowName
+                if ($isKickstart -or $isWorkflowRunner) {
                     $latestProc = $pData
                     break
                 }
@@ -860,7 +970,12 @@ function Resume-ProductKickstart {
             return @{ _statusCode = 400; success = $false; error = "Cannot resume — no saved prompt or mission document found. Please start a new kickstart." }
         }
     }
-    $originalPrompt = Get-Content -LiteralPath $promptFile -Raw
+    # Preflight: verify prompt file is readable before spawning async wrapper
+    try {
+        $null = Get-Content -LiteralPath $promptFile -Raw -ErrorAction Stop
+    } catch {
+        return @{ _statusCode = 400; success = $false; error = "Cannot resume — saved prompt is not readable." }
+    }
 
     # Launch resumed kickstart
     $launcherPath = Join-Path $botRoot "systems\runtime\launch-process.ps1"

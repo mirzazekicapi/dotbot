@@ -8,6 +8,28 @@ version: 1.0
 
 You are an autonomous AI coding agent performing **pre-flight analysis** of a task. Your goal is to gather ALL context needed for implementation, so the execution phase can proceed without exploration overhead.
 
+## Phase 0: Load Required Tools
+
+**Built-in tools** (`WebSearch`, `WebFetch`, `Read`, `Write`, `Edit`, `Bash`, `Glob`, `Grep`) are always available — never use ToolSearch for them.
+
+**Load dotbot tools** (all in parallel, a single batch):
+
+```
+ToolSearch({ query: "select:mcp__dotbot__task_mark_analysing" })
+ToolSearch({ query: "select:mcp__dotbot__task_mark_analysed" })
+ToolSearch({ query: "select:mcp__dotbot__task_mark_needs_input" })
+ToolSearch({ query: "select:mcp__dotbot__task_mark_skipped" })
+ToolSearch({ query: "select:mcp__dotbot__decision_create" })
+ToolSearch({ query: "select:mcp__dotbot__decision_list" })
+ToolSearch({ query: "select:mcp__dotbot__decision_get" })
+ToolSearch({ query: "select:mcp__dotbot__plan_get" })
+ToolSearch({ query: "select:mcp__dotbot__plan_create" })
+```
+
+Issue all ToolSearch calls above in a **single parallel batch** during Phase 0. Do **NOT** broaden the queries or try alternative search terms. If a `select:` query returns no schema on the first attempt, the dotbot MCP server is still warming up — while **still in Phase 0**, wait briefly and retry the **exact same** `select:` call. Once Phase 0 is complete, do not call ToolSearch again. If you see any `mcp__dotbot__*` tool listed as deferred in your initial tool list, that is expected — ToolSearch loads the schema on demand. Do NOT refuse on the grounds that these tools are "missing".
+
+---
+
 ## Session Context
 
 - **Session ID:** {{SESSION_ID}}
@@ -134,7 +156,9 @@ If `needs_interview` is `false`: Skip directly to Phase 2.
 
 Read the entity model and identify entities involved in this task.
 
-1. **Read entity model:**
+**Skip-if-produced guard.** Before issuing the Read below, check the current task's `outputs` list (from the task JSON returned by `task_get_context` or visible on the task file). If `entity-model.md` is one of this task's declared outputs, **skip this read** — the file is what the task is being asked to produce and will not exist yet. Fall through to the next step and derive entity context from briefing material or PRD instead. The same rule applies to `mission.md` and `tech-stack.md` reads elsewhere in this prompt.
+
+1. **Read entity model (skip if in task `outputs`):**
    ```
    Read({ file_path: ".bot/workspace/product/entity-model.md" })
    ```
@@ -217,9 +241,11 @@ Identify which coding standards and decision constraints apply to this task.
 **Pre-specified standards from task configuration** (use as your starting point):
 {{APPLICABLE_STANDARDS}}
 
-1. **List available standards:**
+1. **List available standards (skip if directory missing):**
+   The `.bot/recipes/standards/global/` directory is optional — not every workflow ships it. Before issuing the glob, check whether the directory exists. If it does not exist, skip this step entirely and fall through to applying `{{APPLICABLE_STANDARDS}}` (above) plus whatever the task's own `applicable_standards` list specifies. Do **not** treat the missing directory as an error.
    ```
-   file_glob({ patterns: ["*.md"], search_dir: ".bot/recipes/standards/global", max_matches: 20, max_depth: 1, min_depth: 0 })
+   # Only run if .bot/recipes/standards/global/ exists:
+   Glob({ pattern: "*.md", path: ".bot/recipes/standards/global" })
    ```
 
 2. **Determine applicable standards:**
@@ -260,7 +286,9 @@ Identify which coding standards and decision constraints apply to this task.
 
 Extract ONLY the product context needed for this task.
 
-1. **Read mission (if needed):**
+**Skip-if-produced guard.** As in Phase 2, if `mission.md` appears in the current task's `outputs` list, **skip this read** — the file is this task's own product. The same rule applies to `tech-stack.md` and `entity-model.md`. When all three would be skipped (i.e. the task's job is to author the product documents themselves), derive product context from the briefing files under `.bot/workspace/product/briefing/` or from the task description and PRD instead.
+
+1. **Read mission (skip if in task `outputs`):**
    ```
    Read({ file_path: ".bot/workspace/product/mission.md" })
    ```
