@@ -1289,6 +1289,7 @@ function showRunList() {
 
     if (runList) runList.style.display = '';
     if (runDetail) runDetail.style.display = 'none';
+    if (sidebar) sidebar.innerHTML = '';
 
     // Hide TOC and search (they belong to document view)
     const toc = document.getElementById('qa-toc');

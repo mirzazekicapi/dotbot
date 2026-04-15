@@ -2204,7 +2204,7 @@ $docContext
                                 }
 
                                 # Detect current stage from tasks (if workflow_name exists) or files
-                                if ($runMeta.status -eq "processing") {
+                                if ($runMeta.status -in @("processing", "awaiting-approval")) {
                                     $wfn = if ($runMeta.workflow_name) { $runMeta.workflow_name } else { $null }
                                     if ($wfn) {
                                         # Task-based stage detection
@@ -2260,6 +2260,21 @@ $docContext
                                                 }
                                             }
                                         }
+
+                                        # Correct non-approval runs that are wrongly stuck at awaiting-approval
+                                        if (-not $isApprovalMode -and $runMeta.status -eq "awaiting-approval") {
+                                            if ($allDone) {
+                                                $runMeta.status = "completed"
+                                                $runMeta.completed_at = (Get-Date -Format "o")
+                                                $stage = "Completed"
+                                            } else {
+                                                $runMeta.status = "processing"
+                                                $stage = "Processing..."
+                                            }
+                                            $runMeta | Add-Member -NotePropertyName "approval_phase" -NotePropertyValue $null -Force
+                                            $runMeta | ConvertTo-Json -Depth 4 | Set-Content $_.FullName -Encoding UTF8
+                                        }
+
                                         $runMeta | Add-Member -NotePropertyName "current_stage" -NotePropertyValue $stage -Force
                                     } else {
                                         # File-based stage detection (legacy/fallback)
