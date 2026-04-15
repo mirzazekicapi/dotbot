@@ -40,10 +40,16 @@ function Get-ManifestFileEntries {
         [string[]]$ProtectedPaths
     )
 
+    # Normalise $ProjectRoot to the OS-native form. $ProjectRoot can arrive
+    # with forward slashes (e.g. from `git rev-parse --show-toplevel` on Windows)
+    # while $_.FullName always has native slashes — GetFullPath collapses both
+    # to a canonical absolute path so every downstream comparison is stable.
+    $ProjectRoot = [System.IO.Path]::GetFullPath($ProjectRoot)
+
     # The manifest itself lives under .bot/ and may be in ProtectedPaths so
     # that git-status catches uncommitted edits, but we must never hash it
     # into itself (circular dependency — the hash changes on every write).
-    $manifestAbs = [System.IO.Path]::Combine($ProjectRoot, '.bot', '.manifest.json')
+    $manifestRel = '.bot/.manifest.json'
 
     $entries = [ordered]@{}
     foreach ($rel in $ProtectedPaths) {
@@ -60,7 +66,7 @@ function Get-ManifestFileEntries {
                 Sort-Object { [System.IO.Path]::GetRelativePath($ProjectRoot, $_.FullName).Replace('\', '/') } |
                 ForEach-Object {
                     $fileRel = [System.IO.Path]::GetRelativePath($ProjectRoot, $_.FullName).Replace('\', '/')
-                    if ($_.FullName -eq $manifestAbs) { return }  # skip self-reference
+                    if ($fileRel -eq $manifestRel) { return }  # skip self-reference
                     $hash = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash
                     $entries[$fileRel] = [ordered]@{
                         sha256 = $hash
@@ -69,7 +75,7 @@ function Get-ManifestFileEntries {
                 }
         } elseif ($item -is [System.IO.FileInfo]) {
             $fileRel = [System.IO.Path]::GetRelativePath($ProjectRoot, $item.FullName).Replace('\', '/')
-            if ($item.FullName -eq $manifestAbs) { continue }  # skip self-reference
+            if ($fileRel -eq $manifestRel) { continue }  # skip self-reference
             $hash = (Get-FileHash -LiteralPath $item.FullName -Algorithm SHA256).Hash
             $entries[$fileRel] = [ordered]@{
                 sha256 = $hash

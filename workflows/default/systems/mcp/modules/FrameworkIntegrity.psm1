@@ -157,6 +157,9 @@ function Test-FrameworkIntegrity {
     if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($projectRoot)) {
         $projectRoot = (Get-Location).Path
     }
+    # git rev-parse returns forward slashes on Windows; normalise to OS-native
+    # form so downstream path comparisons in Manifest.psm1 are stable.
+    $projectRoot = [System.IO.Path]::GetFullPath($projectRoot)
 
     $manifestResult = $null
     # Manifest.psm1 is a pure utility with no back-dependency on this module.
