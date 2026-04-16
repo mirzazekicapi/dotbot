@@ -25,15 +25,16 @@ async function loadProductDoc(docName, type = 'md') {
         const response = await fetch(`${API_BASE}/api/product/${encodeURIComponent(docName)}`);
         const data = await response.json();
 
-        if (data.success && data.content) {
+        if (data.success) {
+            const content = data.content || '';
             if (type === 'json') {
-                viewer.innerHTML = renderJsonViewer(data.content);
+                viewer.innerHTML = renderJsonViewer(content);
                 initJsonViewer(viewer);
             } else if (type === 'txt') {
-                viewer.innerHTML = `<pre class="txt-viewer">${escapeHtml(data.content)}</pre>`;
+                viewer.innerHTML = `<pre class="txt-viewer">${escapeHtml(content)}</pre>`;
             } else {
                 // Convert markdown to basic HTML
-                viewer.innerHTML = markdownToHtml(data.content);
+                viewer.innerHTML = markdownToHtml(content);
                 // Render any Mermaid diagrams
                 if (typeof renderMermaidDiagrams === 'function') {
                     renderMermaidDiagrams(viewer);
@@ -206,7 +207,7 @@ function showImageViewer(docName, filename) {
             <span class="image-viewer-label">${escapeHtml(displayName)}</span>
         </div>
         <div class="image-viewer-content">
-            <img src="${imgUrl}" alt="${escapeHtml(displayName)}" class="image-viewer-img" />
+            <img src="${escapeAttr(imgUrl)}" alt="${escapeAttr(displayName)}" class="image-viewer-img" />
         </div>
     </div>`;
 
@@ -288,7 +289,7 @@ function renderProductFileItem(doc) {
         : type === 'txt' ? 'Tx'
         : type === 'image' ? '&#x25A3;'
         : escapeHtml(displayName.charAt(0).toUpperCase());
-    return `<div class="file-nav-item${binaryClass}" data-doc="${escapeHtml(doc.name)}" data-type="${escapeHtml(type)}" data-filename="${escapeHtml(doc.filename)}" data-size="${doc.size || 0}">
+    return `<div class="file-nav-item${binaryClass}" data-doc="${escapeAttr(doc.name)}" data-type="${escapeAttr(type)}" data-filename="${escapeAttr(doc.filename)}" data-size="${doc.size || 0}">
         <span class="item-icon doc">${icon}</span>
         <span>${escapeHtml(displayName)}</span>
     </div>`;
