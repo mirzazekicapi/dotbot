@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    SHA256 integrity manifest for dotbot framework files.
+    Content-hash integrity manifest for dotbot framework files.
 
 .DESCRIPTION
     Pure utility module — generates and verifies a hash manifest of
@@ -15,16 +15,70 @@
     committed via `git commit --no-verify` — the gap identified in
     andresharpe/dotbot#173 comment 4237794998.
 
+    Hashing semantics: the digest is SHA256 over file content with CR (0x0D)
+    bytes stripped — equivalent to `sha256(cat file | tr -d '\r')`. This is
+    deliberately NOT a raw-byte hash. Framework files can land on disk as
+    CRLF or LF depending on git autocrlf, editor settings, `Set-Content` on
+    Windows, and .gitattributes filtering. A raw-byte SHA256 would report
+    every cross-platform clone as "tampered" for line-ending drift alone.
+    Normalising in the hash itself makes integrity robust against any
+    line-ending variance — no dependency on .gitattributes being correct, no
+    constraint on how framework files are written on disk. The digest will
+    therefore NOT match `Get-FileHash` or `sha256sum` on the file; that is
+    intentional and documented.
+
     This module has NO dependency on FrameworkIntegrity.psm1. The canonical
     protected-paths list is passed IN by callers (FrameworkIntegrity.psm1,
     init-project.ps1), keeping the dependency one-way:
     FrameworkIntegrity -> Manifest (never the reverse).
 
 .NOTES
-    Canonical location: scripts/Manifest.psm1 (alongside Platform-Functions).
-    FrameworkIntegrity.psm1 imports it at runtime via a sibling-then-fallback
-    path search.
+    Canonical location: workflows/default/systems/mcp/modules/Manifest.psm1
+    (alongside FrameworkIntegrity.psm1). Ships into target projects as
+    .bot/systems/mcp/modules/Manifest.psm1 via the normal `dotbot init` copy
+    of workflows/default/. FrameworkIntegrity.psm1 imports it as a sibling in
+    both the source repo and the target project.
 #>
+
+function Get-FrameworkContentHash {
+    <#
+    .SYNOPSIS
+        Computes a SHA256 hash of file content with CR (0x0D) bytes stripped.
+
+    .DESCRIPTION
+        The framework's integrity check cares whether file CONTENT changed, not
+        whether the on-disk bytes differ by line-ending encoding. Stripping CR
+        before hashing makes CRLF and LF versions of the same content produce
+        the same digest.
+
+        Implementation note: the file is decoded as Latin-1 (a 1:1 byte↔codepoint
+        mapping for 0x00-0xFF) so that String.Replace — a native .NET operation —
+        can strip CRs in a single pass without a per-byte PowerShell loop.
+        SHA256.HashData and Convert.ToHexString are .NET 5+ static methods
+        available in PowerShell 7 (dotbot's required runtime).
+
+        PowerShell does NOT ship a built-in content-aware hash cmdlet;
+        Get-FileHash is byte-level only. git hash-object would respect
+        .gitattributes but depends on git having processed the file under the
+        correct attribute rules — the dependency we're explicitly avoiding here.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$Path
+    )
+
+    # .NET IO APIs use [Environment]::CurrentDirectory, which doesn't follow
+    # PowerShell's Push-Location. Resolve to an absolute path so relative
+    # callers (tests, CLI) work regardless of where they were invoked from.
+    $resolved = (Resolve-Path -LiteralPath $Path).Path
+
+    $bytes = [System.IO.File]::ReadAllBytes($resolved)
+    $stripped = [System.Text.Encoding]::Latin1.GetString($bytes).Replace("`r", '')
+    $filtered = [System.Text.Encoding]::Latin1.GetBytes($stripped)
+    $digest   = [System.Security.Cryptography.SHA256]::HashData($filtered)
+    return [System.Convert]::ToHexString($digest)
+}
 
 function Get-ManifestFileEntries {
     <#
@@ -67,7 +121,7 @@ function Get-ManifestFileEntries {
                 ForEach-Object {
                     $fileRel = [System.IO.Path]::GetRelativePath($ProjectRoot, $_.FullName).Replace('\', '/')
                     if ($fileRel -eq $manifestRel) { return }  # skip self-reference
-                    $hash = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash
+                    $hash = Get-FrameworkContentHash -Path $_.FullName
                     $entries[$fileRel] = [ordered]@{
                         sha256 = $hash
                         size   = $_.Length
@@ -76,7 +130,7 @@ function Get-ManifestFileEntries {
         } elseif ($item -is [System.IO.FileInfo]) {
             $fileRel = [System.IO.Path]::GetRelativePath($ProjectRoot, $item.FullName).Replace('\', '/')
             if ($fileRel -eq $manifestRel) { continue }  # skip self-reference
-            $hash = (Get-FileHash -LiteralPath $item.FullName -Algorithm SHA256).Hash
+            $hash = Get-FrameworkContentHash -Path $item.FullName
             $entries[$fileRel] = [ordered]@{
                 sha256 = $hash
                 size   = $item.Length
@@ -212,7 +266,7 @@ function Test-DotbotManifest {
         }
         $item = Get-Item -LiteralPath $abs -Force
         if ($item.LinkType) { continue }  # symlinks not hashed
-        $actual = (Get-FileHash -LiteralPath $abs -Algorithm SHA256).Hash
+        $actual = Get-FrameworkContentHash -Path $abs
         if ($actual -ne $prop.Value.sha256) {
             $tampered += $rel
         }
@@ -249,6 +303,7 @@ function Test-DotbotManifest {
 }
 
 Export-ModuleMember -Function @(
+    'Get-FrameworkContentHash',
     'New-DotbotManifest',
     'Test-DotbotManifest'
 )

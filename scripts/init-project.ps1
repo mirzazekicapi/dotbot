@@ -267,13 +267,6 @@ if (Test-Path $BotDir) {
     Copy-Item -Path $DefaultDir -Destination $BotDir -Recurse -Force
 }
 
-# Copy CLI-side modules that target projects need at runtime
-$manifestSrc = Join-Path $DotbotBase "scripts" "Manifest.psm1"
-$manifestDst = Join-Path $BotDir "systems" "mcp" "modules" "Manifest.psm1"
-if (Test-Path -LiteralPath $manifestSrc) {
-    Copy-Item -Path $manifestSrc -Destination $manifestDst -Force
-}
-
 # Create empty workspace directories
 $workspaceDirs = @(
     "workspace\tasks\todo",
@@ -1183,7 +1176,7 @@ function New-FrameworkManifest {
             '.bot/profile/'
         )
     )
-    $manifestModule = Join-Path $DotbotBase "scripts" "Manifest.psm1"
+    $manifestModule = Join-Path $DotbotBase "workflows" "default" "systems" "mcp" "modules" "Manifest.psm1"
     if (-not (Test-Path -LiteralPath $manifestModule)) {
         Write-DotbotWarning "Manifest module not found at $manifestModule — skipping manifest generation"
         return

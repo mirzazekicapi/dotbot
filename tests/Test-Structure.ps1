@@ -1331,8 +1331,8 @@ if (Test-Path $initProject) {
         -Path $initProject -Pattern 'UserPaths'
 }
 
-# Manifest module (CLI-side, like Platform-Functions.psm1)
-$manifestModule = Join-Path $repoRoot "scripts" "Manifest.psm1"
+# Manifest module (ships with the default workflow alongside FrameworkIntegrity.psm1)
+$manifestModule = Join-Path $repoRoot "workflows" "default" "systems" "mcp" "modules" "Manifest.psm1"
 Assert-PathExists -Name "Manifest.psm1 module exists" -Path $manifestModule
 Assert-ValidPowerShell -Name "Manifest.psm1 is valid PowerShell" -Path $manifestModule
 if (Test-Path $manifestModule) {

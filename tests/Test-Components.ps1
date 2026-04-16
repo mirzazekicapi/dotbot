@@ -423,8 +423,8 @@ $manifestModule = Join-Path $botDir "systems\mcp\modules\FrameworkIntegrity.psm1
 if (Test-Path $manifestModule) {
     Import-Module $manifestModule -Force
     $frameworkPaths = Get-FrameworkProtectedPaths
-    $manifestMod = Join-Path (Split-Path $manifestModule) ".." ".." ".." ".." "scripts" "Manifest.psm1" | Resolve-Path -ErrorAction SilentlyContinue
-    if (-not $manifestMod) { $manifestMod = Join-Path $dotbotDir "scripts\Manifest.psm1" }
+    # Manifest.psm1 is a sibling of FrameworkIntegrity.psm1 in both source and target.
+    $manifestMod = Join-Path (Split-Path $manifestModule) "Manifest.psm1"
     if (Test-Path $manifestMod) {
         Import-Module $manifestMod -Force
         $null = New-DotbotManifest -ProjectRoot $testProject -ProtectedPaths $frameworkPaths -Generator 'test-setup'
@@ -3326,7 +3326,7 @@ Write-Host "  FRAMEWORK INTEGRITY" -ForegroundColor Cyan
 Write-Host "  ────────────────────────────────────────────" -ForegroundColor DarkGray
 
 $repoRoot = Get-RepoRoot
-$manifestModule = Join-Path $dotbotDir "scripts" "Manifest.psm1"
+$manifestModule = Join-Path $dotbotDir "workflows" "default" "systems" "mcp" "modules" "Manifest.psm1"
 $frameworkIntegrityModule = Join-Path $dotbotDir "workflows" "default" "systems" "mcp" "modules" "FrameworkIntegrity.psm1"
 
 if ((Test-Path $manifestModule) -and (Test-Path $frameworkIntegrityModule)) {
@@ -3376,10 +3376,12 @@ if ((Test-Path $manifestModule) -and (Test-Path $frameworkIntegrityModule)) {
             -Condition ($null -ne $mfJson.user_paths) `
             -Message "Missing user_paths field"
 
-        # Verify SHA256 hash is correct for a known file
-        $goHash = (Get-FileHash -LiteralPath (Join-Path $fiTestDir ".bot/go.ps1") -Algorithm SHA256).Hash
+        # Verify manifest hash matches Get-FrameworkContentHash (content hash,
+        # not raw SHA256 — the manifest normalises CR bytes so CRLF/LF line-ending
+        # drift between init and clone does not trigger a false tamper report).
+        $goHash = Get-FrameworkContentHash -Path (Join-Path $fiTestDir ".bot/go.ps1")
         $manifestGoHash = $mfJson.files.'.bot/go.ps1'.sha256
-        Assert-True -Name "Manifest SHA256 matches actual file hash" `
+        Assert-True -Name "Manifest hash matches Get-FrameworkContentHash" `
             -Condition ($manifestGoHash -eq $goHash) `
             -Message "Expected $goHash, got $manifestGoHash"
 
