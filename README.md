@@ -60,30 +60,16 @@ dotbot wraps AI-assisted coding in a managed, transparent workflow where every s
 
 ### 1. Install dotbot globally (one-time)
 
-**One-liner (recommended):**
-
 ```powershell
-irm https://raw.githubusercontent.com/andresharpe/dotbot/main/install-remote.ps1 | iex
+Install-Module Dotbot -Scope CurrentUser
 ```
 
 <details>
 <summary><strong>Alternative install methods</strong></summary>
 
-**PowerShell Gallery:**
+**One-liner:**
 ```powershell
-Install-Module Dotbot -Scope CurrentUser
-```
-
-**Scoop (Windows):**
-```powershell
-scoop bucket add dotbot https://github.com/andresharpe/scoop-dotbot
-scoop install dotbot
-```
-
-**Homebrew (macOS/Linux):**
-```bash
-brew tap andresharpe/dotbot
-brew install dotbot
+irm https://raw.githubusercontent.com/andresharpe/dotbot/main/install-remote.ps1 | iex
 ```
 
 **Git clone:**
@@ -182,6 +168,11 @@ dotbot registry list           # List registries and available content
 dotbot doctor                  # Run project health checks
 dotbot status                  # Check installation status
 dotbot update                  # Update global installation
+```
+
+**Updating via PowerShell Gallery:**
+```powershell
+Update-Module Dotbot
 ```
 
 ## Architecture
