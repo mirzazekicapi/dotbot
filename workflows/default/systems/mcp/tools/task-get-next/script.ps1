@@ -190,7 +190,6 @@ function Invoke-TaskGetNext {
             working_dir = $nextTask.working_dir
             external_repo = $nextTask.external_repo
             research_prompt = $nextTask.research_prompt
-            prompt = $nextTask.prompt
             type = $nextTask.type
             script_path = $nextTask.script_path
             prompt = $nextTask.prompt
@@ -216,7 +215,6 @@ function Invoke-TaskGetNext {
             mcp_args = $nextTask.mcp_args
             workflow = $nextTask.workflow
             model = $nextTask.model
-            prompt = $nextTask.prompt
         }
     }
 

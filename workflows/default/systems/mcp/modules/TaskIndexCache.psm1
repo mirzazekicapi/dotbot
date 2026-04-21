@@ -425,7 +425,6 @@ function Update-TaskIndex {
                     working_dir = $content.working_dir
                     external_repo = $content.external_repo
                     research_prompt = $content.research_prompt
-                    prompt = $content.prompt
                     ignore = $content.ignore
                     type = $content.type
                     script_path = $content.script_path
