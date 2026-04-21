@@ -198,7 +198,7 @@ function Ensure-ManifestTaskIds {
         $existingId = if ($t -is [System.Collections.IDictionary]) { $t['id'] } else { $t.id }
         if (-not $existingId) {
             $taskName = if ($t -is [System.Collections.IDictionary]) { $t['name'] } else { $t.name }
-            $genId = ($taskName -replace '[^\w\s-]', '' -replace '\s+', '-').ToLower()
+            $genId = ($taskName -replace '[^\w\s-]', '' -replace '\s+', '-').ToLowerInvariant()
             if ($t -is [System.Collections.IDictionary]) { $t['id'] = $genId }
             else { $t | Add-Member -NotePropertyName 'id' -NotePropertyValue $genId -Force }
         }
@@ -271,13 +271,23 @@ function New-WorkflowTask {
     # Extract fields — align with task-create MCP tool schema
     $name        = $TaskDef['name']
     $type        = if ($TaskDef['type']) { $TaskDef['type'] } else { 'prompt' }
-    $priority    = if ($TaskDef['priority']) { [int]$TaskDef['priority'] } else { 50 }
+    $priority    = if ($null -ne $TaskDef['priority']) { [int]$TaskDef['priority'] } else { 50 }
     $description = if ($TaskDef['description']) { $TaskDef['description'] } else { $name }
     $effort      = if ($TaskDef['effort']) { $TaskDef['effort'] } else { $Effort }
     $category    = if ($TaskDef['category']) { $TaskDef['category'] } else { $Category }
     $scriptPath  = if ($TaskDef['script']) { $TaskDef['script'] } else { $TaskDef['script_path'] }
     $mcpTool     = $TaskDef['mcp_tool']
     $mcpArgs     = $TaskDef['mcp_args']
+
+    # task_gen with a 'workflow' prompt file but no script_path → prompt_template
+    # workflow.yaml uses  type: task_gen + workflow: "02a-foo.md"  to mean
+    # "run Claude with this prompt to generate tasks". Map it to prompt_template
+    # so the task-runner dispatches it correctly via the LLM path.
+    $promptFromWorkflow = $null
+    if ($type -eq 'task_gen' -and -not $scriptPath -and $TaskDef['workflow'] -and $TaskDef['workflow'] -match '\.md$') {
+        $type              = 'prompt_template'
+        $promptFromWorkflow = "recipes/prompts/$($TaskDef['workflow'])"
+    }
 
     # Dependencies: convert from manifest format (string names)
     $deps = @()
@@ -308,6 +318,7 @@ function New-WorkflowTask {
 
     # Optional fields — only set if declared (keeps task JSON clean)
     if ($scriptPath)                           { $task["script_path"] = $scriptPath }
+    if ($promptFromWorkflow)                   { $task["prompt"] = $promptFromWorkflow }
     if ($mcpTool)                              { $task["mcp_tool"] = $mcpTool }
     if ($mcpArgs -and $mcpArgs.Count -gt 0)    { $task["mcp_args"] = $mcpArgs }
     if ($TaskDef['acceptance_criteria'])        { $task["acceptance_criteria"] = @($TaskDef['acceptance_criteria']) }
@@ -328,7 +339,7 @@ function New-WorkflowTask {
     if ($TaskDef['env'])                       { $task["env"] = $TaskDef['env'] }
     if ($TaskDef['post_script'])               { $task["post_script"] = $TaskDef['post_script'] }
 
-    $slug = ($name -replace '[^\w\s-]', '' -replace '\s+', '-').ToLower()
+    $slug = ($name -replace '[^\w\s-]', '' -replace '\s+', '-').ToLowerInvariant()
     if ($slug.Length -gt 50) { $slug = $slug.Substring(0, 50) }
     $fileName = "$slug-$($id.Split('-')[0]).json"
     $filePath = Join-Path $tasksDir $fileName

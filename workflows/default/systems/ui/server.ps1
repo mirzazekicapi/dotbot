@@ -105,6 +105,12 @@ if (-not (Test-Path $processesDir)) { New-Item -Path $processesDir -ItemType Dir
 # Import FileWatcher module for event-driven state updates
 Import-Module (Join-Path $PSScriptRoot "modules\FileWatcher.psm1") -Force
 
+$settingsLoaderModule = Join-Path $botRoot "systems\runtime\modules\SettingsLoader.psm1"
+Import-Module $settingsLoaderModule -Force -DisableNameChecking -Global
+if (-not (Get-Command Get-MergedSettings -ErrorAction SilentlyContinue)) {
+    throw "Get-MergedSettings not available after importing $settingsLoaderModule. Re-run 'pwsh install.ps1' (dotbot repo) or 'dotbot init' (target project) to refresh .bot/ files."
+}
+
 # Import domain modules
 Import-Module (Join-Path $PSScriptRoot "modules\GitAPI.psm1") -Force
 Import-Module (Join-Path $PSScriptRoot "modules\AetherAPI.psm1") -Force
@@ -482,14 +488,14 @@ try {
                         }
                     }
 
-                    # Read workflow name from settings
-                    $settingsFile = Join-Path $botRoot "settings\settings.default.json"
-                    $workflowName = $null
-                    if (Test-Path $settingsFile) {
-                        try {
-                            $settingsData = Get-Content $settingsFile -Raw | ConvertFrom-Json
-                            $workflowName = if ($settingsData.PSObject.Properties['workflow']) { $settingsData.workflow } else { $settingsData.profile }
-                        } catch { Write-BotLog -Level Debug -Message "Failed to read settings for workflow name" -Exception $_ }
+                    # Read workflow name from the merged settings chain
+                    $settingsData = Get-MergedSettings -BotRoot $botRoot
+                    $workflowName = if ($settingsData.PSObject.Properties['workflow']) {
+                        $settingsData.workflow
+                    } elseif ($settingsData.PSObject.Properties['profile']) {
+                        $settingsData.profile
+                    } else {
+                        $null
                     }
 
                     # Read kickstart dialog + phases from workflow manifest (primary source).
@@ -1174,7 +1180,7 @@ $docContext
                             $reader = New-Object System.IO.StreamReader($request.InputStream)
                             $body = $reader.ReadToEnd() | ConvertFrom-Json
                             $reader.Close()
-                            $result = Send-Whisper -InstanceType $body.instance_type -Message $body.message -Priority $(if ($body.priority) { $body.priority } else { "normal" })
+                            $result = Send-WhisperToInstance -InstanceType $body.instance_type -Message $body.message -Priority $(if ($body.priority) { $body.priority } else { "normal" })
                             $content = $result | ConvertTo-Json -Compress
                         } catch {
                             $statusCode = 500
@@ -1302,7 +1308,25 @@ $docContext
                     break
                 }
 
-                { $_ -like "/api/product/*" -and $_ -ne "/api/product/list" -and $_ -ne "/api/product/preflight" -and $_ -ne "/api/product/analyse" -and $_ -notlike "/api/product/kickstart*" } {
+                { $_ -like "/api/product/raw/*" } {
+                    $docName = $url -replace "^/api/product/raw/", ""
+                    $rawResult = Get-ProductDocumentRaw -Name $docName
+                    if ($rawResult.Found) {
+                        $contentType = $rawResult.MimeType
+                        if ($rawResult.BinaryData) {
+                            $binaryContent = $rawResult.BinaryData
+                        } else {
+                            $content = $rawResult.TextContent
+                        }
+                    } else {
+                        $statusCode = 404
+                        $contentType = "text/plain"
+                        $content = "File not found"
+                    }
+                    break
+                }
+
+                { $_ -like "/api/product/*" -and $_ -ne "/api/product/list" -and $_ -ne "/api/product/preflight" -and $_ -ne "/api/product/analyse" -and $_ -notlike "/api/product/kickstart*" -and $_ -notlike "/api/product/raw/*" } {
                     $contentType = "application/json; charset=utf-8"
                     $docName = $url -replace "^/api/product/", ""
                     $result = Get-ProductDocument -Name $docName
@@ -1326,7 +1350,7 @@ $docContext
                             $reader = New-Object System.IO.StreamReader($request.InputStream)
                             $body = $reader.ReadToEnd() | ConvertFrom-Json
                             $reader.Close()
-                            $content = Submit-TaskAnswer -TaskId $body.task_id -Answer $body.answer -CustomText $body.custom_text -Attachments $body.attachments | ConvertTo-Json -Depth 10 -Compress
+                            $content = Submit-TaskAnswer -TaskId $body.task_id -Answer $body.answer -CustomText $body.custom_text -Attachments $body.attachments -QuestionId $body.question_id | ConvertTo-Json -Depth 10 -Compress
                         } catch {
                             $statusCode = 500
                             $content = @{ success = $false; error = "Failed to submit answer: $($_.Exception.Message)" } | ConvertTo-Json -Compress
@@ -2716,8 +2740,9 @@ $docContext
                             $bContinue = if ($body.PSObject.Properties['continue']) { $body.continue -eq $true } else { $false }
                             $bDescription = if ($body.PSObject.Properties['description']) { $body.description } else { $null }
                             $bModel = if ($body.PSObject.Properties['model']) { $body.model } else { $null }
+                            $bWorkflowName = if ($body.PSObject.Properties['workflow_name']) { $body.workflow_name } else { $null }
                             # Start-ProcessLaunch auto-detects max_concurrent for workflow type
-                            $result = Start-ProcessLaunch -Type $bType -TaskId $bTaskId -Prompt $bPrompt -Continue $bContinue -Description $bDescription -Model $bModel
+                            $result = Start-ProcessLaunch -Type $bType -TaskId $bTaskId -Prompt $bPrompt -Continue $bContinue -Description $bDescription -Model $bModel -WorkflowName $bWorkflowName
                             $content = $result | ConvertTo-Json -Compress
                         }
                     } else {
@@ -2802,7 +2827,7 @@ $docContext
                                             }
                                             foreach ($att in @($ans.attachments)) {
                                                 $safeName = [System.IO.Path]::GetFileName($att.name)
-                                                $ext = [System.IO.Path]::GetExtension($safeName).ToLower()
+                                                $ext = [System.IO.Path]::GetExtension($safeName).ToLowerInvariant()
                                                 if ($ext -notin $allowedAttachExtensions) { continue }
                                                 try {
                                                     $bytes = [System.Convert]::FromBase64String($att.content)
@@ -2998,15 +3023,12 @@ $docContext
 
                     # Also skip default when an overlay workflow was applied during init
                     if (-not $skipDefault) {
-                        $settingsFile = Join-Path $botRoot "settings\settings.default.json"
-                        if (Test-Path $settingsFile) {
-                            try {
-                                $sd = Get-Content $settingsFile -Raw | ConvertFrom-Json
-                                $activeWf = if ($sd.PSObject.Properties['workflow']) { $sd.workflow } else { $sd.profile }
-                                if ($activeWf -and $activeWf -ne 'default' -and $activeWf -ne $defaultName) {
-                                    $skipDefault = $true
-                                }
-                            } catch { Write-BotLog -Level 'Debug' -Message 'Failed to read settings for workflow check' -Exception $_ }
+                        $mergedWf = Get-MergedSettings -BotRoot $botRoot
+                        $activeWf = if ($mergedWf.PSObject.Properties['workflow']) { $mergedWf.workflow }
+                                    elseif ($mergedWf.PSObject.Properties['profile']) { $mergedWf.profile }
+                                    else { $null }
+                        if ($activeWf -and $activeWf -ne 'default' -and $activeWf -ne $defaultName) {
+                            $skipDefault = $true
                         }
                     }
 
@@ -3555,7 +3577,7 @@ $docContext
             }
             $response.StatusCode = $statusCode
             $response.ContentType = $contentType
-            if ($url -eq "/" -or $contentType -like "text/html*") {
+            if ($url -eq "/" -or $contentType -like "text/html*" -or $contentType -like "application/javascript*") {
                 $response.Headers['Cache-Control'] = 'no-store, no-cache, must-revalidate'
                 $response.Headers['Pragma'] = 'no-cache'
                 $response.Headers['Expires'] = '0'

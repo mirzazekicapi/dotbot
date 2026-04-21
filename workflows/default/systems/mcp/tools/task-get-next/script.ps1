@@ -193,6 +193,7 @@ function Invoke-TaskGetNext {
             prompt = $nextTask.prompt
             type = $nextTask.type
             script_path = $nextTask.script_path
+            prompt = $nextTask.prompt
             mcp_tool = $nextTask.mcp_tool
             mcp_args = $nextTask.mcp_args
             skip_analysis = $nextTask.skip_analysis
@@ -210,6 +211,7 @@ function Invoke-TaskGetNext {
             category = $nextTask.category
             type = $nextTask.type
             script_path = $nextTask.script_path
+            prompt = $nextTask.prompt
             mcp_tool = $nextTask.mcp_tool
             mcp_args = $nextTask.mcp_args
             workflow = $nextTask.workflow

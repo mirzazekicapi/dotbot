@@ -23,6 +23,8 @@ Shared infrastructure via directory links (junctions on Windows, symlinks on mac
   .bot/settings/          -> settings defaults
 #>
 
+Import-Module (Join-Path $PSScriptRoot "..\..\mcp\modules\TaskStore.psm1") -Force
+
 # --- Internal State ---
 $script:WorktreeMapPath = $null
 
@@ -248,15 +250,6 @@ function Invoke-WorktreeMapLocked {
     }
 }
 
-function Get-TaskSlug {
-    param([string]$TaskName)
-    $slug = $TaskName.ToLower()
-    $slug = $slug -replace '[^a-z0-9]+', '-'
-    $slug = $slug -replace '^-|-$', ''
-    if ($slug.Length -gt 50) { $slug = $slug.Substring(0, 50) -replace '-$', '' }
-    return $slug
-}
-
 function Stop-WorktreeProcesses {
     <#
     .SYNOPSIS
@@ -280,7 +273,7 @@ function Stop-WorktreeProcesses {
             $escapedOriginal = [regex]::Escape($WorktreePath)
             $forwardSlash = $WorktreePath -replace '\\', '/'
             $escapedForward = [regex]::Escape($forwardSlash)
-            $gitBashStyle = $forwardSlash -replace '^([A-Za-z]):', { '/' + $_.Groups[1].Value.ToLower() }
+            $gitBashStyle = $forwardSlash -replace '^([A-Za-z]):', { '/' + $_.Groups[1].Value.ToLowerInvariant() }
             $escapedGitBash = [regex]::Escape($gitBashStyle)
 
             $candidates = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
