@@ -43,12 +43,15 @@ If MCP tools are unavailable:
 
 ### 1. Fetch main Jira issues
 
-**MCP:** `mcp__atlassian__getJiraIssue` with `cloudId` and `issueIdOrKey`
+**MCP:** `mcp__atlassian__getJiraIssue` with:
+- `cloudId` and `issueIdOrKey`
+- `fields: ["summary", "description", "status", "priority", "labels", "components", "parent", "issuelinks", "issuetype", "assignee"]` — **do NOT include `comment` or `attachment`; they can balloon the response past Claude's 25K-token Read limit on chatty tickets**
+- `responseContentFormat: "markdown"` — simpler text, ~30–40% smaller than default ADF
 
 **REST fallback:**
 ```bash
 curl -s -u "{email}:{token}" \
-  "https://api.atlassian.com/ex/jira/{cloudId}/rest/api/3/issue/{KEY}?fields=summary,description,status,priority,labels,components,parent,issuelinks,comment,attachment" \
+  "https://api.atlassian.com/ex/jira/{cloudId}/rest/api/3/issue/{KEY}?fields=summary,description,status,priority,labels,components,parent,issuelinks,issuetype,assignee" \
   | jq '{key: .key, summary: .fields.summary, description: .fields.description, status: .fields.status.name, priority: .fields.priority.name, labels: .fields.labels, components: [.fields.components[].name], parent: .fields.parent.key}'
 ```
 
@@ -84,16 +87,36 @@ Linked issues define scope boundaries and negative test cases.
 
 If the main issue has a parent (epic or initiative):
 
-**MCP:** `mcp__atlassian__getJiraIssue` with the parent key
+**MCP:** `mcp__atlassian__getJiraIssue` with the parent key and the same safe parameters as Step 1 — `fields` whitelist (no `comment`/`attachment`) and `responseContentFormat: "markdown"`.
 
 **REST fallback:** Same curl as Step 1 but with the parent key.
 
-### 5. Fetch comments
+### 5. Fetch comments (optional, size-guarded)
 
-Comments are included in the main issue response (Step 1) via the `comment` field. Extract:
+Step 1 intentionally excludes the `comment` field to avoid token-limit crashes. Comments are often chatty and not the primary QA input — description and acceptance criteria usually carry the requirements.
+
+Only fetch comments if the description is thin or acceptance criteria are missing. When you do fetch them:
+
+**MCP:** Call `mcp__atlassian__getJiraIssue` again with `fields: ["comment"]` only and `responseContentFormat: "markdown"`.
+
+**REST fallback:**
+```bash
+curl -s -u "{email}:{token}" \
+  "https://api.atlassian.com/ex/jira/{cloudId}/rest/api/3/issue/{KEY}/comment?maxResults=50&orderBy=-created"
+```
+
+**If the returned tool-results file is too large to Read:**
+- Do NOT try to Read the full file.
+- Use **Grep** on the file path to extract only comments matching keywords (acceptance, criteria, edge case, blocker, bug, clarif, scope, decision).
+- Alternatively use **Read with `offset` and `limit`** to scan in 500-line chunks.
+- Extract a short summary (≤ 20 bullet points) and discard the raw file.
+
+Extract:
 - Hidden acceptance criteria discussed in comments
 - Edge cases, clarifications, scope changes
 - Decisions not reflected in the description
+
+If you cannot fetch comments safely, proceed without them — note the omission in `jira-context-full.md` under "Known Gaps".
 
 ### 6. Fetch Confluence context
 
@@ -149,6 +172,19 @@ Write `{output_directory}/jira-context.json`:
 
 Also write a detailed context file `{output_directory}/jira-context-full.md` with all gathered data (full descriptions, acceptance criteria, child/linked issue summaries, Confluence excerpts, local docs) formatted as markdown. This file is consumed by downstream tasks.
 
+## Large Response Handling
+
+Jira tickets with long comment history or many attachments can return responses over 25K tokens — Claude's `Read` tool will refuse these files outright.
+
+**Rules:**
+1. Never Read a tool-results file whose size is unknown. Check size first (the file path is printed when a "Large response" warning appears).
+2. If a file exceeds ~20KB: use **Grep** to extract what you need by pattern, or **Read with `offset`/`limit`** in 500-line chunks.
+3. If fetching any Jira or Confluence data, prefer:
+   - Explicit `fields` whitelists over default full-object responses
+   - `responseContentFormat: "markdown"` over default ADF
+   - Paginated/filtered searches (smaller `maxResults`) over unbounded ones
+4. When a response is still too large: summarize into bullets immediately and discard the raw file from your working context.
+
 ## Anti-Patterns
 
 - Do not make all API calls in parallel — sequential to avoid rate limits
@@ -156,3 +192,4 @@ Also write a detailed context file `{output_directory}/jira-context-full.md` wit
 - Do not skip Jira data — it's the primary requirements source
 - Do not waste turns retrying MCP tools if the first call fails — switch to REST fallback immediately
 - When using curl, do not expose full API tokens in console output — use `... ` to truncate in logs
+- Do not request `comment` or `attachment` fields in the main `getJiraIssue` call — fetch them separately only if needed, with size guards
