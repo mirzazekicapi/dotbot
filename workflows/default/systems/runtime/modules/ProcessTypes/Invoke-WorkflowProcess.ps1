@@ -78,6 +78,383 @@ function Test-TaskIsMandatory {
     return $val -ne $true
 }
 
+# Validate task-declared outputs after a task completes. Parity with the
+# kickstart engine at Invoke-KickstartProcess.ps1:625-646. Returns $null on
+# success, an error message on failure. Caller decides how to escalate.
+# Count visible task JSONs across every pipeline state directory. Used both
+# as the post-task validation count and as a pre-task baseline so that
+# Test-TaskOutput can compare the delta produced by a task_gen task instead
+# of the absolute total (which would always be >= min_output_count because
+# the manifest pre-creates all tasks before the process starts).
+function Measure-TaskFile {
+    param([Parameter(Mandatory)][string]$BotRoot)
+    $taskStateDirs = @('todo','analysing','analysed','in-progress','done','skipped','cancelled','needs-input','split')
+    # Forward-slash literals so Join-Path on Linux/macOS produces a real path.
+    $tasksRoot = Join-Path (Join-Path $BotRoot 'workspace') 'tasks'
+    $count = 0
+    foreach ($stateDir in $taskStateDirs) {
+        $sd = Join-Path $tasksRoot $stateDir
+        if (Test-Path $sd) {
+            $count += @(Get-ChildItem $sd -File -ErrorAction SilentlyContinue |
+                Where-Object { $_.Name -notmatch '^[._]' }).Count
+        }
+    }
+    return $count
+}
+
+# Capture baseline count under outputs_dir before a task runs, so the
+# subsequent Test-TaskOutput call can compare against the delta.
+function Get-TaskOutputBaseline {
+    param(
+        [Parameter(Mandatory)]$Task,
+        [Parameter(Mandatory)][string]$BotRoot
+    )
+    $taskOutputsDir = if ($Task -is [System.Collections.IDictionary]) { $Task['outputs_dir'] } else { $Task.outputs_dir }
+    if (-not $taskOutputsDir) {
+        $taskOutputsDir = if ($Task -is [System.Collections.IDictionary]) { $Task['required_outputs_dir'] } else { $Task.required_outputs_dir }
+    }
+    if (-not $taskOutputsDir) { return -1 }
+
+    if ($taskOutputsDir -like 'tasks/*' -or $taskOutputsDir -eq 'tasks') {
+        return Measure-TaskFile -BotRoot $BotRoot
+    }
+    # Normalise outputs_dir separator and join via two-segment Join-Path so the
+    # resolved path is valid on both Windows and Unix.
+    $normalizedOutputsDir = $taskOutputsDir -replace '\\', '/'
+    $dirPath = Join-Path (Join-Path $BotRoot 'workspace') $normalizedOutputsDir
+    if (Test-Path $dirPath) {
+        return @(Get-ChildItem $dirPath -File | Where-Object { $_.Name -notmatch '^[._]' }).Count
+    }
+    return 0
+}
+
+function Test-TaskOutput {
+    param(
+        [Parameter(Mandatory)]$Task,
+        [Parameter(Mandatory)][string]$BotRoot,
+        [Parameter(Mandatory)][string]$ProductDir,
+        # -1 means "no baseline captured" — fall back to absolute-count check.
+        # 0+ means baseline was captured before the task ran; compare delta.
+        [int]$BaselineCount = -1
+    )
+    $taskOutputs = if ($Task -is [System.Collections.IDictionary]) { $Task['outputs'] } else { $Task.outputs }
+    if (-not $taskOutputs) {
+        $taskOutputs = if ($Task -is [System.Collections.IDictionary]) { $Task['required_outputs'] } else { $Task.required_outputs }
+    }
+    $taskOutputsDir = if ($Task -is [System.Collections.IDictionary]) { $Task['outputs_dir'] } else { $Task.outputs_dir }
+    if (-not $taskOutputsDir) {
+        $taskOutputsDir = if ($Task -is [System.Collections.IDictionary]) { $Task['required_outputs_dir'] } else { $Task.required_outputs_dir }
+    }
+    if ($taskOutputs) {
+        foreach ($f in $taskOutputs) {
+            if (-not (Test-Path (Join-Path $ProductDir $f))) {
+                return "Task output not produced: $f"
+            }
+        }
+    } elseif ($taskOutputsDir) {
+        $minVal = if ($Task -is [System.Collections.IDictionary]) { $Task['min_output_count'] } else { $Task.min_output_count }
+        $minCount = if ($minVal) { [int]$minVal } else { 1 }
+
+        # Special-case outputs_dir under tasks/: a task_gen task generates files
+        # into tasks/todo, but in multi-slot runs other slots can claim those
+        # files and move them to analysing/in-progress/etc. before this
+        # validation runs. Count visible task JSONs across every pipeline state
+        # so concurrent claiming doesn't cause spurious validation failures.
+        $isTasksOutput = ($taskOutputsDir -like 'tasks/*' -or $taskOutputsDir -eq 'tasks')
+
+        if ($isTasksOutput) {
+            $fileCount = Measure-TaskFile -BotRoot $BotRoot
+        } else {
+            $normalizedOutputsDir = $taskOutputsDir -replace '\\', '/'
+            $dirPath = Join-Path (Join-Path $BotRoot 'workspace') $normalizedOutputsDir
+            $fileCount = if (Test-Path $dirPath) {
+                @(Get-ChildItem $dirPath -File | Where-Object { $_.Name -notmatch '^[._]' }).Count
+            } else { 0 }
+        }
+
+        # If a baseline was captured before the task ran, validate against the
+        # delta — required for the task-runner case where the manifest pre-
+        # creates all tasks into tasks/todo before the process starts (any
+        # absolute-count check would always pass). Without a baseline, fall
+        # back to the absolute-count check (kickstart-engine parity).
+        if ($BaselineCount -ge 0) {
+            $delta = $fileCount - $BaselineCount
+            if ($delta -lt $minCount) {
+                return "Task output directory '$taskOutputsDir' produced $delta new file(s), expected at least $minCount"
+            }
+        } elseif ($fileCount -lt $minCount) {
+            return "Task output directory '$taskOutputsDir' has $fileCount file(s), expected at least $minCount"
+        }
+    }
+    return $null
+}
+
+# Add YAML front matter to task-declared documents. Parity with kickstart
+# engine at Invoke-KickstartProcess.ps1:648-663. Reuses Add-YamlFrontMatter
+# from ProcessRegistry.psm1.
+function Add-TaskFrontMatter {
+    param(
+        [Parameter(Mandatory)]$Task,
+        [Parameter(Mandatory)][string]$ProductDir,
+        [Parameter(Mandatory)][string]$ProcId,
+        [string]$ModelName
+    )
+    $frontMatterDocs = if ($Task -is [System.Collections.IDictionary]) { $Task['front_matter_docs'] } else { $Task.front_matter_docs }
+    if (-not $frontMatterDocs) { return }
+    $taskId = if ($Task -is [System.Collections.IDictionary]) { $Task['id'] } else { $Task.id }
+    $taskMeta = @{
+        generated_at = (Get-Date).ToUniversalTime().ToString("o")
+        model        = $ModelName
+        process_id   = $ProcId
+        task         = "task-$taskId"
+        generator    = "dotbot-task-runner"
+    }
+    foreach ($docName in $frontMatterDocs) {
+        $docPath = Join-Path $ProductDir $docName
+        if (Test-Path $docPath) {
+            Add-YamlFrontMatter -FilePath $docPath -Metadata $taskMeta
+        }
+    }
+}
+
+# Post-task clarification-questions HITL loop. Parity with kickstart engine
+# at Invoke-KickstartProcess.ps1:382-622, adapted to task scope. Detects
+# clarification-questions.json written by the agent during task execution,
+# pauses the process for human input, polls for clarification-answers.json,
+# appends Q&A to interview-summary.md, and runs adjust-after-answers.md as a
+# separate provider session. Returns $null on success or skip, an error
+# message string on failure.
+#
+# This is the file-watch path only — Teams notification polling (kickstart's
+# parallel channel) is not yet ported and is tracked as follow-up work.
+function Invoke-TaskClarificationLoopIfPresent {
+    param(
+        [Parameter(Mandatory)]$Task,
+        [Parameter(Mandatory)][string]$BotRoot,
+        [Parameter(Mandatory)][string]$ProductDir,
+        [Parameter(Mandatory)][hashtable]$ProcessData,
+        [Parameter(Mandatory)][string]$ProcId,
+        [string]$ProjectRoot,
+        [string]$ModelName,
+        [bool]$ShowDebug,
+        [bool]$ShowVerbose,
+        [string]$PermissionMode
+    )
+    $questionsPath = Join-Path $ProductDir "clarification-questions.json"
+    if (-not (Test-Path $questionsPath)) { return $null }
+
+    $answersPath = Join-Path $ProductDir "clarification-answers.json"
+
+    # Reset process state on any error path. Without this, a parse failure
+    # leaves the JSON stuck in needs-input until something else overwrites it.
+    function Reset-ClarificationState {
+        param($PD, $Id, $TaskName)
+        $PD.status = 'running'
+        $PD.pending_questions = $null
+        $PD.heartbeat_status = "Running task: $TaskName"
+        Write-ProcessFile -Id $Id -Data $PD
+    }
+
+    $questionsData = $null
+    try {
+        $questionsData = (Get-Content $questionsPath -Raw) | ConvertFrom-Json
+    } catch {
+        # Preserve the file so the operator can inspect what couldn't be parsed.
+        # Deleting it removed the primary diagnostic artifact, contradicting the
+        # rest of the failure-path policy that keeps Q/A JSONs around.
+        return "Failed to parse clarification-questions.json at '$questionsPath': $($_.Exception.Message). File preserved for inspection."
+    }
+    if (-not $questionsData -or -not $questionsData.questions -or $questionsData.questions.Count -eq 0) {
+        # Empty/well-formed-but-questionless: safe to remove (no diagnostic value).
+        Remove-Item $questionsPath -Force -ErrorAction SilentlyContinue
+        return $null
+    }
+
+    Write-Status "Task $($Task.name): $($questionsData.questions.Count) clarification question(s) — waiting for user" -Type Info
+    Write-ProcessActivity -Id $ProcId -ActivityType "text" -Message "Task '$($Task.name)' has $($questionsData.questions.Count) clarification question(s)"
+
+    # Delete any stale answers file BEFORE flipping status to needs-input.
+    # If we deleted after, a fresh UI-supplied answers file written between
+    # the status flip and the deletion could be wiped, leaving the runner
+    # waiting indefinitely.
+    if (Test-Path $answersPath) { Remove-Item $answersPath -Force -ErrorAction SilentlyContinue }
+
+    $ProcessData.status = 'needs-input'
+    $ProcessData.pending_questions = $questionsData
+    $ProcessData.heartbeat_status = "Waiting for answers (task: $($Task.name))"
+    Write-ProcessFile -Id $ProcId -Data $ProcessData
+
+    while (-not (Test-Path $answersPath)) {
+        if (Test-ProcessStopSignal -Id $ProcId) {
+            $ProcessData.status = 'stopped'
+            $ProcessData.failed_at = (Get-Date).ToUniversalTime().ToString("o")
+            $ProcessData.pending_questions = $null
+            Write-ProcessFile -Id $ProcId -Data $ProcessData
+            return "Process stopped by user during clarification wait"
+        }
+        Start-Sleep -Seconds 2
+    }
+
+    # The UI server writes clarification-answers.json via Set-Content (open/
+    # truncate/write — non-atomic). Reading it the moment the file appears can
+    # race against the writer. Retry parse a few times before deleting and
+    # escalating, so a partially-written file doesn't force the user to
+    # resubmit answers.
+    $answersData = $null
+    $lastParseError = $null
+    for ($attempt = 1; $attempt -le 5; $attempt++) {
+        try {
+            $answersData = (Get-Content $answersPath -Raw) | ConvertFrom-Json
+            $lastParseError = $null
+            break
+        } catch {
+            $lastParseError = $_.Exception.Message
+            if ($attempt -lt 5 -and (Test-Path $answersPath)) {
+                Start-Sleep -Milliseconds 300
+            }
+        }
+    }
+    if (-not $answersData) {
+        # Persistently malformed — delete so next run doesn't loop on the same parse failure.
+        Remove-Item $answersPath -Force -ErrorAction SilentlyContinue
+        Reset-ClarificationState -PD $ProcessData -Id $ProcId -TaskName $Task.name
+        return "Failed to parse clarification-answers.json: $lastParseError"
+    }
+
+    if ($answersData -and $answersData.skipped -eq $true) {
+        Write-Status "User skipped clarification questions for $($Task.name)" -Type Info
+        Write-ProcessActivity -Id $ProcId -ActivityType "text" -Message "User skipped clarification questions for $($Task.name)"
+    } elseif ($answersData) {
+        # Validate answers are present and non-empty. An empty/missing answers
+        # array would silently discard the pending questions without applying
+        # anything, so escalate as a malformed payload.
+        if (-not $answersData.answers -or $answersData.answers.Count -eq 0) {
+            Remove-Item $answersPath -Force -ErrorAction SilentlyContinue
+            Reset-ClarificationState -PD $ProcessData -Id $ProcId -TaskName $Task.name
+            return "clarification-answers.json has no 'answers' array — pending questions cannot be applied"
+        }
+        $summaryPath = Join-Path $ProductDir "interview-summary.md"
+        $timestamp = (Get-Date).ToUniversalTime().ToString("o")
+        $qaSection = "`n`n### Task: $($Task.name)`n"
+        $qaSection += "| # | Question | Answer (verbatim) | Interpretation | Timestamp |`n"
+        $qaSection += "|---|----------|--------------------|----------------|-----------|`n"
+        $qIdx = 0
+        foreach ($ans in $answersData.answers) {
+            $qIdx++
+            $qText = ($ans.question -replace '\|', '\|' -replace "`n", ' ')
+            $aText = ($ans.answer -replace '\|', '\|' -replace "`n", ' ')
+            $qaSection += "| q$qIdx | $qText | $aText | _pending_ | $timestamp |`n"
+        }
+        if (Test-Path $summaryPath) {
+            $existingContent = Get-Content $summaryPath -Raw
+            if ($existingContent -notmatch '## Clarification Log') {
+                $qaSection = "`n## Clarification Log`n" + $qaSection
+            }
+            Add-Content -Path $summaryPath -Value $qaSection -NoNewline
+        } else {
+            $newSummary = "# Interview Summary`n`n## Clarification Log`n" + $qaSection
+            Set-Content -Path $summaryPath -Value $newSummary -NoNewline
+        }
+
+        # Forward slashes for cross-platform Join-Path safety (post-script-runner.ps1
+        # uses the same normalisation — Windows accepts either separator, Unix does not).
+        $adjustPromptPath = Join-Path $BotRoot "recipes/includes/adjust-after-answers.md"
+        if (-not (Test-Path $adjustPromptPath)) {
+            # Escalate via the postScriptFailed path so the worktree merge is
+            # blocked. Without the adjust prompt the answers cannot be applied
+            # to artifacts; merging would be incorrect.
+            Reset-ClarificationState -PD $ProcessData -Id $ProcId -TaskName $Task.name
+            return "Adjust prompt not found at $adjustPromptPath — cannot apply clarification answers"
+        }
+        $adjustContent = Get-Content $adjustPromptPath -Raw
+        $adjustPrompt = @"
+$adjustContent
+
+## Context
+
+- **Task that generated questions**: $($Task.name)
+- **User's project description**: see workflow-launch-prompt.txt and any briefing files in .bot/workspace/product/briefing/
+
+Instructions:
+1. Read .bot/workspace/product/interview-summary.md for the full Q&A history including the new answers
+2. Read ALL existing product artifacts in .bot/workspace/product/
+3. Assess the impact of the new information across all artifacts
+4. Enrich/correct any affected artifacts
+5. Fill in the Interpretation column for the new Q&A entries in interview-summary.md
+"@
+        Write-Status "Running post-answer adjustment for task $($Task.name)..." -Type Process
+        Write-ProcessActivity -Id $ProcId -ActivityType "text" -Message "Adjusting artifacts after answers for $($Task.name)"
+        $adjustSessionId = $null
+        try {
+            $adjustSessionId = New-ProviderSession
+            $adjustArgs = @{
+                Prompt         = $adjustPrompt
+                Model          = $ModelName
+                SessionId      = $adjustSessionId
+                PersistSession = $false
+            }
+            if ($ShowDebug) { $adjustArgs['ShowDebugJson'] = $true }
+            if ($ShowVerbose) { $adjustArgs['ShowVerbose'] = $true }
+            if ($PermissionMode) { $adjustArgs['PermissionMode'] = $PermissionMode }
+            Invoke-ProviderStream @adjustArgs
+            Write-Status "Post-answer adjustment complete for $($Task.name)" -Type Complete
+        } catch {
+            $adjustErr = $_.Exception.Message
+            if ([string]::IsNullOrWhiteSpace($adjustErr)) { $adjustErr = $_.ToString() }
+            Reset-ClarificationState -PD $ProcessData -Id $ProcId -TaskName $Task.name
+            # Preserve clarification-questions.json and clarification-answers.json on
+            # failure so the operator can inspect them during the needs-input
+            # escalation. The escalation pending_question text directs them here.
+            return "Post-answer adjustment failed for task '$($Task.name)': $adjustErr"
+        } finally {
+            if ($adjustSessionId) {
+                try {
+                    $removeArgs = @{ SessionId = $adjustSessionId }
+                    if ($ProjectRoot) { $removeArgs['ProjectRoot'] = $ProjectRoot }
+                    Remove-ProviderSession @removeArgs | Out-Null
+                } catch { Write-BotLog -Level Debug -Message "Adjust session cleanup failed" -Exception $_ }
+            }
+        }
+    }
+
+    Remove-Item $questionsPath -Force -ErrorAction SilentlyContinue
+    Remove-Item $answersPath -Force -ErrorAction SilentlyContinue
+    Reset-ClarificationState -PD $ProcessData -Id $ProcId -TaskName $Task.name
+    return $null
+}
+
+# Build the briefing-file references and interview-summary context block that
+# gets appended to LLM prompts. Parity with kickstart-engine behaviour at
+# Invoke-KickstartProcess.ps1:145-168. Read fresh per task so that context
+# created by an earlier task in the same run becomes visible to later ones.
+function Get-WorkflowPromptContext {
+    param([Parameter(Mandatory)][string]$ProductDir)
+    $fileRefs = ""
+    $briefingDir = Join-Path $ProductDir "briefing"
+    if (Test-Path $briefingDir) {
+        $briefingFiles = @(Get-ChildItem -Path $briefingDir -File -ErrorAction SilentlyContinue)
+        if ($briefingFiles.Count -gt 0) {
+            # Emit repo-relative paths instead of $bf.FullName so absolute host
+            # paths (which can leak machine/user directory info) aren't sent
+            # to the provider. .bot/workspace/product/briefing/ is the canonical
+            # location; the agent reads files from there directly.
+            $fileRefs = "`n`nBriefing files have been saved to .bot/workspace/product/briefing/. Read and use these for context:`n"
+            foreach ($bf in $briefingFiles) { $fileRefs += "- .bot/workspace/product/briefing/$($bf.Name)`n" }
+        }
+    }
+    $interviewContext = ""
+    $interviewSummaryPath = Join-Path $ProductDir "interview-summary.md"
+    if (Test-Path $interviewSummaryPath) {
+        $interviewContext = @"
+
+## Interview Summary
+
+An interview-summary.md file exists in .bot/workspace/product/ containing the user's clarified requirements with both verbatim answers and expanded interpretation. **Read this file** and use it to guide your decisions — it reflects the user's confirmed preferences for platform, architecture, technology, domain model, and other key directions.
+"@
+    }
+    return $fileRefs + $interviewContext
+}
+
 # Initialize session for execution phase tracking
 $sessionResult = Invoke-SessionInitialize -Arguments @{ session_type = "autonomous" }
 if ($sessionResult.success) {
@@ -103,7 +480,7 @@ if (Test-Path $standardsDir) {
         ForEach-Object { ".bot/recipes/standards/global/$($_.Name)" }
     $standardsList = if ($standardsFiles) { "- " + ($standardsFiles -join "`n- ") } else { "No standards files found." }
 }
-$productDir = Join-Path $botRoot "workspace\product"
+$productDir = Join-Path (Join-Path $botRoot 'workspace') 'product'
 $productMission = if (Test-Path (Join-Path $productDir "mission.md")) { "Read the product mission and context from: .bot/workspace/product/mission.md" } else { "No product mission file found." }
 $entityModel = if (Test-Path (Join-Path $productDir "entity-model.md")) { "Read the entity model design from: .bot/workspace/product/entity-model.md" } else { "No entity model file found." }
 
@@ -111,7 +488,9 @@ $entityModel = if (Test-Path (Join-Path $productDir "entity-model.md")) { "Read 
 . (Join-Path $botRoot "systems\runtime\modules\task-reset.ps1")
 # Post-script runner (shared helper)
 . (Join-Path $botRoot "systems\runtime\modules\post-script-runner.ps1")
-$tasksBaseDir = Join-Path $botRoot "workspace\tasks"
+# Interview loop (used by 'interview' task type)
+. (Join-Path $botRoot "systems\runtime\modules\InterviewLoop.ps1")
+$tasksBaseDir = Join-Path (Join-Path $botRoot 'workspace') 'tasks'
 
 # Recover orphaned tasks
 Reset-AnalysingTasks -TasksBaseDir $tasksBaseDir -ProcessesDir $processesDir | Out-Null
@@ -275,9 +654,27 @@ try {
         # Check BEFORE claiming to avoid orphaning tasks in in-progress.
         $taskTypeCheck = if ($task.type) { $task.type } else { 'prompt' }
         if ($taskTypeCheck -eq 'prompt_template') { $taskTypeCheck = 'prompt' }
-        if ($Slot -gt 0 -and $taskTypeCheck -notin @('prompt')) {
-            Write-Status "Slot ${Slot}: skipping $taskTypeCheck task '$($task.name)' (slot 0 only)" -Type Info
-            Write-ProcessActivity -Id $procId -ActivityType "text" -Message "Slot ${Slot}: waiting for prompt tasks (skipping $taskTypeCheck task)"
+
+        # Tasks whose outputs_dir is tasks/* (i.e. task-creating tasks) must
+        # also run on slot 0 only. Their baseline-delta validation counts files
+        # across the global tasks/ directory and cannot attribute new files to
+        # a specific slot, so concurrent execution would yield false-positive
+        # validation passes. Covers prompt_template task_gen mappings whose
+        # type-check would otherwise let them run on any slot.
+        $taskOutputsDirGuard = if ($task -is [System.Collections.IDictionary]) {
+            $task['outputs_dir']
+        } else { $task.outputs_dir }
+        if (-not $taskOutputsDirGuard) {
+            $taskOutputsDirGuard = if ($task -is [System.Collections.IDictionary]) {
+                $task['required_outputs_dir']
+            } else { $task.required_outputs_dir }
+        }
+        $isTaskGenerator = $taskOutputsDirGuard -and ($taskOutputsDirGuard -like 'tasks/*' -or $taskOutputsDirGuard -eq 'tasks')
+
+        if ($Slot -gt 0 -and ($taskTypeCheck -notin @('prompt') -or $isTaskGenerator)) {
+            $reasonLabel = if ($isTaskGenerator) { "$taskTypeCheck task with outputs_dir under tasks/" } else { $taskTypeCheck }
+            Write-Status "Slot ${Slot}: skipping $reasonLabel '$($task.name)' (slot 0 only)" -Type Info
+            Write-ProcessActivity -Id $procId -ActivityType "text" -Message "Slot ${Slot}: waiting (skipping $reasonLabel)"
             Start-Sleep -Seconds 5
             continue
         }
@@ -476,6 +873,13 @@ try {
                 }
             }
 
+            # Snapshot pre-task baseline for outputs_dir validation. Test-TaskOutput
+            # uses this to compare the delta the task produced rather than the
+            # absolute count, so e.g. a task_gen with min_output_count: 1 must
+            # actually produce a new task file (not just rely on tasks already
+            # in tasks/todo from manifest pre-creation).
+            $taskOutputBaseline = Get-TaskOutputBaseline -Task $task -BotRoot $botRoot
+
             try {
                 switch ($taskTypeVal) {
                     'script' {
@@ -513,6 +917,86 @@ try {
                         Write-ProcessActivity -Id $procId -ActivityType "text" -Message "Barrier reached: $($task.name)"
                         $typeSuccess = $true
                     }
+                    'interview' {
+                        # Resolve user prompt. task.prompt may be either a path
+                        # to a prompt file or inline text. Only try path
+                        # resolution when the value LOOKS like a path (no
+                        # newlines, has a separator or extension or starts
+                        # with a dot/slash). Inline text containing wildcard
+                        # characters would otherwise cause Test-Path to
+                        # interpret them as glob patterns and throw under
+                        # StrictMode. Use -LiteralPath + try/catch so any
+                        # remaining edge cases fall back to inline text.
+                        $userPrompt = ""
+                        if ($task.prompt) {
+                            $promptValue = [string]$task.prompt
+                            $looksLikePath = -not [string]::IsNullOrWhiteSpace($promptValue) -and `
+                                ($promptValue -notmatch "[`r`n]") -and `
+                                ($promptValue.Length -lt 260) -and `
+                                (
+                                    [System.IO.Path]::IsPathRooted($promptValue) -or
+                                    $promptValue -match '[\\/]' -or
+                                    $promptValue -match '^\.\.?(?:[\\/]|$)' -or
+                                    $promptValue -match '\.[A-Za-z0-9]+$'
+                                )
+                            $resolvedPromptPath = $null
+                            if ($looksLikePath) {
+                                $promptCandidates = @(
+                                    (Join-Path $scriptBase $promptValue),
+                                    (Join-Path $botRoot $promptValue),
+                                    $promptValue
+                                ) | Where-Object { $_ } | Select-Object -Unique
+                                foreach ($c in $promptCandidates) {
+                                    try {
+                                        if (Test-Path -LiteralPath $c -PathType Leaf -ErrorAction SilentlyContinue) {
+                                            $resolvedPromptPath = $c
+                                            break
+                                        }
+                                    } catch { Write-BotLog -Level Debug -Message "prompt path probe failed" -Exception $_ }
+                                }
+                            }
+                            if ($resolvedPromptPath) {
+                                try { $userPrompt = Get-Content -LiteralPath $resolvedPromptPath -Raw -ErrorAction Stop }
+                                catch { $userPrompt = $promptValue }
+                            } else {
+                                $userPrompt = $promptValue
+                            }
+                        } else {
+                            $defaultPromptPath = Join-Path (Join-Path (Join-Path $botRoot '.control') 'launchers') 'workflow-launch-prompt.txt'
+                            if (Test-Path -LiteralPath $defaultPromptPath -PathType Leaf -ErrorAction SilentlyContinue) {
+                                try { $userPrompt = Get-Content -LiteralPath $defaultPromptPath -Raw -ErrorAction Stop }
+                                catch {
+                                    # Read failure (perms, encoding, transient IO): fall back
+                                    # to task.description so the documented prompt-resolution
+                                    # order (file > description > empty) still holds.
+                                    if ($task.description) { $userPrompt = $task.description } else { $userPrompt = "" }
+                                }
+                            } elseif ($task.description) {
+                                $userPrompt = $task.description
+                            }
+                        }
+                        Write-Status "Interview: $($task.name)" -Type Process
+                        Write-ProcessActivity -Id $procId -ActivityType "init" -Message "Interview task: $($task.name)"
+                        Write-Header "Interview"
+                        $interviewTaskId = if ($task -is [System.Collections.IDictionary]) { $task['id'] } else { $task.id }
+                        Invoke-InterviewLoop -ProcessId $procId -ProcessData $processData `
+                            -BotRoot $botRoot -ProductDir $productDir -UserPrompt $userPrompt `
+                            -ShowDebugJson:$ShowDebug -ShowVerboseOutput:$ShowVerbose `
+                            -PermissionMode $permissionMode `
+                            -Generator 'dotbot-task-runner' -TaskId $interviewTaskId
+                        # Verify the interview produced its required artifact. Invoke-InterviewLoop
+                        # can exit early without writing interview-summary.md (parse failures, etc.)
+                        # and downstream prompt tasks need this file as context.
+                        $interviewSummaryPath = Join-Path $productDir "interview-summary.md"
+                        if (Test-Path -LiteralPath $interviewSummaryPath -PathType Leaf -ErrorAction SilentlyContinue) {
+                            $typeSuccess = $true
+                        } else {
+                            $typeSuccess = $false
+                            $typeError = "Interview loop completed without producing $interviewSummaryPath"
+                            Write-Status $typeError -Type Error
+                            Write-ProcessActivity -Id $procId -ActivityType "error" -Message "$($task.name): $typeError"
+                        }
+                    }
                 }
             } catch {
                 $typeError = $_.Exception.Message
@@ -535,12 +1019,40 @@ try {
             }
 
             if ($typeSuccess) {
+                $testOutputArgs = @{
+                    Task       = $task
+                    BotRoot    = $botRoot
+                    ProductDir = $productDir
+                }
+                if ($null -ne $taskOutputBaseline -and $taskOutputBaseline -ge 0) {
+                    $testOutputArgs.BaselineCount = $taskOutputBaseline
+                }
+                $outputErr = Test-TaskOutput @testOutputArgs
+                if ($outputErr) {
+                    $typeSuccess = $false
+                    $typeError = $outputErr
+                }
+            }
+
+            if ($typeSuccess) {
+                try {
+                    Add-TaskFrontMatter -Task $task -ProductDir $productDir -ProcId $procId -ModelName $claudeModelName
+                } catch {
+                    # Add-YamlFrontMatter / file IO can throw. Convert to a
+                    # controlled task failure so the runner doesn't crash and
+                    # the task is reported via the same skipped/failed path.
+                    $typeSuccess = $false
+                    $typeError = "Failed to add task front matter: $($_.Exception.Message)"
+                }
+            }
+
+            if ($typeSuccess) {
                 # Move task file directly to done/ (skip verification hooks —
                 # they are for Claude-executed code tasks, not script/mcp/task_gen)
                 try {
-                    $doneDir = Join-Path $botRoot "workspace\tasks\done"
+                    $doneDir = Join-Path $tasksBaseDir 'done'
                     if (-not (Test-Path $doneDir)) { New-Item -Path $doneDir -ItemType Directory -Force | Out-Null }
-                    $taskFile = Get-ChildItem (Join-Path $botRoot "workspace\tasks\in-progress") -Filter "*.json" -File |
+                    $taskFile = Get-ChildItem (Join-Path $tasksBaseDir 'in-progress') -Filter "*.json" -File |
                         Where-Object { (Get-Content $_.FullName -Raw | ConvertFrom-Json).id -eq $task.id } |
                         Select-Object -First 1
                     if ($taskFile) {
@@ -665,9 +1177,11 @@ try {
             else { 'Opus' }
         $analysisModelName = Resolve-ProviderModelId -ModelAlias $analysisModel
 
+        $promptContext = Get-WorkflowPromptContext -ProductDir $productDir
+
         $fullAnalysisPrompt = @"
 $analysisPrompt
-$resolvedQuestionsContext
+$resolvedQuestionsContext$promptContext
 ## Process Context
 
 - **Process ID:** $procId
@@ -745,7 +1259,7 @@ Do NOT implement the task. Your job is research and preparation only.
             $taskFound = $false
             $analysisOutcome = $null
             foreach ($dir in $taskDirs) {
-                $checkDir = Join-Path $botRoot "workspace\tasks\$dir"
+                $checkDir = Join-Path $tasksBaseDir $dir
                 if (Test-Path $checkDir) {
                     $files = Get-ChildItem -Path $checkDir -Filter "*.json" -File
                     foreach ($f in $files) {
@@ -893,6 +1407,10 @@ Do NOT implement the task. Your job is research and preparation only.
             else { 'Opus' }
         $executionModelName = Resolve-ProviderModelId -ModelAlias $executionModel
 
+        # Snapshot pre-task baseline for outputs_dir validation (see non-prompt
+        # path comment for rationale).
+        $taskOutputBaseline = Get-TaskOutputBaseline -Task $task -BotRoot $botRoot
+
         # Build execution prompt
         $executionPrompt = Build-TaskPrompt `
             -PromptTemplate $executionPromptTemplate `
@@ -906,9 +1424,11 @@ Do NOT implement the task. Your job is research and preparation only.
         $branchForPrompt = if ($branchName) { $branchName } else { "main" }
         $executionPrompt = $executionPrompt -replace '\{\{BRANCH_NAME\}\}', $branchForPrompt
 
+        $execPromptContext = Get-WorkflowPromptContext -ProductDir $productDir
+
         $fullExecutionPrompt = @"
 $executionPrompt
-
+$execPromptContext
 ## Process Context
 
 - **Process ID:** $procId
@@ -932,6 +1452,9 @@ Work on this task autonomously. When complete, ensure you call task_mark_done vi
         $taskSuccess = $false
         $postScriptFailed = $false
         $postScriptError = $null
+        # Distinguishes which post-task hook actually flipped postScriptFailed
+        # so escalation messaging accurately names the failure source.
+        $postScriptFailureSource = 'post_script'
         $attemptNumber = 0
 
         if ($worktreePath) { Push-Location $worktreePath }
@@ -1085,6 +1608,66 @@ Work on this task autonomously. When complete, ensure you call task_mark_done vi
                 $postScriptError = $psErr
             }
         }
+
+        # Post-task clarification-questions HITL loop (parity with kickstart
+        # engine). Runs BEFORE outputs validation and front-matter injection
+        # because the adjust-after-answers pass can rewrite product artifacts —
+        # if it ran after, it could remove the YAML front-matter we just
+        # injected or invalidate already-validated outputs. By running first
+        # we settle artifact contents before the final checks. Failure
+        # escalates like a post-script failure so the worktree merge is held.
+        if ($taskSuccess) {
+            $clarErr = Invoke-TaskClarificationLoopIfPresent -Task $task -BotRoot $botRoot `
+                -ProductDir $productDir -ProcessData $processData -ProcId $procId `
+                -ProjectRoot $projectRoot `
+                -ModelName $claudeModelName -ShowDebug $ShowDebug `
+                -ShowVerbose $ShowVerbose -PermissionMode $permissionMode
+            if ($clarErr) {
+                $taskSuccess = $false
+                $postScriptFailed = $true
+                $postScriptError = $clarErr
+                $postScriptFailureSource = 'clarification'
+            }
+        }
+
+        # Outputs validation (parity with kickstart engine). On failure, escalate
+        # via the same path as a post-script failure — task is in done/ already
+        # but we don't want to merge a task whose declared outputs are missing.
+        if ($taskSuccess) {
+            $testOutputArgs = @{
+                Task       = $task
+                BotRoot    = $botRoot
+                ProductDir = $productDir
+            }
+            if ($null -ne $taskOutputBaseline -and $taskOutputBaseline -ge 0) {
+                $testOutputArgs.BaselineCount = $taskOutputBaseline
+            }
+            $outputErr = Test-TaskOutput @testOutputArgs
+            if ($outputErr) {
+                $taskSuccess = $false
+                $postScriptFailed = $true
+                $postScriptError = $outputErr
+                $postScriptFailureSource = 'outputs'
+            }
+        }
+
+        # Front-matter injection (parity with kickstart engine). Final step
+        # before merge — by here outputs are validated and the clarification
+        # adjust pass has settled artifact contents. Wrap in try/catch so an
+        # IO/Add-YamlFrontMatter failure routes through the post-task escalation
+        # path (worktree preserved, accurate pending_question) instead of
+        # bubbling to the surrounding execution catch which would treat it as
+        # an execution-phase failure and destroy the worktree.
+        if ($taskSuccess) {
+            try {
+                Add-TaskFrontMatter -Task $task -ProductDir $productDir -ProcId $procId -ModelName $claudeModelName
+            } catch {
+                $taskSuccess = $false
+                $postScriptFailed = $true
+                $postScriptError = $_.Exception.Message
+                $postScriptFailureSource = 'front_matter'
+            }
+        }
         } finally {
             # Final safety-net cleanup: kill any remaining worktree processes
             if ($worktreePath) {
@@ -1163,27 +1746,33 @@ Work on this task autonomously. When complete, ensure you call task_mark_done vi
             Write-ProcessFile -Id $procId -Data $processData
             Write-ProcessActivity -Id $procId -ActivityType "text" -Message "Task completed (analyse+execute): $($task.name)"
         } elseif ($postScriptFailed) {
-            # post_script failed AFTER task_mark_done moved the task JSON to done/.
-            # Preserve the worktree (so the operator can inspect artefacts and re-run
-            # the post_script manually) and move the task to needs-input/ with a
-            # pending_question. Deliberately skip worktree destruction and the
-            # consecutive_failures bump — this is operator-recoverable, not an agent
-            # failure.
-            Write-Status "post_script failed for $($task.name) — escalating to needs-input" -Type Warn
-            Write-ProcessActivity -Id $procId -ActivityType "error" -Message "post_script failed for $($task.name): $postScriptError — worktree preserved at $worktreePath"
+            # A post-task hook (post_script, clarification loop, outputs validation,
+            # or front-matter injection) failed AFTER task_mark_done moved the task
+            # JSON to done/. Preserve the worktree and move the task to needs-input/
+            # with a source-specific pending_question. Skip worktree destruction
+            # and consecutive_failures bump — operator-recoverable, not agent failure.
+            $sourceLabel = switch ($postScriptFailureSource) {
+                'clarification' { 'clarification loop' }
+                'outputs'       { 'outputs validation' }
+                'front_matter'  { 'front-matter injection' }
+                default         { 'post_script' }
+            }
+            Write-Status "$sourceLabel failed for $($task.name) — escalating to needs-input" -Type Warn
+            Write-ProcessActivity -Id $procId -ActivityType "error" -Message "$sourceLabel failed for $($task.name): $postScriptError — worktree preserved at $worktreePath"
 
             try {
                 $moved = Invoke-PostScriptFailureEscalation -Task $task -TasksBaseDir $tasksBaseDir `
-                    -PostScriptError $postScriptError -WorktreePath $worktreePath
+                    -PostScriptError $postScriptError -WorktreePath $worktreePath `
+                    -FailureSource $postScriptFailureSource
                 if ($moved) {
-                    Write-Status "Task moved to needs-input for manual post_script resolution" -Type Warn
+                    Write-Status "Task moved to needs-input for manual $sourceLabel resolution" -Type Warn
                 } else {
-                    Write-Status "Could not locate task in done/ during post_script escalation — state may be inconsistent" -Type Error
-                    Write-ProcessActivity -Id $procId -ActivityType "error" -Message "Post-script escalation could not find $($task.name) in done/"
+                    Write-Status "Could not locate task in done/ during $sourceLabel escalation — state may be inconsistent" -Type Error
+                    Write-ProcessActivity -Id $procId -ActivityType "error" -Message "$sourceLabel escalation could not find $($task.name) in done/"
                 }
             } catch {
-                Write-Status "Post-script escalation failed: $($_.Exception.Message)" -Type Error
-                Write-ProcessActivity -Id $procId -ActivityType "error" -Message "Post-script escalation failed for $($task.name): $($_.Exception.Message)"
+                Write-Status "$sourceLabel escalation failed: $($_.Exception.Message)" -Type Error
+                Write-ProcessActivity -Id $procId -ActivityType "error" -Message "$sourceLabel escalation failed for $($task.name): $($_.Exception.Message)"
             }
         } else {
             Write-ProcessActivity -Id $procId -ActivityType "text" -Message "Task failed: $($task.name)"

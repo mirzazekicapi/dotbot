@@ -9,7 +9,6 @@ let kickstartInProgress = false;
 let analyseInProgress = false;
 let workflowLaunchFiles = [];       // { name, size, content (base64) }
 let workflowLaunchName = null; // workflow name that triggered the modal
-let workflowLaunchUseTaskRunner = false; // when true, submit routes to task-runner engine
 let kickstartProcessId = null; // process_id returned from backend
 let kickstartPolling = null;   // interval ID for doc appearance detection
 let roadmapPolling = null;     // interval ID for task creation detection
@@ -439,64 +438,24 @@ function applyKickstartDialog(dialog, phases, mode) {
         if (dialog.show_files === false) {
             if (filesGroup) filesGroup.style.display = 'none';
         }
-        if (dialog.show_interview === false) {
-            if (interviewOption) interviewOption.style.display = 'none';
-        }
-        if (dialog.show_auto_workflow === false) {
-            if (awOption) awOption.style.display = 'none';
-        }
+        // The interview, auto-workflow, and per-phase skip controls were
+        // consumed by the kickstart engine. PR-3 deleted that engine; the
+        // task-runner doesn't yet honor these flags, so hiding the controls
+        // is the honest UI. Re-show in a future PR that wires the values
+        // into /api/workflows/{name}/run and adds backend support.
+        if (interviewOption) interviewOption.style.display = 'none';
+        if (awOption) awOption.style.display = 'none';
     }
 
-    // Render phase checklist. Build nodes via the DOM API (not innerHTML) so
-    // manifest-supplied names/ids cannot inject markup.
+    // Phase checklist hidden in PR-3 (kickstart engine deletion). Same
+    // rationale as the controls above — task-runner does not yet honor
+    // phase-skip flags, so the checkboxes are misleading. Clear any
+    // previously-rendered children and hide the wrapper. Re-enable once
+    // /api/workflows/{name}/run accepts them.
     const container = document.getElementById('workflow-launch-phases-container');
     const wrapper = document.getElementById('workflow-launch-phase-list');
-    if (container && wrapper) {
-        container.replaceChildren();
-        if (kickstartPhases.length > 0) {
-            wrapper.style.display = 'block';
-            kickstartPhases.forEach(p => {
-                const phaseItem = document.createElement('div');
-                const phaseName = p.name ?? '';
-                if (p.optional) {
-                    phaseItem.className = 'phase-item';
-
-                    const label = document.createElement('label');
-                    label.className = 'form-checkbox-label';
-
-                    const checkbox = document.createElement('input');
-                    checkbox.type = 'checkbox';
-                    checkbox.className = 'kickstart-phase-toggle';
-                    checkbox.checked = true;
-                    checkbox.dataset.phaseId = String(p.id ?? '');
-
-                    const text = document.createElement('span');
-                    text.className = 'form-checkbox-text';
-                    text.textContent = phaseName;
-
-                    label.appendChild(checkbox);
-                    label.appendChild(text);
-                    phaseItem.appendChild(label);
-                } else {
-                    phaseItem.className = 'phase-item phase-fixed';
-
-                    const bullet = document.createElement('span');
-                    bullet.className = 'phase-bullet';
-                    bullet.textContent = '\u203a';
-
-                    const text = document.createElement('span');
-                    text.className = 'form-checkbox-text';
-                    text.textContent = phaseName;
-
-                    phaseItem.appendChild(bullet);
-                    phaseItem.appendChild(text);
-                }
-                container.appendChild(phaseItem);
-            });
-        } else {
-            wrapper.style.display = 'none';
-        }
-    }
+    if (container) container.replaceChildren();
+    if (wrapper) wrapper.style.display = 'none';
 }
 
 /**
@@ -508,15 +467,25 @@ function applyKickstartDialog(dialog, phases, mode) {
  * loaded at page-init time (issue #235).
  *
  * @param {string} workflowName - The workflow name from the click context
- * @param {object} [options] - Optional flags (e.g. { useTaskRunner: true })
  */
-async function openWorkflowLaunchDialog(workflowName, options) {
+async function openWorkflowLaunchDialog(workflowName) {
+    // Guard: the legacy kickstart engine is gone, so launch always needs a
+    // concrete workflow name. The generic "KICKSTART PROJECT" CTA passes
+    // currentWorkflowName which can be null when no workflow is active or
+    // installed. Refuse to open the modal in that state — submitting it would
+    // error with "No workflow selected" and dead-end the user.
+    if (!workflowName) {
+        if (typeof showToast === 'function') {
+            showToast('No active workflow — install or activate a workflow before launching.', 'error');
+        }
+        return;
+    }
+
     const modal = document.getElementById('workflow-launch-modal');
     const textarea = document.getElementById('workflow-launch-prompt');
 
     // Store which workflow triggered the modal so the submit path uses the right one
-    workflowLaunchName = workflowName || null;
-    workflowLaunchUseTaskRunner = !!(options && options.useTaskRunner);
+    workflowLaunchName = workflowName;
 
     // Show the modal immediately so the click feels responsive — the form
     // config is fetched in parallel and applied (or reset) when it arrives.
@@ -604,7 +573,6 @@ function closeKickstartModal() {
         if (textarea) textarea.value = '';
         workflowLaunchFiles = [];
         workflowLaunchName = null;
-        workflowLaunchUseTaskRunner = false;
         workflowLaunchSubmitting = false;
         updateFileList();
         const interviewCheckbox = document.getElementById('workflow-launch-interview');
@@ -782,59 +750,26 @@ async function executeWorkflowLaunch(prompt, needsInterview, autoWorkflow, skipP
 
     const submitBtn = document.getElementById('workflow-launch-submit');
 
-    // When launched from a per-workflow Run button, route through the task-runner
-    // engine instead of the legacy kickstart engine
-    if (workflowLaunchUseTaskRunner && workflowLaunchName) {
-        try {
-            const response = await fetch(`${API_BASE}/api/workflows/${encodeURIComponent(workflowLaunchName)}/run`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    prompt: prompt,
-                    files: workflowLaunchFiles.map(f => ({
-                        name: f.name,
-                        content: f.content
-                    }))
-                })
-            });
-
-            const result = await response.json();
-
-            if (result.success) {
-                const wfName = workflowLaunchName;
-                closeKickstartModal();
-                showToast(`Workflow "${wfName}" started (${result.tasks_created} tasks)`, 'success', 8000);
-                if (typeof pollState === 'function') await pollState();
-            } else {
-                showToast('Failed to start workflow: ' + (result.error || 'Unknown error'), 'error');
-                if (submitBtn) {
-                    submitBtn.classList.remove('loading');
-                    submitBtn.disabled = false;
-                }
-                workflowLaunchSubmitting = false;
-            }
-        } catch (error) {
-            console.error('Error starting workflow via task-runner:', error);
-            showToast('Error starting workflow: ' + error.message, 'error');
-            if (submitBtn) {
-                submitBtn.classList.remove('loading');
-                submitBtn.disabled = false;
-            }
-            workflowLaunchSubmitting = false;
+    // The legacy kickstart engine is gone. All launches now route through
+    // the task-runner via /api/workflows/{name}/run. workflowLaunchName is
+    // set by openWorkflowLaunchDialog whenever the modal is opened from a workflow
+    // Run button; if it's missing we can't pick a workflow to run.
+    if (!workflowLaunchName) {
+        showToast('No workflow selected — open the modal from a workflow Run button.', 'error');
+        if (submitBtn) {
+            submitBtn.classList.remove('loading');
+            submitBtn.disabled = false;
         }
+        workflowLaunchSubmitting = false;
         return;
     }
 
     try {
-        const response = await fetch(`${API_BASE}/api/product/kickstart`, {
+        const response = await fetch(`${API_BASE}/api/workflows/${encodeURIComponent(workflowLaunchName)}/run`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
                 prompt: prompt,
-                needs_interview: needsInterview,
-                auto_workflow: autoWorkflow,
-                skip_phases: skipPhases,
-                workflow_name: workflowLaunchName || undefined,
                 files: workflowLaunchFiles.map(f => ({
                     name: f.name,
                     content: f.content
@@ -845,22 +780,23 @@ async function executeWorkflowLaunch(prompt, needsInterview, autoWorkflow, skipP
         const result = await response.json();
 
         if (result.success) {
-            closeKickstartModal();
+            const wfName = workflowLaunchName;
             kickstartInProgress = true;
             kickstartProcessId = result.process_id || null;
-
-            // Re-render CTAs to show in-progress state
-            if (typeof updateExecutiveSummary === 'function') updateExecutiveSummary();
-            const navContainer = document.getElementById('product-file-nav');
-            if (navContainer) {
-                delete navContainer.dataset.loaded;
-                if (typeof updateProductFileNav === 'function') updateProductFileNav();
-            }
-
-            showToast('Kickstart initiated! Claude is creating your product documents...', 'success', 8000);
-            startKickstartPolling();
+            closeKickstartModal();
+            // closeKickstartModal() clears workflowLaunchName, but the polling
+            // fallback (used when /run returns null process_id for multi-slot
+            // launches) needs it to match running task-runners by workflow_name.
+            // Restore it here so the fallback can find the launched workflow.
+            workflowLaunchName = wfName;
+            showToast(`Workflow "${wfName}" started (${result.tasks_created} tasks)`, 'success', 8000);
+            if (typeof pollState === 'function') await pollState();
+            // Start completion polling so the executive-summary CTA clears its
+            // in-progress latch when the background task-runner finishes.
+            // Without this the CTA stays stuck on "In Progress" indefinitely.
+            if (typeof startKickstartPolling === 'function') startKickstartPolling();
         } else {
-            showToast('Failed to kickstart: ' + (result.error || 'Unknown error'), 'error');
+            showToast('Failed to start workflow: ' + (result.error || 'Unknown error'), 'error');
             if (submitBtn) {
                 submitBtn.classList.remove('loading');
                 submitBtn.disabled = false;
@@ -868,8 +804,8 @@ async function executeWorkflowLaunch(prompt, needsInterview, autoWorkflow, skipP
             workflowLaunchSubmitting = false;
         }
     } catch (error) {
-        console.error('Error starting kickstart:', error);
-        showToast('Error starting kickstart: ' + error.message, 'error');
+        console.error('Error starting workflow:', error);
+        showToast('Error starting workflow: ' + error.message, 'error');
         if (submitBtn) {
             submitBtn.classList.remove('loading');
             submitBtn.disabled = false;
@@ -1106,16 +1042,37 @@ function startKickstartPolling() {
         }
 
         try {
-            // Check if the background process is still running
+            // Check if the background process is still running.
+            // When max_concurrent > 1, /api/workflows/{name}/run returns null
+            // process_id (multi-slot launches don't expose a single id), so
+            // fall back to matching by workflow name + task-runner type.
+            //
+            // If /api/processes fails or returns non-OK, treat the run state as
+            // unknown and skip finalize this tick. Otherwise a transient 5xx
+            // would let the latch clear after attempts>5 even when the runner
+            // is still active.
             let processStillRunning = false;
-            if (kickstartProcessId) {
-                const procResp = await fetch(`${API_BASE}/api/processes`);
-                if (procResp.ok) {
+            let processStateKnown = false;
+            const procResp = await fetch(`${API_BASE}/api/processes`);
+            if (procResp.ok) {
+                try {
                     const procData = await procResp.json();
                     const procs = procData.processes || [];
-                    processStillRunning = procs.some(
-                        p => p.id === kickstartProcessId && (p.status === 'running' || p.status === 'starting')
-                    );
+                    processStateKnown = true;
+                    if (kickstartProcessId) {
+                        processStillRunning = procs.some(
+                            p => p.id === kickstartProcessId && (p.status === 'running' || p.status === 'starting')
+                        );
+                    } else if (workflowLaunchName) {
+                        processStillRunning = procs.some(
+                            p => p.type === 'task-runner' &&
+                                 p.workflow_name === workflowLaunchName &&
+                                 (p.status === 'running' || p.status === 'starting')
+                        );
+                    }
+                } catch (parseErr) {
+                    // Invalid JSON — treat as unknown state, keep polling.
+                    processStateKnown = false;
                 }
             }
 
@@ -1132,8 +1089,9 @@ function startKickstartPolling() {
                 }
             }
 
-            // Process finished — finalize
-            if (!processStillRunning && (docsAppeared || attempts > 5)) {
+            // Process finished — finalize. Require a known state so a transient
+            // /api/processes failure doesn't trip the finalize branch.
+            if (processStateKnown && !processStillRunning && (docsAppeared || attempts > 5)) {
                 clearInterval(kickstartPolling);
                 kickstartPolling = null;
                 kickstartInProgress = false;
@@ -1287,32 +1245,6 @@ function startRoadmapPolling() {
             // Silently continue polling
         }
     }, 5000);
-}
-
-/**
- * Resume an incomplete kickstart from the next pending/failed phase (legacy)
- */
-async function resumeKickstart() {
-    try {
-        const response = await fetch(`${API_BASE}/api/product/kickstart/resume`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' }
-        });
-
-        const result = await response.json();
-
-        if (result.success) {
-            kickstartInProgress = true;
-            kickstartProcessId = result.process_id || null;
-            showToast(`Kickstart resuming from "${result.resume_from}"...`, 'success', 8000);
-            startKickstartPolling();
-        } else {
-            showToast('Failed to resume: ' + (result.error || 'Unknown error'), 'error');
-        }
-    } catch (error) {
-        console.error('Error resuming kickstart:', error);
-        showToast('Error resuming kickstart: ' + error.message, 'error');
-    }
 }
 
 /**

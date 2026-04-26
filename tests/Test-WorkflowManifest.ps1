@@ -1056,13 +1056,10 @@ Write-Host "  POST_SCRIPT WIRING" -ForegroundColor Cyan
 Write-Host "  ────────────────────────────────────────────" -ForegroundColor DarkGray
 
 $workflowProcessPath = Join-Path $repoRoot "workflows\default\systems\runtime\modules\ProcessTypes\Invoke-WorkflowProcess.ps1"
-$kickstartProcessPath = Join-Path $repoRoot "workflows\default\systems\runtime\modules\ProcessTypes\Invoke-KickstartProcess.ps1"
 
 Assert-PathExists -Name "Invoke-WorkflowProcess.ps1 exists" -Path $workflowProcessPath
-Assert-PathExists -Name "Invoke-KickstartProcess.ps1 exists" -Path $kickstartProcessPath
 
 $workflowSrc = Get-Content $workflowProcessPath -Raw
-$kickstartSrc = Get-Content $kickstartProcessPath -Raw
 
 Assert-True -Name "Invoke-WorkflowProcess dot-sources post-script-runner" `
     -Condition ($workflowSrc -match 'post-script-runner\.ps1')
@@ -1081,12 +1078,107 @@ Assert-True -Name "Invoke-WorkflowProcess has elseif (postScriptFailed) branch" 
 Assert-True -Name "Invoke-WorkflowProcess calls Invoke-PostScriptFailureEscalation" `
     -Condition ($workflowSrc -match 'Invoke-PostScriptFailureEscalation')
 
-Assert-True -Name "Invoke-KickstartProcess dot-sources post-script-runner" `
-    -Condition ($kickstartSrc -match 'post-script-runner\.ps1')
-Assert-True -Name "Invoke-KickstartProcess calls Invoke-PostScript" `
-    -Condition ($kickstartSrc -match 'Invoke-PostScript\b')
-Assert-True -Name "Invoke-KickstartProcess no longer has inline post_script path resolution" `
-    -Condition (-not ($kickstartSrc -match 'systems\\runtime\\\$rawPostScript'))
+Write-Host ""
+
+# ═══════════════════════════════════════════════════════════════════
+# TASK-RUNNER PARITY (PR-3a)
+# ═══════════════════════════════════════════════════════════════════
+# Regression guards for the four parity items the task-runner absorbed
+# from the kickstart engine: briefing-file injection, interview-summary
+# injection, outputs validation, front_matter_docs. If any of these
+# helpers gets removed, every shipped workflow.yaml silently regresses.
+
+Write-Host "  TASK-RUNNER PARITY (briefing, interview-summary, outputs, front-matter)" -ForegroundColor Cyan
+Write-Host "  ────────────────────────────────────────────" -ForegroundColor DarkGray
+
+Assert-True -Name "Invoke-WorkflowProcess defines Get-WorkflowPromptContext helper" `
+    -Condition ($workflowSrc -match 'function\s+Get-WorkflowPromptContext')
+Assert-True -Name "Invoke-WorkflowProcess injects context into analysis prompt" `
+    -Condition ($workflowSrc -match '\$promptContext\s*=\s*Get-WorkflowPromptContext')
+Assert-True -Name "Invoke-WorkflowProcess injects context into execution prompt" `
+    -Condition ($workflowSrc -match '\$execPromptContext\s*=\s*Get-WorkflowPromptContext')
+Assert-True -Name "Get-WorkflowPromptContext reads briefing/ directory" `
+    -Condition ($workflowSrc -match 'briefingDir\s*=\s*Join-Path\s+\$ProductDir\s+"briefing"')
+Assert-True -Name "Get-WorkflowPromptContext reads interview-summary.md" `
+    -Condition ($workflowSrc -match 'interviewSummaryPath\s*=\s*Join-Path\s+\$ProductDir\s+"interview-summary\.md"')
+
+Assert-True -Name "Invoke-WorkflowProcess defines Test-TaskOutput helper" `
+    -Condition ($workflowSrc -match 'function\s+Test-TaskOutput\b')
+Assert-True -Name "Invoke-WorkflowProcess defines Add-TaskFrontMatter helper" `
+    -Condition ($workflowSrc -match 'function\s+Add-TaskFrontMatter\b')
+
+# Both task paths (non-prompt + prompt) must call these helpers — count >= 2.
+# Match both direct (`Test-TaskOutput -Task`) and splatted (`Test-TaskOutput @args`)
+# call styles so a future refactor that swaps one for the other doesn't trip
+# this guard.
+$outputCallCount = ([regex]::Matches($workflowSrc, 'Test-TaskOutput\s+(-Task|@\w)')).Count
+Assert-True -Name "Test-TaskOutput called from both task paths (>=2 sites)" `
+    -Condition ($outputCallCount -ge 2)
+$frontMatterCallCount = ([regex]::Matches($workflowSrc, 'Add-TaskFrontMatter\s+(-Task|@\w)')).Count
+Assert-True -Name "Add-TaskFrontMatter called from both task paths (>=2 sites)" `
+    -Condition ($frontMatterCallCount -ge 2)
+# Baseline capture must precede each Test-TaskOutput call site so the
+# delta-vs-absolute logic actually runs (otherwise the kickstart-engine
+# absolute-count behaviour would silently re-emerge).
+$baselineCallCount = ([regex]::Matches($workflowSrc, 'Get-TaskOutputBaseline\s+-Task')).Count
+Assert-True -Name "Get-TaskOutputBaseline captured in both task paths (>=2 sites)" `
+    -Condition ($baselineCallCount -ge 2)
+
+Assert-True -Name "Test-TaskOutput supports legacy required_outputs alias" `
+    -Condition ($workflowSrc -match "'required_outputs'")
+Assert-True -Name "Test-TaskOutput supports outputs_dir + min_output_count" `
+    -Condition (($workflowSrc -match 'outputs_dir') -and ($workflowSrc -match 'min_output_count'))
+Assert-True -Name "Add-TaskFrontMatter sets generator to dotbot-task-runner" `
+    -Condition ($workflowSrc -match 'dotbot-task-runner')
+
+Write-Host ""
+
+# ═══════════════════════════════════════════════════════════════════
+# TASK-RUNNER INTERVIEW TASK TYPE (PR-3b, #220)
+# ═══════════════════════════════════════════════════════════════════
+# The task-runner now handles type:interview tasks by wrapping
+# Invoke-InterviewLoop. Regression guard against the dispatch case
+# being removed once the kickstart engine is deleted.
+
+Write-Host "  TASK-RUNNER INTERVIEW TASK TYPE" -ForegroundColor Cyan
+Write-Host "  ────────────────────────────────────────────" -ForegroundColor DarkGray
+
+Assert-True -Name "Invoke-WorkflowProcess dot-sources InterviewLoop.ps1" `
+    -Condition ($workflowSrc -match 'InterviewLoop\.ps1')
+Assert-True -Name "Invoke-WorkflowProcess has 'interview' case in task-type switch" `
+    -Condition ($workflowSrc -match "'interview'\s*\{")
+Assert-True -Name "Invoke-WorkflowProcess interview case calls Invoke-InterviewLoop" `
+    -Condition ($workflowSrc -match 'Invoke-InterviewLoop')
+Assert-True -Name "Interview case resolves user prompt from workflow-launch-prompt.txt" `
+    -Condition ($workflowSrc -match 'workflow-launch-prompt\.txt')
+
+Write-Host ""
+
+# ═══════════════════════════════════════════════════════════════════
+# TASK-RUNNER CLARIFICATION-QUESTIONS HITL LOOP (PR-3c, #221)
+# ═══════════════════════════════════════════════════════════════════
+# The task-runner now detects clarification-questions.json after a prompt
+# task and pauses the process for human input, then runs adjust-after-answers.
+
+Write-Host "  TASK-RUNNER CLARIFICATION HITL LOOP" -ForegroundColor Cyan
+Write-Host "  ────────────────────────────────────────────" -ForegroundColor DarkGray
+
+Assert-True -Name "Invoke-WorkflowProcess defines Invoke-TaskClarificationLoopIfPresent" `
+    -Condition ($workflowSrc -match 'function\s+Invoke-TaskClarificationLoopIfPresent\b')
+Assert-True -Name "Clarification loop checks clarification-questions.json" `
+    -Condition ($workflowSrc -match 'clarification-questions\.json')
+Assert-True -Name "Clarification loop polls for clarification-answers.json" `
+    -Condition ($workflowSrc -match 'clarification-answers\.json')
+Assert-True -Name "Clarification loop sets process status to needs-input" `
+    -Condition ($workflowSrc -match "ProcessData\.status\s*=\s*'needs-input'")
+Assert-True -Name "Clarification loop runs adjust-after-answers prompt" `
+    -Condition ($workflowSrc -match 'adjust-after-answers\.md')
+Assert-True -Name "Clarification loop appends to interview-summary.md" `
+    -Condition ($workflowSrc -match 'interview-summary\.md.*Clarification Log' -or $workflowSrc -match 'Clarification Log')
+Assert-True -Name "Clarification loop is wired into prompt-task path" `
+    -Condition ($workflowSrc -match 'Invoke-TaskClarificationLoopIfPresent\s+-Task')
+Assert-True -Name "Clarification loop respects stop signal" `
+    -Condition ($workflowSrc -match 'Test-ProcessStopSignal[\s\S]{0,400}clarification')
 
 Write-Host ""
 
@@ -1130,14 +1222,9 @@ try {
 Assert-True -Name "Fix#1: Test-ManifestCondition visible after nested dot-source of workflow-manifest.ps1" `
     -Condition $nestedProbe
 
-# ── Fix #2: Invoke-KickstartProcess.ps1 must auto-push phase commits on main/
-# master so the 02-git-pushed.ps1 verify hook does not block task_mark_done.
-Assert-True -Name "Fix#2: Invoke-KickstartProcess auto-pushes on main/master (excludes only task/ branches)" `
-    -Condition ($kickstartSrc -match "currentBranch\s+-notmatch\s+'\^task/'")
-Assert-True -Name "Fix#2: Invoke-KickstartProcess no longer excludes main/master from auto-push" `
-    -Condition (-not ($kickstartSrc -match "'\^\(task/\|master\$\|main\$\)'"))
-Assert-True -Name "Fix#2: auto_push_phase_commits setting is still honoured" `
-    -Condition ($kickstartSrc -match "auto_push_phase_commits")
+# Fix #2 (kickstart engine auto-push) was removed in PR-3 along with the
+# kickstart engine. Task-runner's squash-merge in Complete-TaskWorktree handles
+# pushing for completed tasks; phase-level auto-push no longer applies.
 
 # ── Fix #3: kickstart prompt templates must instruct agents to retry the same
 # select: query rather than broadening when the MCP server is still warming up.

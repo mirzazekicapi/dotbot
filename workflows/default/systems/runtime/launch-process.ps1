@@ -1,49 +1,63 @@
 <#
 .SYNOPSIS
-Unified process launcher replacing both loop scripts and ad-hoc Start-Job calls.
+Unified process launcher. Tracks every Claude invocation as a process and
+dispatches to the right engine based on Type.
 
 .DESCRIPTION
-Every Claude invocation is a tracked process. Creates a process registry entry,
-builds the appropriate prompt, invokes Claude, and manages the lifecycle.
+Creates a process registry entry, builds the appropriate prompt, invokes
+Claude, and manages the lifecycle. After PR-3 the only execution engine is
+the task-runner; legacy kickstart/analysis/execution types are gone.
 
 .PARAMETER Type
-Process type: analysis, execution, kickstart, planning, commit, task-creation
+Process type. One of: task-runner, planning, commit, task-creation.
+- task-runner: continuous analyse-then-execute loop over tasks (used for
+  workflow runs and pending-tasks runs).
+- planning, commit, task-creation: single-prompt processes.
 
 .PARAMETER TaskId
-Optional: specific task ID (for analysis/execution types)
+Optional: pin the task-runner to a specific task ID (8-char hex).
 
 .PARAMETER Prompt
-Optional: custom prompt text (for kickstart/planning/commit/task-creation)
+Optional: custom prompt text for the planning / commit / task-creation
+single-prompt processes.
 
 .PARAMETER Continue
-If set, continue to next task after completion (analysis/execution only)
+If set, the task-runner keeps picking up tasks until none remain. Without
+it, the runner exits after one task.
 
 .PARAMETER Model
-Claude model to use (default: Opus)
+Claude model alias (default resolved from settings.execution.model).
 
 .PARAMETER ShowDebug
-Show raw JSON events
+Show raw JSON stream events.
 
 .PARAMETER ShowVerbose
-Show detailed tool results
+Show detailed tool results.
 
 .PARAMETER MaxTasks
-Max tasks to process with -Continue (0 = unlimited)
+Max tasks to process with -Continue (0 = unlimited).
 
 .PARAMETER Description
-Human-readable description for UI display
+Human-readable description for UI display.
 
 .PARAMETER ProcessId
-Optional: resume an existing process by ID (skips creation)
+Optional: resume an existing process by ID (skips creation).
 
 .PARAMETER NoWait
-If set with -Continue, exit when no tasks available instead of waiting.
-Used by kickstart pipeline to prevent workflow children from blocking phase progression.
+If set with -Continue, exit when no tasks are available instead of waiting.
+Used so wrapper scripts can chain multiple task-runner invocations without
+the inner one blocking on an empty queue.
+
+.PARAMETER Workflow
+Optional: filter the task queue to a single workflow name.
+
+.PARAMETER Slot
+Concurrent slot index. -1 = single instance (default); 0..N = multi-slot.
 #>
 
 param(
     [Parameter(Mandatory)]
-    [ValidateSet('analysis', 'execution', 'task-runner', 'kickstart', 'analyse', 'planning', 'commit', 'task-creation')]
+    [ValidateSet('task-runner', 'planning', 'commit', 'task-creation')]
     [string]$Type,
 
     [string]$TaskId,
@@ -55,11 +69,7 @@ param(
     [int]$MaxTasks = 0,
     [string]$Description,
     [string]$ProcessId,
-    [switch]$NeedsInterview,
-    [switch]$AutoWorkflow,
     [switch]$NoWait,
-    [string]$FromPhase,
-    [string]$SkipPhases,  # comma-separated phase IDs to skip
     [string]$Workflow,    # filter task queue to this workflow name
     [ValidateRange(-1, 16)]
     [int]$Slot = -1       # concurrent slot index (-1 = single instance, 0..N = multi-slot)
@@ -67,18 +77,11 @@ param(
 
 Set-StrictMode -Version 1.0
 
-# Parse skip phases
-$skipPhaseIds = if ($SkipPhases) { $SkipPhases -split ',' } else { @() }
-
 # --- Configuration ---
 
 # Determine phase for activity logging
 $phaseMap = @{
-    'analysis'      = 'analysis'
-    'execution'     = 'execution'
     'task-runner'   = 'task-runner'
-    'kickstart'     = 'execution'
-    'analyse'       = 'execution'
     'planning'      = 'execution'
     'commit'        = 'execution'
     'task-creation' = 'execution'
@@ -129,7 +132,7 @@ if (-not $env:DOTBOT_VERSION) {
 . "$PSScriptRoot\modules\rate-limit-handler.ps1"
 
 # Import task-based modules for analysis/execution/workflow types
-if ($Type -in @('analysis', 'execution', 'task-runner')) {
+if ($Type -eq 'task-runner') {
     Import-Module "$PSScriptRoot\..\mcp\modules\TaskIndexCache.psm1" -Force
     Import-Module "$PSScriptRoot\..\mcp\modules\SessionTracking.psm1" -Force
     . "$PSScriptRoot\modules\cleanup.ps1"
@@ -208,11 +211,7 @@ if (-not $permissionMode -and $providerConfig.default_permission_mode) {
 
 # Resolve model (parameter > settings > provider default)
 if (-not $Model) {
-    $Model = switch ($Type) {
-        { $_ -in @('analysis', 'kickstart') } { if ($settings.analysis?.model) { $settings.analysis.model } else { $providerConfig.default_model } }
-        'task-runner' { if ($settings.execution?.model) { $settings.execution.model } else { $providerConfig.default_model } }
-        default    { if ($settings.execution?.model) { $settings.execution.model } else { $providerConfig.default_model } }
-    }
+    $Model = if ($settings.execution?.model) { $settings.execution.model } else { $providerConfig.default_model }
 }
 
 try {
@@ -246,8 +245,8 @@ Initialize-ProcessRegistry `
     -ProviderConfig $providerConfig `
     -BotRoot $botRoot
 
-# --- Interview Loop (dot-sourced for kickstart) ---
-. "$PSScriptRoot\modules\InterviewLoop.ps1"
+# InterviewLoop is dot-sourced from Invoke-WorkflowProcess.ps1 (the only consumer
+# now that the kickstart engine is gone), so it does not need to be loaded here.
 
 # Early-initialize variables used by the crash trap (must be set before trap registration)
 $procId = if ($ProcessId) { $ProcessId } else { New-ProcessId }
@@ -322,7 +321,6 @@ $processData = @{
     workflow_name   = if ($Workflow) { $Workflow } else { $null }
     description     = $Description
     phases          = @()
-    skip_phases     = $skipPhaseIds
 }
 
 Write-ProcessFile -Id $procId -Data $processData
@@ -353,37 +351,8 @@ Write-ProcessActivity -Id $procId -ActivityType "text" -Message "Preflight OK: $
 
 
 
-# --- Task-based types: analysis/execution ---
-if ($Type -in @('analysis', 'execution', 'analyse')) {
-    $ctx = @{
-        Type           = $Type
-        BotRoot        = $botRoot
-        ProcId         = $procId
-        ProcessData    = $processData
-        ModelName      = $claudeModelName
-        SessionId      = $claudeSessionId
-        ShowDebug      = [bool]$ShowDebug
-        ShowVerbose    = [bool]$ShowVerbose
-        ProjectRoot    = $projectRoot
-        ProcessesDir   = $processesDir
-        ControlDir     = $controlDir
-        Settings       = $settings
-        Model          = $Model
-        BatchSessionId = $sessionId
-        InstanceId     = $instanceId
-        Continue       = [bool]$Continue
-        NoWait         = [bool]$NoWait
-        MaxTasks       = $MaxTasks
-        TaskId         = $TaskId
-        PermissionMode = $permissionMode
-    }
-    if ($Type -in @('analysis', 'analyse')) {
-        & "$PSScriptRoot\modules\ProcessTypes\Invoke-AnalysisProcess.ps1" -Context $ctx
-    } else {
-        & "$PSScriptRoot\modules\ProcessTypes\Invoke-ExecutionProcess.ps1" -Context $ctx
-    }
-} # --- Task Runner type: unified analyse-then-execute per task ---
-elseif ($Type -eq 'task-runner') {
+# --- Task Runner type: unified analyse-then-execute per task ---
+if ($Type -eq 'task-runner') {
     $ctx = @{
         Type           = $Type
         BotRoot        = $botRoot
@@ -409,29 +378,6 @@ elseif ($Type -eq 'task-runner') {
         PermissionMode = $permissionMode
     }
     & "$PSScriptRoot\modules\ProcessTypes\Invoke-WorkflowProcess.ps1" -Context $ctx
-} # --- Kickstart type: three-phase product setup ---
-elseif ($Type -eq 'kickstart') {
-    $ctx = @{
-        Type           = $Type
-        BotRoot        = $botRoot
-        ProcId         = $procId
-        ProcessData    = $processData
-        ModelName      = $claudeModelName
-        SessionId      = $claudeSessionId
-        Prompt         = $Prompt
-        Description    = $Description
-        ShowDebug      = [bool]$ShowDebug
-        ShowVerbose    = [bool]$ShowVerbose
-        ProjectRoot    = $projectRoot
-        ControlDir     = $controlDir
-        Settings       = $settings
-        Model          = $Model
-        NeedsInterview = [bool]$NeedsInterview
-        FromPhase      = $FromPhase
-        SkipPhaseIds   = $skipPhaseIds
-        PermissionMode = $permissionMode
-    }
-    & "$PSScriptRoot\modules\ProcessTypes\Invoke-KickstartProcess.ps1" -Context $ctx
 } # --- Prompt-based types: planning, commit, task-creation ---
 elseif ($Type -in @('planning', 'commit', 'task-creation')) {
     $ctx = @{

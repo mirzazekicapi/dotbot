@@ -16,7 +16,9 @@ function Invoke-InterviewLoop {
         [string]$UserPrompt,
         [switch]$ShowDebugJson,
         [switch]$ShowVerboseOutput,
-        [string]$PermissionMode
+        [string]$PermissionMode,
+        [string]$Generator = 'dotbot-kickstart',
+        [string]$TaskId
     )
 
     $processData = $ProcessData
@@ -103,11 +105,12 @@ Review all context above. Decide whether to write clarification-questions.json (
             # Add YAML front matter to interview summary
             $meta = @{
                 generated_at = (Get-Date).ToUniversalTime().ToString("o")
-                model = $interviewModel
-                process_id = $ProcessId
-                phase = "interview"
-                generator = "dotbot-kickstart"
+                model        = $interviewModel
+                process_id   = $ProcessId
+                phase        = "interview"
+                generator    = $Generator
             }
+            if ($TaskId) { $meta['task'] = "task-$TaskId" }
             Add-YamlFrontMatter -FilePath $summaryPath -Metadata $meta
 
             # Clean up any leftover question/answer files now that the interview is fully analysed
@@ -146,8 +149,16 @@ Review all context above. Decide whether to write clarification-questions.json (
                     Import-Module $notifModule -Force
                     $interviewNotifSettings = Get-NotificationSettings -BotRoot $BotRoot
                     if ($interviewNotifSettings.enabled) {
+                        # Notification label reflects the calling engine: kickstart for the
+                        # legacy synthetic Phase-0 interview, task-runner for type:interview tasks.
+                        $notifNamePrefix = if ($Generator -eq 'dotbot-task-runner') {
+                            if ($TaskId) { "Interview (task $TaskId)" } else { "Interview" }
+                        } else {
+                            "Kickstart Interview"
+                        }
+                        $notifId = if ($TaskId) { "$ProcessId-interview-$TaskId" } else { "$ProcessId-interview" }
                         foreach ($q in $questions) {
-                            $fakeTask = @{ id = "$ProcessId-interview"; name = "Kickstart Interview Round $interviewRound" }
+                            $fakeTask = @{ id = $notifId; name = "$notifNamePrefix Round $interviewRound" }
                             $pendingQ = @{
                                 id = "$($q.id)-r$interviewRound"
                                 question = $q.question
