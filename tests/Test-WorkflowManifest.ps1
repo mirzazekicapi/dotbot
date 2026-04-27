@@ -1349,6 +1349,76 @@ Assert-True -Name "Fix#E: 03a category_hint row forbids inventing new categories
 Assert-True -Name "Fix#E: 03a category_hint row cites task_create_bulk validator" `
     -Condition ($planTaskGroupsSrc -match '(?s)`category_hint`.*?`task_create_bulk`\s+validator')
 
+# ── Batch 3, Fix F: 03b-expand-task-group.md must enforce the per-task
+# quality bar, leave group sizing to 03a (Fix#H owns the fan-out cap),
+# allow only the closed category enum, align dependency naming with what
+# the task_create_bulk validator actually accepts, and treat an empty
+# {{GROUP_APPLICABLE_DECISIONS}} via a decision_list fallback rather than
+# silent zero-ADR expansion.
+Assert-True -Name "Fix#F: 03b leads with per-task quality bar (logical, context-friendly, executable, testable)" `
+    -Condition ($expandTaskGroupSrc -match 'logical,\s+context-friendly,\s+executable,\s+testable\s+unit')
+Assert-True -Name "Fix#F: 03b states group sizing is 03a's responsibility" `
+    -Condition ($expandTaskGroupSrc -match "Group\s+sizing\s+is\s+03a's\s+responsibility")
+Assert-True -Name "Fix#F: 03b does not police group size or emit group_size_warning" `
+    -Condition (-not ($expandTaskGroupSrc -match 'group_size_warning'))
+Assert-True -Name "Fix#F: 03b lists all six valid category enum values" `
+    -Condition (($expandTaskGroupSrc -match '`infrastructure`') -and `
+                ($expandTaskGroupSrc -match '`core`') -and `
+                ($expandTaskGroupSrc -match '`feature`') -and `
+                ($expandTaskGroupSrc -match '`enhancement`') -and `
+                ($expandTaskGroupSrc -match '`ui-ux`') -and `
+                ($expandTaskGroupSrc -match '`bugfix`'))
+Assert-True -Name "Fix#F: 03b forbids inventing categories like testing or frontend" `
+    -Condition ($expandTaskGroupSrc -match 'Do\s+\*\*NOT\*\*\s+invent\s+categories.*?`testing`')
+Assert-True -Name "Fix#F: 03b cites task_create_bulk validator for category enum" `
+    -Condition ($expandTaskGroupSrc -match '(?s)closed\s+enum.*?task_create_bulk.*?validator')
+Assert-True -Name "Fix#F: 03b documents the four resolution strategies the validator accepts" `
+    -Condition (($expandTaskGroupSrc -match 'exact\s+`id`\s+match') -and `
+                ($expandTaskGroupSrc -match 'exact\s+`name`\s+match') -and `
+                ($expandTaskGroupSrc -match 'slug\s+match') -and `
+                ($expandTaskGroupSrc -match 'fuzzy\s+slug\s+substring\s+match'))
+Assert-True -Name "Fix#F: 03b recommends id for cross-group dependencies" `
+    -Condition ($expandTaskGroupSrc -match '(?s)Cross-group\s+dependencies.*?task\s+\*\*`id`\*\*')
+Assert-True -Name "Fix#F: 03b recommends exact name for intra-batch dependencies" `
+    -Condition ($expandTaskGroupSrc -match '(?s)Intra-batch\s+dependencies.*?exact\s+`name`')
+Assert-True -Name "Fix#F: 03b marks slug/fuzzy as fallback, not contract" `
+    -Condition ($expandTaskGroupSrc -match 'fallbacks?,\s+not\s+a\s+contract')
+Assert-True -Name "Fix#F: 03b has decision_list fallback when GROUP_APPLICABLE_DECISIONS has no dec- IDs" `
+    -Condition ($expandTaskGroupSrc -match '(?s)contains\s+no\s+`dec-`\s+IDs.*?decision_list')
+
+# ── Batch 3, Fix G: expand-task-groups.ps1 must substitute
+# {{GROUP_APPLICABLE_DECISIONS}} from each group's applicable_decisions field
+# so the prompt actually receives the ADR ID list 03a recorded.
+$expandScriptPath = Join-Path $repoRoot "core" "runtime" "expand-task-groups.ps1"
+Assert-PathExists -Name "Fix#G: expand-task-groups.ps1 exists" -Path $expandScriptPath
+$expandScriptSrc = Get-Content $expandScriptPath -Raw
+Assert-True -Name "Fix#G: expand-task-groups.ps1 substitutes GROUP_APPLICABLE_DECISIONS" `
+    -Condition ($expandScriptSrc -match "-replace\s+'[^']*GROUP_APPLICABLE_DECISIONS")
+Assert-True -Name "Fix#G: expand-task-groups.ps1 reads group.applicable_decisions" `
+    -Condition ($expandScriptSrc -match '\$group\.applicable_decisions')
+Assert-True -Name "Fix#G: expand-task-groups.ps1 emits '(none)' when applicable_decisions is empty" `
+    -Condition ($expandScriptSrc -match '"\(none\)"')
+
+# ── Batch 3, Fix H: 03a-plan-task-groups.md owns group sizing — must validate
+# expansion fan-out and split groups whose scope would expand to 12+ tasks
+# at 03b's per-task quality bar, before writing task-groups.json.
+Assert-True -Name "Fix#H: 03a has Step 2.5 Validate Expansion Fan-Out" `
+    -Condition ($planTaskGroupsSrc -match '###\s+Step\s+2\.5:\s+Validate\s+Expansion\s+Fan-Out')
+Assert-True -Name "Fix#H: 03a tells the planner group sizing is its responsibility" `
+    -Condition ($planTaskGroupsSrc -match 'Group\s+sizing\s+is\s+your\s+responsibility,\s+not\s+03b')
+Assert-True -Name "Fix#H: 03a forces a split when a group would expand to 12+ tasks" `
+    -Condition ($planTaskGroupsSrc -match '(?s)12\s+or\s+more\s+well-sized\s+tasks.*?split\s+it\s+now')
+Assert-True -Name "Fix#H: 03a tightens estimated_task_count guidance to 3-10 healthy range" `
+    -Condition ($planTaskGroupsSrc -match '(?s)`estimated_task_count`.*?(?:3-10|range\s+is\s+\*\*3-10\*\*)')
+Assert-True -Name "Fix#H: 03a anti-patterns forbid kitchen-sink groups" `
+    -Condition ($planTaskGroupsSrc -match '[Kk]itchen-sink\s+groups')
+Assert-True -Name "Fix#H: 03a Step 2.5 surfaces the fan-out heuristic table" `
+    -Condition ($planTaskGroupsSrc -match '(?s)Step\s+2\.5.*?Scope\s+shape.*?per-task\s+expansion')
+Assert-True -Name "Fix#H: 03a example task-groups.json includes applicable_decisions" `
+    -Condition ($planTaskGroupsSrc -match '"applicable_decisions":\s*\[')
+Assert-True -Name "Fix#H: 03a Field Reference declares applicable_decisions as a required field" `
+    -Condition ($planTaskGroupsSrc -match '\|\s+`applicable_decisions`\s+\|\s+Yes\s+\|')
+
 Write-Host ""
 
 # ═══════════════════════════════════════════════════════════════════
