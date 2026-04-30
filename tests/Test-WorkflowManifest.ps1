@@ -29,7 +29,7 @@ Write-Host ""
 Reset-TestResults
 
 # Dot-source the module under test
-. (Join-Path $repoRoot "workflows\default\systems\runtime\modules\workflow-manifest.ps1")
+. (Join-Path $repoRoot "core/runtime/modules/workflow-manifest.ps1")
 
 # Check prerequisite: powershell-yaml needed for Read-WorkflowManifest
 $yamlModule = Get-Module -ListAvailable powershell-yaml -ErrorAction SilentlyContinue
@@ -162,20 +162,18 @@ Write-Host "  ──────────────────────
 if (-not $hasYaml) {
     Write-TestResult -Name "Read-WorkflowManifest tests" -Status Skip -Message "powershell-yaml not installed"
 } else {
-    # Default workflow
-    $defaultManifest = Read-WorkflowManifest -WorkflowDir (Join-Path $repoRoot "workflows\default")
-    Assert-Equal -Name "Default manifest name" -Expected "default" -Actual $defaultManifest.name
-    Assert-Equal -Name "Default manifest version" -Expected "3.5.0" -Actual $defaultManifest.version
-    Assert-True -Name "Default manifest has tasks" `
-        -Condition ($defaultManifest.tasks -and $defaultManifest.tasks.Count -gt 0) `
-        -Message "Expected tasks array, got: $($defaultManifest.tasks.Count)"
-    Assert-True -Name "Default manifest has form.modes" `
-        -Condition ($null -ne $defaultManifest.form -and $null -ne $defaultManifest.form.modes -and $defaultManifest.form.modes.Count -gt 0) `
+    # start-from-prompt workflow (canonical default after PR-5)
+    $promptManifest = Read-WorkflowManifest -WorkflowDir (Join-Path $repoRoot "workflows\start-from-prompt")
+    Assert-Equal -Name "start-from-prompt manifest name" -Expected "start-from-prompt" -Actual $promptManifest.name
+    Assert-True -Name "start-from-prompt manifest has tasks" `
+        -Condition ($promptManifest.tasks -and $promptManifest.tasks.Count -gt 0) `
+        -Message "Expected tasks array, got: $($promptManifest.tasks.Count)"
+    Assert-True -Name "start-from-prompt manifest has form.modes" `
+        -Condition ($null -ne $promptManifest.form -and $null -ne $promptManifest.form.modes -and $promptManifest.form.modes.Count -gt 0) `
         -Message "Expected form.modes array"
 
-    # Verify form.modes have required shape
-    $newProjectMode = $defaultManifest.form.modes | Where-Object { $_.id -eq 'new_project' }
-    Assert-True -Name "Default form.modes has new_project" `
+    $newProjectMode = $promptManifest.form.modes | Where-Object { $_.id -eq 'new_project' }
+    Assert-True -Name "start-from-prompt form.modes has new_project" `
         -Condition ($null -ne $newProjectMode) -Message "new_project mode not found"
     if ($newProjectMode) {
         Assert-True -Name "new_project mode has condition array" `
@@ -187,29 +185,28 @@ if (-not $hasYaml) {
             -Condition (-not [string]::IsNullOrEmpty($newProjectMode.button)) -Message "Missing button"
     }
 
-    $hasDocsMode = $defaultManifest.form.modes | Where-Object { $_.id -eq 'has_docs' }
-    Assert-True -Name "Default form.modes has has_docs (hidden)" `
+    $hasDocsMode = $promptManifest.form.modes | Where-Object { $_.id -eq 'has_docs' }
+    Assert-True -Name "start-from-prompt form.modes has has_docs (hidden)" `
         -Condition ($null -ne $hasDocsMode -and $hasDocsMode.hidden -eq $true) -Message "has_docs mode should be hidden"
 
-    # Default manifest task dependency graph validation
-    $taskNames = @($defaultManifest.tasks | ForEach-Object { $_.name })
+    $taskNames = @($promptManifest.tasks | ForEach-Object { $_.name })
     $uniqueNames = @($taskNames | Sort-Object -Unique)
-    Assert-Equal -Name "Default manifest task names are unique" `
+    Assert-Equal -Name "start-from-prompt manifest task names are unique" `
         -Expected $taskNames.Count -Actual $uniqueNames.Count
 
-    foreach ($task in $defaultManifest.tasks) {
+    foreach ($task in $promptManifest.tasks) {
         if ($task.depends_on) {
             foreach ($dep in @($task.depends_on)) {
-                Assert-True -Name "Default task '$($task.name)' dep '$dep' exists" `
+                Assert-True -Name "start-from-prompt task '$($task.name)' dep '$dep' exists" `
                     -Condition ($dep -in $taskNames) `
                     -Message "Dependency '$dep' not found in task names"
             }
         }
     }
 
-    # Kickstart-via-jira workflow
-    $jiraManifest = Read-WorkflowManifest -WorkflowDir (Join-Path $repoRoot "workflows\kickstart-via-jira")
-    Assert-Equal -Name "Jira manifest name" -Expected "kickstart-via-jira" -Actual $jiraManifest.name
+    # start-from-jira workflow
+    $jiraManifest = Read-WorkflowManifest -WorkflowDir (Join-Path $repoRoot "workflows\start-from-jira")
+    Assert-Equal -Name "Jira manifest name" -Expected "start-from-jira" -Actual $jiraManifest.name
     Assert-True -Name "Jira manifest has requires.env_vars" `
         -Condition ($jiraManifest.requires -and $jiraManifest.requires.env_vars -and @($jiraManifest.requires.env_vars).Count -gt 0) `
         -Message "Expected env_vars in requires"
@@ -238,9 +235,9 @@ if (-not $hasYaml) {
         }
     }
 
-    # Kickstart-via-pr workflow
-    $prManifest = Read-WorkflowManifest -WorkflowDir (Join-Path $repoRoot "workflows\kickstart-via-pr")
-    Assert-Equal -Name "PR manifest name" -Expected "kickstart-via-pr" -Actual $prManifest.name
+    # start-from-pr workflow
+    $prManifest = Read-WorkflowManifest -WorkflowDir (Join-Path $repoRoot "workflows\start-from-pr")
+    Assert-Equal -Name "PR manifest name" -Expected "start-from-pr" -Actual $prManifest.name
     Assert-True -Name "PR manifest has tasks" `
         -Condition ($prManifest.tasks -and $prManifest.tasks.Count -ge 3) `
         -Message "Expected at least 3 tasks, got: $($prManifest.tasks.Count)"
@@ -248,9 +245,9 @@ if (-not $hasYaml) {
         -Condition ($prManifest.requires -and $prManifest.requires.cli_tools -and @($prManifest.requires.cli_tools).Count -gt 0) `
         -Message "Expected cli_tools in requires"
 
-    # Kickstart-via-repo workflow
-    $repoManifest = Read-WorkflowManifest -WorkflowDir (Join-Path $repoRoot "workflows\kickstart-via-repo")
-    Assert-Equal -Name "Repo manifest name" -Expected "kickstart-via-repo" -Actual $repoManifest.name
+    # start-from-repo workflow
+    $repoManifest = Read-WorkflowManifest -WorkflowDir (Join-Path $repoRoot "workflows\start-from-repo")
+    Assert-Equal -Name "Repo manifest name" -Expected "start-from-repo" -Actual $repoManifest.name
     Assert-True -Name "Repo manifest has tasks" `
         -Condition ($repoManifest.tasks -and $repoManifest.tasks.Count -ge 8) `
         -Message "Expected at least 8 tasks, got: $($repoManifest.tasks.Count)"
@@ -412,14 +409,14 @@ try {
     $taskDef = @{
         name = "Fetch Jira Context"
         type = "prompt"
-        workflow = "00-kickstart-interview.md"
+        workflow = "00-interview.md"
         priority = 1
         outputs = @("briefing/jira-context.md")
         condition = ".bot/workspace/product/research-repos.md"
         on_failure = "halt"
     }
 
-    $result = New-WorkflowTask -ProjectBotDir $taskBotDir -WorkflowName "kickstart-via-jira" -TaskDef $taskDef
+    $result = New-WorkflowTask -ProjectBotDir $taskBotDir -WorkflowName "start-from-jira" -TaskDef $taskDef
     Assert-True -Name "New-WorkflowTask returns id" `
         -Condition (-not [string]::IsNullOrEmpty($result.id)) -Message "No id returned"
     Assert-Equal -Name "New-WorkflowTask returns name" -Expected "Fetch Jira Context" -Actual $result.name
@@ -433,7 +430,7 @@ try {
         $taskJson = Get-Content $taskFile -Raw | ConvertFrom-Json
         Assert-Equal -Name "Task JSON has correct name" -Expected "Fetch Jira Context" -Actual $taskJson.name
         Assert-Equal -Name "Task JSON has correct type" -Expected "prompt" -Actual $taskJson.type
-        Assert-Equal -Name "Task JSON has correct workflow" -Expected "kickstart-via-jira" -Actual $taskJson.workflow
+        Assert-Equal -Name "Task JSON has correct workflow" -Expected "start-from-jira" -Actual $taskJson.workflow
         Assert-Equal -Name "Task JSON has correct priority" -Expected 1 -Actual $taskJson.priority
         Assert-Equal -Name "Task JSON has correct status" -Expected "todo" -Actual $taskJson.status
         Assert-Equal -Name "Task JSON has on_failure" -Expected "halt" -Actual $taskJson.on_failure
@@ -452,7 +449,7 @@ try {
         priority = 6
     }
 
-    $barrierResult = New-WorkflowTask -ProjectBotDir $taskBotDir -WorkflowName "kickstart-via-jira" -TaskDef $barrierDef
+    $barrierResult = New-WorkflowTask -ProjectBotDir $taskBotDir -WorkflowName "start-from-jira" -TaskDef $barrierDef
     $barrierFile = Join-Path $taskBotDir "workspace\tasks\todo" $barrierResult.file
     if (Test-Path $barrierFile) {
         $barrierJson = Get-Content $barrierFile -Raw | ConvertFrom-Json
@@ -555,7 +552,7 @@ try {
     $priorityZeroDef = @{
         name = "Highest Priority Task"
         type = "prompt"
-        workflow = "00-kickstart.md"
+        workflow = "00-launch.md"
         priority = 0
     }
     $pzResult = New-WorkflowTask -ProjectBotDir $taskBotDir -WorkflowName "default" -TaskDef $priorityZeroDef
@@ -724,7 +721,7 @@ Write-Host "  ──────────────────────
 if (-not $hasYaml) {
     Write-TestResult -Name "Workflow YAML schema tests" -Status Skip -Message "powershell-yaml not installed"
 } else {
-    $workflowProfiles = @("default", "kickstart-via-jira", "kickstart-via-pr", "qa-via-jira")
+    $workflowProfiles = @("start-from-prompt", "start-from-jira", "start-from-pr", "start-from-repo", "qa-via-jira")
 
     foreach ($wfProfile in $workflowProfiles) {
         $workflowPath = Join-Path $repoRoot "workflows\$wfProfile\workflow.yaml"
@@ -787,10 +784,10 @@ Write-Host "  ──────────────────────
 function Write-Status { param($Message, $Type) }
 function Write-ProcessActivity { param($Id, $ActivityType, $Message) }
 
-. (Join-Path $repoRoot "workflows\default\systems\runtime\modules\post-script-runner.ps1")
+. (Join-Path $repoRoot "core/runtime/modules/post-script-runner.ps1")
 
 $postRoot = Join-Path ([System.IO.Path]::GetTempPath()) "dotbot-post-$([System.Guid]::NewGuid().ToString().Substring(0,8))"
-New-Item -ItemType Directory -Path (Join-Path $postRoot "systems\runtime") -Force | Out-Null
+New-Item -ItemType Directory -Path (Join-Path $postRoot "core/runtime") -Force | Out-Null
 New-Item -ItemType Directory -Path (Join-Path $postRoot "scripts") -Force | Out-Null
 
 try {
@@ -805,13 +802,13 @@ $sentinel = Join-Path $BotRoot "sentinel\ran.txt"
     Set-Content $sentinel
 exit 0
 '@
-    $okScript | Set-Content (Join-Path $postRoot "systems\runtime\ok-post.ps1")
+    $okScript | Set-Content (Join-Path $postRoot "core/runtime/ok-post.ps1")
 
     $failScript = @'
 param([string]$BotRoot, [string]$ProductDir, $Settings, [string]$Model, [string]$ProcessId)
 exit 7
 '@
-    $failScript | Set-Content (Join-Path $postRoot "systems\runtime\fail-post.ps1")
+    $failScript | Set-Content (Join-Path $postRoot "core/runtime/fail-post.ps1")
 
     $scriptsDirScript = @'
 param([string]$BotRoot, [string]$ProductDir, $Settings, [string]$Model, [string]$ProcessId)
@@ -823,7 +820,7 @@ exit 0
     $settings = @{ foo = "bar" }
     $productDir = Join-Path $postRoot "workspace\product"
 
-    # Happy path: default path resolution (systems/runtime/<name>)
+    # Happy path: default path resolution (core/runtime/<name>)
     $threw = $false
     try {
         Invoke-PostScript -BotRoot $postRoot -ProductDir $productDir `
@@ -905,7 +902,7 @@ Write-Host "  INVOKE-TASKPOSTSCRIPTIFPRESENT" -ForegroundColor Cyan
 Write-Host "  ────────────────────────────────────────────" -ForegroundColor DarkGray
 
 $wrapRoot = Join-Path ([System.IO.Path]::GetTempPath()) "dotbot-wrap-$([System.Guid]::NewGuid().ToString().Substring(0,8))"
-New-Item -ItemType Directory -Path (Join-Path $wrapRoot "systems\runtime") -Force | Out-Null
+New-Item -ItemType Directory -Path (Join-Path $wrapRoot "core/runtime") -Force | Out-Null
 New-Item -ItemType Directory -Path (Join-Path $wrapRoot "sentinel") -Force | Out-Null
 
 try {
@@ -915,13 +912,13 @@ param([string]$BotRoot, [string]$ProductDir, $Settings, [string]$Model, [string]
 Set-Content (Join-Path $BotRoot "sentinel\wrap-ok.txt") "ran"
 exit 0
 '@
-    $okScript | Set-Content (Join-Path $wrapRoot "systems\runtime\wrap-ok.ps1")
+    $okScript | Set-Content (Join-Path $wrapRoot "core/runtime/wrap-ok.ps1")
 
     $failScript = @'
 param([string]$BotRoot, [string]$ProductDir, $Settings, [string]$Model, [string]$ProcessId)
 exit 3
 '@
-    $failScript | Set-Content (Join-Path $wrapRoot "systems\runtime\wrap-fail.ps1")
+    $failScript | Set-Content (Join-Path $wrapRoot "core/runtime/wrap-fail.ps1")
 
     $settings = @{}
     $productDir = Join-Path $wrapRoot "workspace\product"
@@ -1055,14 +1052,11 @@ Write-Host ""
 Write-Host "  POST_SCRIPT WIRING" -ForegroundColor Cyan
 Write-Host "  ────────────────────────────────────────────" -ForegroundColor DarkGray
 
-$workflowProcessPath = Join-Path $repoRoot "workflows\default\systems\runtime\modules\ProcessTypes\Invoke-WorkflowProcess.ps1"
-$kickstartProcessPath = Join-Path $repoRoot "workflows\default\systems\runtime\modules\ProcessTypes\Invoke-KickstartProcess.ps1"
+$workflowProcessPath = Join-Path $repoRoot "core/runtime/modules/ProcessTypes/Invoke-WorkflowProcess.ps1"
 
 Assert-PathExists -Name "Invoke-WorkflowProcess.ps1 exists" -Path $workflowProcessPath
-Assert-PathExists -Name "Invoke-KickstartProcess.ps1 exists" -Path $kickstartProcessPath
 
 $workflowSrc = Get-Content $workflowProcessPath -Raw
-$kickstartSrc = Get-Content $kickstartProcessPath -Raw
 
 Assert-True -Name "Invoke-WorkflowProcess dot-sources post-script-runner" `
     -Condition ($workflowSrc -match 'post-script-runner\.ps1')
@@ -1081,23 +1075,141 @@ Assert-True -Name "Invoke-WorkflowProcess has elseif (postScriptFailed) branch" 
 Assert-True -Name "Invoke-WorkflowProcess calls Invoke-PostScriptFailureEscalation" `
     -Condition ($workflowSrc -match 'Invoke-PostScriptFailureEscalation')
 
-Assert-True -Name "Invoke-KickstartProcess dot-sources post-script-runner" `
-    -Condition ($kickstartSrc -match 'post-script-runner\.ps1')
-Assert-True -Name "Invoke-KickstartProcess calls Invoke-PostScript" `
-    -Condition ($kickstartSrc -match 'Invoke-PostScript\b')
-Assert-True -Name "Invoke-KickstartProcess no longer has inline post_script path resolution" `
-    -Condition (-not ($kickstartSrc -match 'systems\\runtime\\\$rawPostScript'))
+# Regression guards for paused-task handling. When the agent calls
+# task_mark_needs_input, the orchestrator must NOT take the success path —
+# Complete-TaskWorktree squash-merges and increments tasks_completed, both
+# of which corrupt state for a paused task. See issue #382 for the
+# symptom trace.
+Assert-True -Name "Invoke-WorkflowProcess initialises taskParked=false" `
+    -Condition ($workflowSrc -match '\$taskParked\s*=\s*\$false')
+Assert-True -Name "Invoke-WorkflowProcess sets taskParked=true on needs-input" `
+    -Condition ($workflowSrc -match '\$taskParked\s*=\s*\$true')
+$parkedBranchMatch = [regex]::Match($workflowSrc, 'if\s*\(\s*\$taskParked\s*\)\s*\{(?<body>[\s\S]*?)\}\s*elseif\s*\(\s*\$taskSuccess\s*\)')
+Assert-True -Name "Invoke-WorkflowProcess has if (taskParked) branch before merge" `
+    -Condition $parkedBranchMatch.Success `
+    -Message "Expected the parked branch to come before the success branch so merge is skipped for paused tasks"
+$parkedBranchBody = if ($parkedBranchMatch.Success) { $parkedBranchMatch.Groups['body'].Value } else { '' }
+Assert-True -Name "Paused branch does NOT call Complete-TaskWorktree" `
+    -Condition ($parkedBranchBody -notmatch 'Complete-TaskWorktree') `
+    -Message "Paused tasks must skip the squash-merge — Complete-TaskWorktree should not appear inside the if (taskParked) branch"
+Assert-True -Name "Paused branch does NOT increment tasks_completed" `
+    -Condition ($parkedBranchBody -notmatch '\$tasksProcessed\+\+') `
+    -Message "tasks_completed must not be incremented for paused tasks"
+Assert-True -Name "Paused branch emits 'Paused (needs-input)' heartbeat" `
+    -Condition ($workflowSrc -match '"Paused\s*\(needs-input\):\s*\$\(\$task\.name\)"')
 
 Write-Host ""
 
 # ═══════════════════════════════════════════════════════════════════
-# KICKSTART FRICTION FIXES (batch 1)
+# TASK-RUNNER PARITY (PR-3a)
+# ═══════════════════════════════════════════════════════════════════
+# Regression guards for the four parity items the task-runner absorbed
+# from the legacy execution engine: briefing-file injection, interview-summary
+# injection, outputs validation, front_matter_docs. If any of these
+# helpers gets removed, every shipped workflow.yaml silently regresses.
+
+Write-Host "  TASK-RUNNER PARITY (briefing, interview-summary, outputs, front-matter)" -ForegroundColor Cyan
+Write-Host "  ────────────────────────────────────────────" -ForegroundColor DarkGray
+
+Assert-True -Name "Invoke-WorkflowProcess defines Get-WorkflowPromptContext helper" `
+    -Condition ($workflowSrc -match 'function\s+Get-WorkflowPromptContext')
+Assert-True -Name "Invoke-WorkflowProcess injects context into analysis prompt" `
+    -Condition ($workflowSrc -match '\$promptContext\s*=\s*Get-WorkflowPromptContext')
+Assert-True -Name "Invoke-WorkflowProcess injects context into execution prompt" `
+    -Condition ($workflowSrc -match '\$execPromptContext\s*=\s*Get-WorkflowPromptContext')
+Assert-True -Name "Get-WorkflowPromptContext reads briefing/ directory" `
+    -Condition ($workflowSrc -match 'briefingDir\s*=\s*Join-Path\s+\$ProductDir\s+"briefing"')
+Assert-True -Name "Get-WorkflowPromptContext reads interview-summary.md" `
+    -Condition ($workflowSrc -match 'interviewSummaryPath\s*=\s*Join-Path\s+\$ProductDir\s+"interview-summary\.md"')
+
+Assert-True -Name "Invoke-WorkflowProcess defines Test-TaskOutput helper" `
+    -Condition ($workflowSrc -match 'function\s+Test-TaskOutput\b')
+Assert-True -Name "Invoke-WorkflowProcess defines Add-TaskFrontMatter helper" `
+    -Condition ($workflowSrc -match 'function\s+Add-TaskFrontMatter\b')
+
+# Both task paths (non-prompt + prompt) must call these helpers — count >= 2.
+# Match both direct (`Test-TaskOutput -Task`) and splatted (`Test-TaskOutput @args`)
+# call styles so a future refactor that swaps one for the other doesn't trip
+# this guard.
+$outputCallCount = ([regex]::Matches($workflowSrc, 'Test-TaskOutput\s+(-Task|@\w)')).Count
+Assert-True -Name "Test-TaskOutput called from both task paths (>=2 sites)" `
+    -Condition ($outputCallCount -ge 2)
+$frontMatterCallCount = ([regex]::Matches($workflowSrc, 'Add-TaskFrontMatter\s+(-Task|@\w)')).Count
+Assert-True -Name "Add-TaskFrontMatter called from both task paths (>=2 sites)" `
+    -Condition ($frontMatterCallCount -ge 2)
+# Baseline capture must precede each Test-TaskOutput call site so the
+# delta-vs-absolute logic actually runs (otherwise the legacy-engine
+# absolute-count behaviour would silently re-emerge).
+$baselineCallCount = ([regex]::Matches($workflowSrc, 'Get-TaskOutputBaseline\s+-Task')).Count
+Assert-True -Name "Get-TaskOutputBaseline captured in both task paths (>=2 sites)" `
+    -Condition ($baselineCallCount -ge 2)
+
+Assert-True -Name "Test-TaskOutput supports legacy required_outputs alias" `
+    -Condition ($workflowSrc -match "'required_outputs'")
+Assert-True -Name "Test-TaskOutput supports outputs_dir + min_output_count" `
+    -Condition (($workflowSrc -match 'outputs_dir') -and ($workflowSrc -match 'min_output_count'))
+Assert-True -Name "Add-TaskFrontMatter sets generator to dotbot-task-runner" `
+    -Condition ($workflowSrc -match 'dotbot-task-runner')
+
+Write-Host ""
+
+# ═══════════════════════════════════════════════════════════════════
+# TASK-RUNNER INTERVIEW TASK TYPE (PR-3b, #220)
+# ═══════════════════════════════════════════════════════════════════
+# The task-runner now handles type:interview tasks by wrapping
+# Invoke-InterviewLoop. Regression guard against the dispatch case
+# being removed once the legacy engine is deleted.
+
+Write-Host "  TASK-RUNNER INTERVIEW TASK TYPE" -ForegroundColor Cyan
+Write-Host "  ────────────────────────────────────────────" -ForegroundColor DarkGray
+
+Assert-True -Name "Invoke-WorkflowProcess dot-sources InterviewLoop.ps1" `
+    -Condition ($workflowSrc -match 'InterviewLoop\.ps1')
+Assert-True -Name "Invoke-WorkflowProcess has 'interview' case in task-type switch" `
+    -Condition ($workflowSrc -match "'interview'\s*\{")
+Assert-True -Name "Invoke-WorkflowProcess interview case calls Invoke-InterviewLoop" `
+    -Condition ($workflowSrc -match 'Invoke-InterviewLoop')
+Assert-True -Name "Interview case resolves user prompt from workflow-launch-prompt.txt" `
+    -Condition ($workflowSrc -match 'workflow-launch-prompt\.txt')
+
+Write-Host ""
+
+# ═══════════════════════════════════════════════════════════════════
+# TASK-RUNNER CLARIFICATION-QUESTIONS HITL LOOP (PR-3c, #221)
+# ═══════════════════════════════════════════════════════════════════
+# The task-runner now detects clarification-questions.json after a prompt
+# task and pauses the process for human input, then runs adjust-after-answers.
+
+Write-Host "  TASK-RUNNER CLARIFICATION HITL LOOP" -ForegroundColor Cyan
+Write-Host "  ────────────────────────────────────────────" -ForegroundColor DarkGray
+
+Assert-True -Name "Invoke-WorkflowProcess defines Invoke-TaskClarificationLoopIfPresent" `
+    -Condition ($workflowSrc -match 'function\s+Invoke-TaskClarificationLoopIfPresent\b')
+Assert-True -Name "Clarification loop checks clarification-questions.json" `
+    -Condition ($workflowSrc -match 'clarification-questions\.json')
+Assert-True -Name "Clarification loop polls for clarification-answers.json" `
+    -Condition ($workflowSrc -match 'clarification-answers\.json')
+Assert-True -Name "Clarification loop sets process status to needs-input" `
+    -Condition ($workflowSrc -match "ProcessData\.status\s*=\s*'needs-input'")
+Assert-True -Name "Clarification loop runs adjust-after-answers prompt" `
+    -Condition ($workflowSrc -match 'adjust-after-answers\.md')
+Assert-True -Name "Clarification loop appends to interview-summary.md" `
+    -Condition ($workflowSrc -match 'interview-summary\.md.*Clarification Log' -or $workflowSrc -match 'Clarification Log')
+Assert-True -Name "Clarification loop is wired into prompt-task path" `
+    -Condition ($workflowSrc -match 'Invoke-TaskClarificationLoopIfPresent\s+-Task')
+Assert-True -Name "Clarification loop respects stop signal" `
+    -Condition ($workflowSrc -match 'Test-ProcessStopSignal[\s\S]{0,400}clarification')
+
+Write-Host ""
+
+# ═══════════════════════════════════════════════════════════════════
+# WORKFLOW FRICTION FIXES (batch 1)
 # ═══════════════════════════════════════════════════════════════════
 # Regressions guarding the four fixes that came out of analysing a real
-# kickstart-from-scratch activity.jsonl run in a downstream harness.
-# See the PR description in fix/kickstart-friction-batch-1 for context.
+# start-from-prompt activity.jsonl run in a downstream harness.
+# See the PR description in fix/workflow-friction-batch-1 for context.
 
-Write-Host "  KICKSTART FRICTION FIXES" -ForegroundColor Cyan
+Write-Host "  WORKFLOW FRICTION FIXES" -ForegroundColor Cyan
 Write-Host "  ────────────────────────────────────────────" -ForegroundColor DarkGray
 
 # ── Fix #1: workflow-manifest.ps1 must import ManifestCondition.psm1 with
@@ -1105,7 +1217,7 @@ Write-Host "  ──────────────────────
 # is dot-sourced from inside a function/scriptblock scope (the pattern
 # server.ps1 and task-get-next/script.ps1 use). Without -Global the imported
 # function ends up in a module scope that HTTP route handlers cannot reach.
-$workflowManifestPath = Join-Path $repoRoot "workflows\default\systems\runtime\modules\workflow-manifest.ps1"
+$workflowManifestPath = Join-Path $repoRoot "core/runtime/modules/workflow-manifest.ps1"
 $workflowManifestSrc = Get-Content $workflowManifestPath -Raw
 
 Assert-True -Name "Fix#1: workflow-manifest.ps1 Import-Module for ManifestCondition uses -Global" `
@@ -1130,21 +1242,16 @@ try {
 Assert-True -Name "Fix#1: Test-ManifestCondition visible after nested dot-source of workflow-manifest.ps1" `
     -Condition $nestedProbe
 
-# ── Fix #2: Invoke-KickstartProcess.ps1 must auto-push phase commits on main/
-# master so the 02-git-pushed.ps1 verify hook does not block task_mark_done.
-Assert-True -Name "Fix#2: Invoke-KickstartProcess auto-pushes on main/master (excludes only task/ branches)" `
-    -Condition ($kickstartSrc -match "currentBranch\s+-notmatch\s+'\^task/'")
-Assert-True -Name "Fix#2: Invoke-KickstartProcess no longer excludes main/master from auto-push" `
-    -Condition (-not ($kickstartSrc -match "'\^\(task/\|master\$\|main\$\)'"))
-Assert-True -Name "Fix#2: auto_push_phase_commits setting is still honoured" `
-    -Condition ($kickstartSrc -match "auto_push_phase_commits")
+# Fix #2 (legacy engine auto-push) was removed in PR-3 along with the
+# legacy engine. Task-runner's squash-merge in Complete-TaskWorktree handles
+# pushing for completed tasks; phase-level auto-push no longer applies.
 
-# ── Fix #3: kickstart prompt templates must instruct agents to retry the same
+# ── Fix #3: workflow prompt templates must instruct agents to retry the same
 # select: query rather than broadening when the MCP server is still warming up.
 $promptFiles = @(
-    (Join-Path $repoRoot "workflows\kickstart-from-scratch\recipes\prompts\03b-expand-task-group.md"),
-    (Join-Path $repoRoot "workflows\kickstart-from-scratch\recipes\prompts\01b-generate-decisions.md"),
-    (Join-Path $repoRoot "workflows\default\recipes\prompts\98-analyse-task.md")
+    (Join-Path $repoRoot "workflows\start-from-prompt\recipes\prompts\03b-expand-task-group.md"),
+    (Join-Path $repoRoot "workflows\start-from-prompt\recipes\prompts\01b-generate-decisions.md"),
+    (Join-Path $repoRoot "core/prompts/98-analyse-task.md")
 )
 foreach ($pf in $promptFiles) {
     $relName = Split-Path $pf -Leaf
@@ -1157,9 +1264,9 @@ foreach ($pf in $promptFiles) {
 }
 
 # ── Fix #4: 01b-generate-decisions.md must mark interview-summary.md as an
-# optional read so the new_project kickstart path (show_interview: false)
+# optional read so the new_project workflow path (show_interview: false)
 # doesn't error on a missing file.
-$decisionsPromptPath = Join-Path $repoRoot "workflows\kickstart-from-scratch\recipes\prompts\01b-generate-decisions.md"
+$decisionsPromptPath = Join-Path $repoRoot "workflows\start-from-prompt\recipes\prompts\01b-generate-decisions.md"
 $decisionsPromptSrc = Get-Content $decisionsPromptPath -Raw
 Assert-True -Name "Fix#4: 01b-generate-decisions.md marks interview-summary.md as optional" `
     -Condition ($decisionsPromptSrc -match '(?s)interview\s+summary\s+is\s+\*\*optional\*\*.*?interview-summary\.md')
@@ -1171,15 +1278,18 @@ Assert-True -Name "Fix#4: 01b-generate-decisions.md still reads mission/tech-sta
 # pushed immediately instead of leaving the agent stuck on the
 # 02-git-pushed.ps1 gate at task_mark_done time.
 $autonomousTaskPrompts = @(
-    (Join-Path $repoRoot "workflows\default\recipes\prompts\99-autonomous-task.md"),
-    (Join-Path $repoRoot "workflows\kickstart-via-jira\recipes\prompts\99-autonomous-task.md")
+    (Join-Path $repoRoot "core/prompts/99-autonomous-task.md"),
+    (Join-Path $repoRoot "workflows/start-from-jira/recipes/prompts/99-autonomous-task.md")
 )
 foreach ($pf in $autonomousTaskPrompts) {
     $relName = Split-Path $pf -Leaf
-    # Walk up 3 parents to reach the workflow directory (e.g. "workflows/default")
-    # then take its leaf to get the workflow name ("default", "kickstart-via-jira").
-    # Path structure: workflows/<workflow>/recipes/prompts/<file>.md.
-    $parentDir = Split-Path (Split-Path (Split-Path (Split-Path $pf -Parent) -Parent) -Parent) -Leaf
+    # Label the prompt by its top-level source — "core" for the framework copy,
+    # the workflow name for workflow-scoped overrides.
+    $parentDir = if ($pf -match '[/\\]core[/\\]prompts[/\\]') {
+        'core'
+    } else {
+        Split-Path (Split-Path (Split-Path (Split-Path $pf -Parent) -Parent) -Parent) -Leaf
+    }
     Assert-PathExists -Name "Fix#A: $parentDir/$relName exists" -Path $pf
     $src = Get-Content $pf -Raw
     Assert-True -Name "Fix#A: $parentDir/$relName has branch-conditional task/ guard" `
@@ -1195,7 +1305,7 @@ foreach ($pf in $autonomousTaskPrompts) {
 # ── Batch 2, Fix B: 03a-plan-task-groups.md must include task-level rigor
 # (schema, acceptance-criteria quality bar, effort sizing, dependency chain)
 # that 03b-expand-task-group.md inherits during expansion.
-$planTaskGroupsPath = Join-Path $repoRoot "workflows\kickstart-from-scratch\recipes\prompts\03a-plan-task-groups.md"
+$planTaskGroupsPath = Join-Path $repoRoot "workflows\start-from-prompt\recipes\prompts\03a-plan-task-groups.md"
 Assert-PathExists -Name "Fix#B: 03a-plan-task-groups.md exists" -Path $planTaskGroupsPath
 $planTaskGroupsSrc = Get-Content $planTaskGroupsPath -Raw
 
@@ -1217,7 +1327,7 @@ Assert-True -Name "Fix#B: 03a anti-patterns forbid effort-based buckets" `
     -Condition ($planTaskGroupsSrc -match '[Ee]ffort-based\s+buckets')
 
 # ── Batch 2, Fix B cross-link: 03b-expand-task-group.md must inherit from 03a.
-$expandTaskGroupPath = Join-Path $repoRoot "workflows\kickstart-from-scratch\recipes\prompts\03b-expand-task-group.md"
+$expandTaskGroupPath = Join-Path $repoRoot "workflows\start-from-prompt\recipes\prompts\03b-expand-task-group.md"
 $expandTaskGroupSrc = Get-Content $expandTaskGroupPath -Raw
 Assert-True -Name "Fix#B: 03b cross-links to 03a for schema/criteria/sizing" `
     -Condition ($expandTaskGroupSrc -match 'Inherits\s+from\s+03a-plan-task-groups\.md')
@@ -1226,9 +1336,9 @@ Assert-True -Name "Fix#B: 03b tells agent not to relax constraints during expans
 
 # ── Batch 2, Fix C: 98-analyse-task.md must guard mission/tech-stack/entity-model
 # reads against the current task's outputs list, so tasks that produce those
-# files (e.g. kickstart Product Documents) do not error during pre-flight
+# files (e.g. workflow Product Documents) do not error during pre-flight
 # analysis trying to read files they are supposed to create.
-$analyseTaskPath = Join-Path $repoRoot "workflows\default\recipes\prompts\98-analyse-task.md"
+$analyseTaskPath = Join-Path $repoRoot "core/prompts/98-analyse-task.md"
 Assert-PathExists -Name "Fix#C: 98-analyse-task.md exists" -Path $analyseTaskPath
 $analyseTaskSrc = Get-Content $analyseTaskPath -Raw
 Assert-True -Name "Fix#C: 98-analyse-task.md has skip-if-produced guard in Phase 2" `
@@ -1242,14 +1352,26 @@ Assert-True -Name "Fix#C: 98-analyse-task.md mission read is marked skip-if-outp
 Assert-True -Name "Fix#C: 98-analyse-task.md refers to task outputs list for the guard" `
     -Condition ($analyseTaskSrc -match "task's\s+``outputs``\s+list")
 
-# ── Batch 2, Fix D: 98-analyse-task.md must treat .bot/recipes/standards/global
-# as an optional directory; skip the glob if it does not exist.
-Assert-True -Name "Fix#D: 98-analyse-task.md marks standards/global listing as skip-if-missing" `
-    -Condition ($analyseTaskSrc -match '(?s)List\s+available\s+standards\s+\(skip\s+if\s+directory\s+missing\)')
-Assert-True -Name "Fix#D: 98-analyse-task.md describes standards/global as optional" `
-    -Condition ($analyseTaskSrc -match '`\.bot/recipes/standards/global/`\s+directory\s+is\s+optional')
-Assert-True -Name "Fix#D: 98-analyse-task.md tells agent not to treat missing standards/global as error" `
-    -Condition ($analyseTaskSrc -match 'Do\s+\*\*not\*\*\s+treat\s+the\s+missing\s+directory\s+as\s+an\s+error')
+# ── #365: 98-analyse-task.md must not probe .bot/recipes/standards/global with
+# a Glob, and 99-autonomous-task.md must not list it as a context-file source.
+# The prompt now relies on {{APPLICABLE_STANDARDS}} plus the task's
+# `applicable_standards` list. Both checks must hold even if a future edit
+# reorders the Glob keys or splits the call across lines.
+Assert-True -Name "#365: 98-analyse-task.md no longer issues a Glob over .bot/recipes/standards/global" `
+    -Condition (-not ($analyseTaskSrc -match '(?s)Glob\([^)]*\.bot/recipes/standards/global'))
+Assert-True -Name "#365: 98-analyse-task.md tells the agent not to probe .bot/recipes/standards/global" `
+    -Condition ($analyseTaskSrc -match 'Do\s+not\s+probe\s+`\.bot/recipes/standards/global/`')
+
+$execPromptSrc = Get-Content (Join-Path $repoRoot "core/prompts/99-autonomous-task.md") -Raw
+Assert-True -Name "#365: 99-autonomous-task.md no longer cites .bot/recipes/standards/global/*.md as a context file" `
+    -Condition (-not ($execPromptSrc -match '\.bot/recipes/standards/global/\*\.md'))
+
+# Runtime fallback must not push agents back toward the directory the prompts
+# now tell them to avoid. prompt-builder.ps1's APPLICABLE_STANDARDS fallback
+# previously said "use global standards from .bot/recipes/standards/global/".
+$promptBuilderSrc = Get-Content (Join-Path $repoRoot "core/runtime/modules/prompt-builder.ps1") -Raw
+Assert-True -Name "#365: prompt-builder APPLICABLE_STANDARDS fallback does not mention recipes/standards/global" `
+    -Condition (-not ($promptBuilderSrc -match '(?s)applicableStandards\s*=\s*"[^"]*\.bot/recipes/standards/global'))
 
 # ── Batch 2, Fix E: 03a category_hint field-reference row must list the full
 # six-value enum and forbid inventing new categories like `frontend`.
@@ -1262,6 +1384,96 @@ Assert-True -Name "Fix#E: 03a category_hint row forbids inventing new categories
 Assert-True -Name "Fix#E: 03a category_hint row cites task_create_bulk validator" `
     -Condition ($planTaskGroupsSrc -match '(?s)`category_hint`.*?`task_create_bulk`\s+validator')
 
+# ── Batch 3, Fix F: 03b-expand-task-group.md must enforce the per-task
+# quality bar, leave group sizing to 03a (Fix#H owns the fan-out cap),
+# allow only the closed category enum, align dependency naming with what
+# the task_create_bulk validator actually accepts, and treat an empty
+# {{GROUP_APPLICABLE_DECISIONS}} via a decision_list fallback rather than
+# silent zero-ADR expansion.
+Assert-True -Name "Fix#F: 03b leads with per-task quality bar (logical, context-friendly, executable, testable)" `
+    -Condition ($expandTaskGroupSrc -match 'logical,\s+context-friendly,\s+executable,\s+testable\s+unit')
+Assert-True -Name "Fix#F: 03b states group sizing is 03a's responsibility" `
+    -Condition ($expandTaskGroupSrc -match "Group\s+sizing\s+is\s+03a's\s+responsibility")
+Assert-True -Name "Fix#F: 03b does not police group size or emit group_size_warning" `
+    -Condition (-not ($expandTaskGroupSrc -match 'group_size_warning'))
+Assert-True -Name "Fix#F: 03b lists all six valid category enum values" `
+    -Condition (($expandTaskGroupSrc -match '`infrastructure`') -and `
+                ($expandTaskGroupSrc -match '`core`') -and `
+                ($expandTaskGroupSrc -match '`feature`') -and `
+                ($expandTaskGroupSrc -match '`enhancement`') -and `
+                ($expandTaskGroupSrc -match '`ui-ux`') -and `
+                ($expandTaskGroupSrc -match '`bugfix`'))
+Assert-True -Name "Fix#F: 03b forbids inventing categories like testing or frontend" `
+    -Condition ($expandTaskGroupSrc -match 'Do\s+\*\*NOT\*\*\s+invent\s+categories.*?`testing`')
+Assert-True -Name "Fix#F: 03b cites task_create_bulk validator for category enum" `
+    -Condition ($expandTaskGroupSrc -match '(?s)closed\s+enum.*?task_create_bulk.*?validator')
+Assert-True -Name "Fix#F: 03b documents the four resolution strategies the validator accepts" `
+    -Condition (($expandTaskGroupSrc -match 'exact\s+`id`\s+match') -and `
+                ($expandTaskGroupSrc -match 'exact\s+`name`\s+match') -and `
+                ($expandTaskGroupSrc -match 'slug\s+match') -and `
+                ($expandTaskGroupSrc -match 'fuzzy\s+slug\s+substring\s+match'))
+Assert-True -Name "Fix#F: 03b recommends id for cross-group dependencies" `
+    -Condition ($expandTaskGroupSrc -match '(?s)Cross-group\s+dependencies.*?task\s+\*\*`id`\*\*')
+Assert-True -Name "Fix#F: 03b recommends exact name for intra-batch dependencies" `
+    -Condition ($expandTaskGroupSrc -match '(?s)Intra-batch\s+dependencies.*?exact\s+`name`')
+Assert-True -Name "Fix#F: 03b marks slug/fuzzy as fallback, not contract" `
+    -Condition ($expandTaskGroupSrc -match 'fallbacks?,\s+not\s+a\s+contract')
+Assert-True -Name "Fix#F: 03b has decision_list fallback when GROUP_APPLICABLE_DECISIONS has no dec- IDs" `
+    -Condition ($expandTaskGroupSrc -match '(?s)contains\s+no\s+`dec-`\s+IDs.*?decision_list')
+
+# ── Batch 3, Fix G: expand-task-groups.ps1 must substitute
+# {{GROUP_APPLICABLE_DECISIONS}} from each group's applicable_decisions field
+# so the prompt actually receives the ADR ID list 03a recorded.
+$expandScriptPath = Join-Path $repoRoot "core" "runtime" "expand-task-groups.ps1"
+Assert-PathExists -Name "Fix#G: expand-task-groups.ps1 exists" -Path $expandScriptPath
+$expandScriptSrc = Get-Content $expandScriptPath -Raw
+Assert-True -Name "Fix#G: expand-task-groups.ps1 substitutes GROUP_APPLICABLE_DECISIONS" `
+    -Condition ($expandScriptSrc -match "-replace\s+'[^']*GROUP_APPLICABLE_DECISIONS")
+Assert-True -Name "Fix#G: expand-task-groups.ps1 reads group.applicable_decisions" `
+    -Condition ($expandScriptSrc -match '\$group\.applicable_decisions')
+Assert-True -Name "Fix#G: expand-task-groups.ps1 emits '(none)' when applicable_decisions is empty" `
+    -Condition ($expandScriptSrc -match '"\(none\)"')
+
+# ── Batch 3, Fix H: 03a-plan-task-groups.md owns group sizing — must validate
+# expansion fan-out and split groups whose scope would expand to 12+ tasks
+# at 03b's per-task quality bar, before writing task-groups.json.
+Assert-True -Name "Fix#H: 03a has Step 2.5 Validate Expansion Fan-Out" `
+    -Condition ($planTaskGroupsSrc -match '###\s+Step\s+2\.5:\s+Validate\s+Expansion\s+Fan-Out')
+Assert-True -Name "Fix#H: 03a tells the planner group sizing is its responsibility" `
+    -Condition ($planTaskGroupsSrc -match 'Group\s+sizing\s+is\s+your\s+responsibility,\s+not\s+03b')
+Assert-True -Name "Fix#H: 03a forces a split when a group would expand to 12+ tasks" `
+    -Condition ($planTaskGroupsSrc -match '(?s)12\s+or\s+more\s+well-sized\s+tasks.*?split\s+it\s+now')
+Assert-True -Name "Fix#H: 03a tightens estimated_task_count guidance to 3-10 healthy range" `
+    -Condition ($planTaskGroupsSrc -match '(?s)`estimated_task_count`.*?(?:3-10|range\s+is\s+\*\*3-10\*\*)')
+Assert-True -Name "Fix#H: 03a anti-patterns forbid kitchen-sink groups" `
+    -Condition ($planTaskGroupsSrc -match '[Kk]itchen-sink\s+groups')
+Assert-True -Name "Fix#H: 03a Step 2.5 surfaces the fan-out heuristic table" `
+    -Condition ($planTaskGroupsSrc -match '(?s)Step\s+2\.5.*?Scope\s+shape.*?per-task\s+expansion')
+Assert-True -Name "Fix#H: 03a example task-groups.json includes applicable_decisions" `
+    -Condition ($planTaskGroupsSrc -match '"applicable_decisions":\s*\[')
+Assert-True -Name "Fix#H: 03a Field Reference declares applicable_decisions as a required field" `
+    -Condition ($planTaskGroupsSrc -match '\|\s+`applicable_decisions`\s+\|\s+Yes\s+\|')
+
+# ── #364: Both core prompts must warn that the Bash tool runs Bash, not
+# PowerShell. Agents picked up PowerShell's $obj.property syntax from the
+# project's PowerShell-heavy code and got `extglob.project_name: command not
+# found` errors when piping JSON through Bash.
+$bashWarningPrompts = @(
+    (Join-Path $repoRoot "core/prompts/99-autonomous-task.md"),
+    (Join-Path $repoRoot "core/prompts/98-analyse-task.md")
+)
+foreach ($pf in $bashWarningPrompts) {
+    $relName = Split-Path $pf -Leaf
+    Assert-PathExists -Name "#364: $relName exists" -Path $pf
+    $src = Get-Content $pf -Raw
+    Assert-True -Name "#364: $relName warns the Bash tool runs Bash, not PowerShell" `
+        -Condition ($src -match 'Bash\s+tool\s+runs\s+Bash,\s+not\s+PowerShell')
+    Assert-True -Name "#364: $relName names `$obj.property as a forbidden idiom" `
+        -Condition ($src -match '\$obj\.property')
+    Assert-True -Name "#364: $relName tells the agent to use pwsh -Command for PowerShell semantics" `
+        -Condition ($src -match 'pwsh\s+-Command')
+}
+
 Write-Host ""
 
 # ═══════════════════════════════════════════════════════════════════
@@ -1273,3 +1485,4 @@ $allPassed = Write-TestSummary -LayerName "Layer 1: Workflow Manifest"
 if (-not $allPassed) {
     exit 1
 }
+
