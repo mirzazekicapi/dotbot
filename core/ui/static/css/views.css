@@ -2993,6 +2993,258 @@
     background: linear-gradient(180deg, rgba(95, 179, 179, 0.16), rgba(95, 179, 179, 0.08));
 }
 
+/* ========== WORKFLOW RUNS (generic) ========== */
+/* Run list + run detail rendered inside the workflow-runs modal. Keeps QA-tab
+   visual language (cards with LED + status pill + actions row) but workflow-agnostic. */
 
+.workflow-runs-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    max-height: 60vh;
+    overflow-y: auto;
+}
 
+.workflow-runs-empty {
+    text-align: center;
+    padding: 32px 16px;
+    color: var(--color-text-dim);
+}
+
+.workflow-runs-empty-icon {
+    font-size: 28px;
+    opacity: 0.4;
+    margin-bottom: 8px;
+}
+
+.workflow-runs-empty-title {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--color-text);
+    margin-bottom: 4px;
+}
+
+.workflow-runs-empty-hint {
+    font-size: 11px;
+    color: var(--color-text-dim);
+    line-height: 1.4;
+}
+
+.workflow-run-card {
+    border: 1px solid var(--bezel-color);
+    border-radius: 4px;
+    padding: 10px 12px;
+    background: var(--bg-screen);
+}
+
+.workflow-run-card-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 6px;
+}
+
+.workflow-run-card-id {
+    font-family: var(--font-mono, monospace);
+    font-size: 11px;
+    color: var(--color-text);
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.workflow-run-card-status {
+    font-size: 9px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    padding: 2px 6px;
+    border-radius: 3px;
+    border: 1px solid var(--bezel-color);
+    color: var(--color-text-dim);
+}
+
+.workflow-run-card-status.status-running {
+    color: var(--color-primary);
+    border-color: var(--color-primary);
+    background: rgba(0, 255, 136, 0.08);
+}
+
+.workflow-run-card-status.status-awaiting-approval {
+    color: var(--color-secondary);
+    border-color: var(--color-secondary);
+    background: rgba(95, 179, 179, 0.08);
+}
+
+.workflow-run-card-status.status-completed {
+    color: var(--color-text-dim);
+    background: rgba(112, 104, 92, 0.08);
+}
+
+.workflow-run-card-status.status-failed,
+.workflow-run-card-status.status-cancelled {
+    color: var(--color-accent);
+    border-color: var(--color-accent);
+    background: rgba(255, 80, 80, 0.08);
+}
+
+.workflow-run-card-summary {
+    font-size: 11px;
+    color: var(--color-text-dim);
+    margin-bottom: 4px;
+    line-height: 1.4;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.workflow-run-card-field .field-name {
+    color: var(--color-text-dim);
+    margin-right: 4px;
+}
+
+.workflow-run-card-stage {
+    font-size: 11px;
+    color: var(--color-secondary);
+    margin-bottom: 6px;
+    font-style: italic;
+}
+
+.workflow-run-card-footer {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 8px;
+}
+
+.workflow-run-card-time {
+    font-size: 10px;
+    color: var(--color-text-dim);
+}
+
+.workflow-run-card-actions {
+    display: flex;
+    gap: 4px;
+}
+
+/* Detail view */
+
+.workflow-run-detail-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 12px;
+    margin-bottom: 16px;
+    padding-bottom: 12px;
+    border-bottom: 1px solid var(--bezel-color);
+}
+
+.workflow-run-detail-id {
+    font-family: var(--font-mono, monospace);
+    font-size: 12px;
+    color: var(--color-text);
+    margin-bottom: 4px;
+}
+
+.workflow-run-detail-meta {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.workflow-run-detail-stage {
+    font-size: 11px;
+    color: var(--color-secondary);
+    font-style: italic;
+}
+
+.workflow-run-detail-actions {
+    display: flex;
+    gap: 4px;
+}
+
+.workflow-run-detail-section {
+    margin-bottom: 16px;
+}
+
+.workflow-run-detail-label {
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--color-text-dim);
+    margin-bottom: 6px;
+}
+
+.workflow-run-detail-rows {
+    font-size: 12px;
+    color: var(--color-text);
+    line-height: 1.5;
+}
+
+.workflow-run-detail-rows .field-name {
+    color: var(--color-text-dim);
+    display: inline-block;
+    min-width: 100px;
+}
+
+.workflow-run-task-id {
+    font-family: var(--font-mono, monospace);
+    font-size: 11px;
+    color: var(--color-text-dim);
+}
+
+/* Artifact cards */
+
+.wf-artifact-card {
+    border: 1px solid var(--bezel-color);
+    border-radius: 3px;
+    margin-bottom: 8px;
+    background: var(--bg-screen);
+}
+
+.wf-artifact-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 10px;
+    border-bottom: 1px solid var(--bezel-color);
+}
+
+.wf-artifact-name {
+    font-family: var(--font-mono, monospace);
+    font-size: 11px;
+    flex: 1;
+    color: var(--color-text);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.wf-artifact-size {
+    font-size: 10px;
+    color: var(--color-text-dim);
+}
+
+.wf-artifact-content {
+    max-height: 0;
+    overflow: hidden;
+    transition: max-height 0.2s ease-out;
+    padding: 0 12px;
+}
+
+.wf-artifact-content.expanded {
+    max-height: 800px;
+    overflow-y: auto;
+    padding: 12px;
+}
+
+.wf-artifact-content pre {
+    font-family: var(--font-mono, monospace);
+    font-size: 11px;
+    color: var(--color-text);
+    white-space: pre-wrap;
+    word-break: break-word;
+}
 

@@ -2312,8 +2312,39 @@ $docContext
                     break
                 }
 
+                { $_ -match "^/api/workflows/[^/]+/runs/[^/]+/results$" } {
+                    if ($method -ne "GET") {
+                        $statusCode = 405
+                        $contentType = "application/json; charset=utf-8"
+                        $content = @{ success = $false; error = "Method not allowed" } | ConvertTo-Json -Compress
+                        break
+                    }
+                    $contentType = "application/json; charset=utf-8"
+                    if ($url -match "^/api/workflows/([^/]+)/runs/([^/]+)/results$") {
+                        $wfName = $matches[1]; $runId = $matches[2]
+                    } else {
+                        $statusCode = 400
+                        $content = @{ success = $false; error = "Bad path" } | ConvertTo-Json -Compress
+                        break
+                    }
+                    if ($wfName -notmatch '^[a-zA-Z0-9_-]+$' -or $runId -notmatch '^[a-zA-Z0-9_-]+$') {
+                        $statusCode = 400
+                        $content = @{ success = $false; error = "Invalid identifiers" } | ConvertTo-Json -Compress
+                        break
+                    }
+                    try {
+                        $result = Get-WorkflowRunResultsForApi -BotRoot $botRoot -WorkflowName $wfName -RunId $runId
+                        if (-not $result.success) { $statusCode = 404 }
+                        $content = $result | ConvertTo-Json -Depth 10 -Compress
+                    } catch {
+                        $statusCode = 500
+                        $content = @{ success = $false; error = "Failed to get results: $($_.Exception.Message)" } | ConvertTo-Json -Compress
+                    }
+                    break
+                }
+
                 # GET single run / DELETE single run — single arm matches both methods.
-                # Must come AFTER the /stop and /kill arms so they win the regex race.
+                # Must come AFTER the /stop, /kill, /results arms so they win the regex race.
                 { $_ -match "^/api/workflows/[^/]+/runs/[^/]+/?$" } {
                     $contentType = "application/json; charset=utf-8"
                     if ($url -match "^/api/workflows/([^/]+)/runs/([^/]+)/?$") {

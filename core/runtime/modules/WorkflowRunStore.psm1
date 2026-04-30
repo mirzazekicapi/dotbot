@@ -45,17 +45,17 @@ function Get-WorkflowRunPath {
 }
 
 function Get-WorkflowRunOutputsDir {
+    <#
+        Returns the BotRoot-relative outputs directory for a run. Stored as a
+        relative path in the run record (`workspace/{workflow}/runs/{id}`) so the
+        record stays portable across machines / paths. Callers that need an
+        absolute path should `Join-Path $BotRoot $outputs_dir` themselves.
+    #>
     param(
-        [Parameter(Mandatory)][string]$BotRoot,
         [Parameter(Mandatory)][string]$WorkflowName,
         [Parameter(Mandatory)][string]$RunId
     )
-    # Workspace path mirrors the QA-specific layout (`workspace/product/qa-runs/{id}/`)
-    # but parameterized by workflow name so any workflow's outputs are organised the
-    # same way: `workspace/{workflow}/runs/{id}/`. Tasks read this from their run
-    # record's `outputs_dir` field; output collection (Step 3) copies declared
-    # `outputs:` into here.
-    Join-Path $BotRoot "workspace/$WorkflowName/runs/$RunId"
+    "workspace/$WorkflowName/runs/$RunId"
 }
 
 # ---------------------------------------------------------------------------
@@ -99,7 +99,7 @@ function New-WorkflowRun {
         pid           = if ($Pid -gt 0) { $Pid } else { $null }
         form_input    = $FormInput
         task_ids      = @($TaskIds)
-        outputs_dir   = (Get-WorkflowRunOutputsDir -BotRoot $BotRoot -WorkflowName $WorkflowName -RunId $runId)
+        outputs_dir   = (Get-WorkflowRunOutputsDir -WorkflowName $WorkflowName -RunId $runId)
         approval_mode = [bool]$ApprovalMode
         phases        = @()
         metadata      = @{}
@@ -220,7 +220,7 @@ function Remove-WorkflowRun {
         $record = Get-Content $path -Raw | ConvertFrom-Json
         $outputsDir = if ($record.PSObject.Properties['outputs_dir']) { $record.outputs_dir } else { $null }
         if ($outputsDir) {
-            $absDir = if ([System.IO.Path]::IsPathRooted($outputsDir)) { $outputsDir } else { Join-Path $BotRoot ".." $outputsDir }
+            $absDir = if ([System.IO.Path]::IsPathRooted($outputsDir)) { $outputsDir } else { Join-Path $BotRoot $outputsDir }
             if (Test-Path $absDir) {
                 Remove-Item -Path $absDir -Recurse -Force -ErrorAction SilentlyContinue
             }

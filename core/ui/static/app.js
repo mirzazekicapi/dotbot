@@ -52,6 +52,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     initActions();
     initNotifications();
     await initDecisions();
+    if (typeof initWorkflowRuns === 'function') initWorkflowRuns();
 
     // Initialize Aether (ambient feedback)
     Aether.init().then(result => {

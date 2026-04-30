@@ -114,6 +114,72 @@ function Stop-WorkflowRunHardForApi {
     return @{ success = $true; run_id = $RunId; killed = $killed }
 }
 
+function Get-WorkflowRunResultsForApi {
+    <#
+        Returns the artifacts (files) currently in the run's outputs_dir, organised
+        for UI display. Inlines small markdown files (<= 256 KB) so the UI doesn't
+        need a second round-trip. Larger files come back as path-only entries.
+
+        Today the run's outputs_dir is empty until something writes to it — Step 3
+        of the QA refactor will wire up a post-task hook that copies declared
+        `outputs:` files into the run dir. Until then this endpoint returns an empty
+        artifact list for new generic runs.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$BotRoot,
+        [Parameter(Mandatory)][string]$WorkflowName,
+        [Parameter(Mandatory)][string]$RunId
+    )
+    $run = Get-WorkflowRun -BotRoot $BotRoot -RunId $RunId
+    if (-not $run -or $run.workflow_name -ne $WorkflowName) {
+        return @{ success = $false; error = "Run not found: $RunId" }
+    }
+    $outputsDir = if ($run.PSObject.Properties['outputs_dir']) { $run.outputs_dir } else { $null }
+    if (-not $outputsDir) {
+        return @{ success = $true; outputs_dir = $null; artifacts = @() }
+    }
+    # outputs_dir is stored as a BotRoot-relative path (e.g. workspace/qa-via-jira/runs/{id}).
+    $absDir = if ([System.IO.Path]::IsPathRooted($outputsDir)) {
+        $outputsDir
+    } else {
+        Join-Path $BotRoot $outputsDir
+    }
+    if (-not (Test-Path $absDir)) {
+        return @{ success = $true; outputs_dir = $outputsDir; artifacts = @() }
+    }
+
+    $artifacts = @()
+    $maxInlineBytes = 256KB
+    Get-ChildItem -Path $absDir -Recurse -File -ErrorAction SilentlyContinue | ForEach-Object {
+        $rel = $_.FullName.Substring($absDir.Length).TrimStart('\','/')
+        $entry = [ordered]@{
+            name      = $_.Name
+            path      = $rel.Replace('\','/')
+            size      = $_.Length
+            modified  = $_.LastWriteTimeUtc.ToString("o")
+            content   = $null
+            truncated = $false
+        }
+        if ($_.Length -le $maxInlineBytes -and $_.Extension -in @('.md', '.txt', '.json', '.yaml', '.yml')) {
+            try {
+                $entry.content = Get-Content $_.FullName -Raw -ErrorAction Stop
+            } catch {
+                $entry.content = $null
+            }
+        } else {
+            $entry.truncated = $true
+        }
+        $artifacts += [pscustomobject]$entry
+    }
+
+    return @{
+        success     = $true
+        outputs_dir = $outputsDir
+        artifacts   = @($artifacts | Sort-Object path)
+    }
+}
+
 function Remove-WorkflowRunForApi {
     [CmdletBinding()]
     param(
@@ -263,6 +329,7 @@ function Get-WorkflowRunTaskStats {
 Export-ModuleMember -Function @(
     'Get-WorkflowRunsForApi',
     'Get-WorkflowRunForApi',
+    'Get-WorkflowRunResultsForApi',
     'Stop-WorkflowRunForApi',
     'Stop-WorkflowRunHardForApi',
     'Remove-WorkflowRunForApi',

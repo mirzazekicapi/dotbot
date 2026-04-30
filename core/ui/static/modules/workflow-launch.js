@@ -274,6 +274,7 @@ function renderWorkflowCardGrid(container) {
                     <span class="workflow-card-name">${escapeHtml(name)}</span>
                     <div class="workflow-card-actions">
                         <button class="ctrl-btn-xs primary wf-run-btn" title="Run ${escapeHtml(name)}" ${isRunning || Object.keys(installedWorkflowMap).length === 0 ? 'disabled' : ''}>Run</button>
+                        <button class="ctrl-btn-xs wf-runs-btn" title="View runs">Runs</button>
                         <button class="ctrl-btn-xs wf-stop-btn" title="Stop ${escapeHtml(name)}" ${!isRunning ? 'disabled' : ''}>Stop</button>
                     </div>
                 </div>
@@ -307,6 +308,10 @@ function renderWorkflowCardGrid(container) {
         });
         const stopBtn = card.querySelector('.wf-stop-btn');
         if (stopBtn) stopBtn.addEventListener('click', () => stopWorkflow(wfName));
+        const runsBtn = card.querySelector('.wf-runs-btn');
+        if (runsBtn) runsBtn.addEventListener('click', () => {
+            if (typeof openWorkflowRunsModal === 'function') openWorkflowRunsModal(wfName);
+        });
     });
     container.style.display = 'block';
 }

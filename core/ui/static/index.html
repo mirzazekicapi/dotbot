@@ -1534,6 +1534,35 @@
         </div>
     </div>
 
+    <!-- Workflow Runs Modal — generic per-workflow run list + run detail -->
+    <div class="modal-overlay" id="workflow-runs-modal">
+        <div class="modal modal-wide">
+            <div class="modal-header">
+                <span class="modal-title">◈ <span id="workflow-runs-title">Runs</span></span>
+                <div style="margin-left: auto; display: flex; gap: 8px;">
+                    <button class="ctrl-btn-xs" id="workflow-runs-refresh-btn" title="Refresh">Refresh</button>
+                </div>
+                <button class="modal-close"><!-- Close icon loaded dynamically --></button>
+            </div>
+            <div class="modal-body">
+                <!-- List view -->
+                <div id="workflow-runs-list-view">
+                    <div id="workflow-runs-list" class="workflow-runs-list">
+                        <div class="workflow-runs-empty"><div class="workflow-runs-empty-hint">Loading runs...</div></div>
+                    </div>
+                </div>
+                <!-- Detail view -->
+                <div id="workflow-runs-detail-view" style="display:none">
+                    <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 12px;">
+                        <button class="ctrl-btn-xs" id="workflow-runs-back-btn">&#8592; Back</button>
+                        <span style="color: var(--color-text-dim); font-size: 11px;">Run detail</span>
+                    </div>
+                    <div id="workflow-run-detail-body"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <!-- Analyse Project Modal -->
     <div class="modal-overlay" id="analyse-modal">
         <div class="modal modal-wide">
@@ -1607,6 +1636,7 @@
     <script src="modules/workflow.js"></script>
     <script src="modules/product.js"></script>
     <script src="modules/workflow-launch.js"></script>
+    <script src="modules/workflow-runs.js"></script>
     <script src="modules/tasks.js"></script>
     <script src="modules/roadmap-task-actions.js"></script>
     <script src="modules/processes.js"></script>
