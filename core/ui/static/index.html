@@ -61,7 +61,6 @@
                     <button class="tab" data-tab="processes">Processes</button>
                     <button class="tab" data-tab="decisions">Decisions</button>
                     <button class="tab" data-tab="workflow">Workflows</button>
-                    <button class="tab" data-tab="qa" id="qa-tab-btn" style="display:none">QA</button>
                     <button class="tab" data-tab="settings">Settings</button>
                 </div>
                 <button class="editor-btn dimmed" id="editor-btn" title="Configure editor" aria-label="Configure editor">
@@ -373,16 +372,6 @@
                                 <div class="settings-nav-item" data-settings-section="mothership">Mothership</div>
                                 <div class="settings-nav-item" data-settings-section="aether" id="aetherNavItem" style="display:none">Aether</div>
                             </div>
-                        </div>
-                    </div>
-                </div>
-                <div class="context-panel hidden" data-context="qa">
-                    <div class="sidebar-section">
-                        <div class="sidebar-header">
-                            <span class="sidebar-title">&#9672; QA</span>
-                        </div>
-                        <div class="sidebar-content" id="qa-sidebar-content">
-                            <!-- Populated by JS: artifact cards when run is selected -->
                         </div>
                     </div>
                 </div>
@@ -710,78 +699,6 @@
                             <div class="product-content full-width">
                                 <div class="doc-viewer" id="doc-viewer">
                                     <div class="doc-placeholder">Select a document from the left panel</div>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-
-                    <!-- QA Tab -->
-                    <div class="tab-pane" id="tab-qa">
-                        <div class="qa-runs-container">
-                            <!-- Preflight overlay (shown during checks) -->
-                            <div id="qa-preflight-overlay" style="display:none">
-                                <div class="qa-preflight-content">
-                                    <div class="qa-preflight-title" id="qa-preflight-title">Running preflight checks...</div>
-                                    <div class="qa-preflight-checks" id="qa-preflight-checks"></div>
-                                </div>
-                            </div>
-                            <!-- Run list view (default) -->
-                            <div id="qa-run-list">
-                                <div class="qa-empty-state" id="qa-empty">
-                                    <div class="qa-onboarding">
-                                        <div class="qa-onboarding-title">QA Plan Generator</div>
-                                        <div class="qa-onboarding-steps">
-                                            <div class="qa-onboarding-step">
-                                                <div class="qa-onboarding-num">1</div>
-                                                <div class="qa-onboarding-info">
-                                                    <div class="qa-onboarding-label">Enter Jira tickets</div>
-                                                    <div class="qa-onboarding-desc">Paste ticket keys or full URLs in the left panel</div>
-                                                </div>
-                                            </div>
-                                            <div class="qa-onboarding-step">
-                                                <div class="qa-onboarding-num">2</div>
-                                                <div class="qa-onboarding-info">
-                                                    <div class="qa-onboarding-label">Generate QA Plan</div>
-                                                    <div class="qa-onboarding-desc">Agent fetches Jira data, detects systems, and creates test plans</div>
-                                                </div>
-                                            </div>
-                                            <div class="qa-onboarding-step">
-                                                <div class="qa-onboarding-num">3</div>
-                                                <div class="qa-onboarding-info">
-                                                    <div class="qa-onboarding-label">Review artifacts</div>
-                                                    <div class="qa-onboarding-desc">Test plans and cases per system, ready to copy or download</div>
-                                                </div>
-                                            </div>
-                                        </div>
-                                    </div>
-                                </div>
-                                <!-- Run cards appended here by JS -->
-                            </div>
-                            <!-- Detail view (shown when a run is clicked) -->
-                            <div id="qa-run-detail" style="display:none">
-                                <div class="qa-detail-header" id="qa-detail-header">
-                                    <button class="ctrl-btn-xs" id="qa-back-btn">&#8592; Back</button>
-                                    <span class="qa-detail-title" id="qa-detail-title"></span>
-                                    <div class="qa-detail-actions">
-                                        <div class="qa-search-box" id="qa-search-box" style="display:none">
-                                            <input type="text" id="qa-search-input" class="qa-search-input" placeholder="Search..." />
-                                            <span class="qa-search-count" id="qa-search-count"></span>
-                                            <button class="qa-search-nav" id="qa-search-prev" title="Previous">&#9650;</button>
-                                            <button class="qa-search-nav" id="qa-search-next" title="Next">&#9660;</button>
-                                        </div>
-                                        <button class="ctrl-btn-xs" id="qa-copy-btn" style="display:none" title="Copy markdown to clipboard">Copy</button>
-                                        <button class="ctrl-btn-xs" id="qa-download-btn" style="display:none" title="Download all artifacts as ZIP">Download</button>
-                                        <button class="ctrl-btn-xs" id="qa-rerun-btn" style="display:none" title="Re-run with same inputs">Re-run</button>
-                                    </div>
-                                </div>
-                                <div class="qa-coverage-bar" id="qa-coverage-bar" style="display:none"></div>
-                                <div class="qa-progress-bar" id="qa-progress-bar" style="display:none">
-                                    <div class="qa-progress-steps" id="qa-progress-steps"></div>
-                                </div>
-                                <div class="qa-detail-body">
-                                    <div class="qa-detail-content" id="qa-detail-content">
-                                        <!-- Sub-cards or document view -->
-                                    </div>
                                 </div>
                             </div>
                         </div>
@@ -1617,37 +1534,6 @@
         </div>
     </div>
 
-    <!-- QA Generate Modal removed in Step 1 of QA refactor — replaced by generic
-         workflow-launch modal which renders fields declaratively from
-         qa-via-jira/workflow.yaml form.modes.fields. -->
-
-    <!-- QA Chat Modal -->
-    <div class="modal-overlay" id="qa-chat-modal">
-        <div class="modal">
-            <div class="modal-header">
-                <h2 class="modal-title">Refine</h2>
-                <button class="modal-close"><!-- Close --></button>
-            </div>
-            <div class="modal-body">
-                <div class="task-create-form">
-                    <div class="form-group">
-                        <label class="form-label">What would you like to change?</label>
-                        <textarea class="form-textarea" id="qa-chat-comment" rows="5" placeholder="Add more edge cases for the payment flow, include negative test scenarios, focus on the API layer..."></textarea>
-                        <div class="form-hint">Describe your requested changes and the plan will be regenerated with your feedback.</div>
-                    </div>
-                    <div class="form-hint" id="qa-chat-status" style="min-height: 16px;"></div>
-                </div>
-            </div>
-            <div class="modal-footer task-create-footer">
-                <button class="ctrl-btn" id="qa-chat-close-btn">Close</button>
-                <button class="ctrl-btn primary" id="qa-chat-send-btn">
-                    <span class="btn-text">Send</span>
-                    <span class="btn-loading" style="display: none;">Sending...</span>
-                </button>
-            </div>
-        </div>
-    </div>
-
     <!-- Analyse Project Modal -->
     <div class="modal-overlay" id="analyse-modal">
         <div class="modal modal-wide">
@@ -1726,7 +1612,6 @@
     <script src="modules/processes.js"></script>
     <script src="modules/editor.js"></script>
     <script src="modules/controls.js"></script>
-    <script src="modules/qa.js"></script>
     <script src="modules/activity.js"></script>
     <script src="modules/polling.js"></script>
     <script src="modules/ui-updates.js"></script>

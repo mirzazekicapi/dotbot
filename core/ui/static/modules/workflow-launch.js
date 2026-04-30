@@ -257,12 +257,6 @@ function renderWorkflowCardGrid(container) {
         return;
     }
 
-    // Hide workflow card grid when QA is the only workflow (QA has its own section)
-    if (names.length === 1 && names[0] === 'qa-via-jira') {
-        renderQAOverviewSection(container);
-        return;
-    }
-
     let html = '<div class="module-header" style="margin-bottom: 12px;"><span class="module-title">◈ Workflows</span></div><div class="workflow-card-grid">';
     names.forEach(name => {
         const wf = workflows[name] || { todo: 0, in_progress: 0, done: 0, total: 0 };
@@ -1549,25 +1543,3 @@ function renderOverviewWorkflowPhases(workflows) {
     }
 }
 
-/**
- * Render QA-specific section on the Overview page (replaces generic workflow cards)
- */
-function renderQAOverviewSection(container) {
-    container.innerHTML = `
-        <div class="qa-overview-section">
-            <div class="qa-overview-header">
-                <span class="qa-overview-title">QA Plan Generator</span>
-            </div>
-            <div class="qa-overview-desc">Generate test plans and test cases from Jira requirements</div>
-            <button class="workflow-launch-btn" id="qa-overview-btn" style="margin-top: 1rem">GENERATE QA PLAN</button>
-        </div>
-    `;
-    container.style.display = 'block';
-
-    const btn = document.getElementById('qa-overview-btn');
-    if (btn) {
-        // Route through the generic workflow-launch dialog so the form is
-        // rendered from qa-via-jira/workflow.yaml form.modes.fields.
-        btn.addEventListener('click', () => openWorkflowLaunchDialog('qa-via-jira'));
-    }
-}
