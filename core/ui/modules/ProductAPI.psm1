@@ -321,7 +321,7 @@ function Get-ProductDocumentRaw {
 
 function Get-PreflightResults {
     param(
-        [string]$Section = "kickstart"
+        [string]$Section = "workflow"
     )
     $botRoot = $script:Config.BotRoot
     $projectRoot = Split-Path -Parent $botRoot

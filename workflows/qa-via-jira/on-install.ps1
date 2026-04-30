@@ -12,7 +12,7 @@ if (-not (Test-Path $testCasesDir)) {
 }
 
 # ---------------------------------------------------------------------------
-# 2. Check MCP server availability (same pattern as kickstart-via-jira)
+# 2. Check MCP server availability (same pattern as start-from-jira)
 # ---------------------------------------------------------------------------
 $mcpJsonPath = Join-Path $ProjectDir ".mcp.json"
 if (Test-Path $mcpJsonPath) {
@@ -67,7 +67,7 @@ if (Test-Path $mcpJsonPath) {
 }
 
 # ---------------------------------------------------------------------------
-# 3. Bootstrap .env.local (same pattern as kickstart-via-jira)
+# 3. Bootstrap .env.local (same pattern as start-from-jira)
 # ---------------------------------------------------------------------------
 $envLocal = Join-Path $ProjectDir ".env.local"
 $envExample = Join-Path $PSScriptRoot ".env.example"

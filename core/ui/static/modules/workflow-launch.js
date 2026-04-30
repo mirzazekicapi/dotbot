@@ -1421,7 +1421,7 @@ function renderQAOverviewSection(container) {
                 <span class="qa-overview-title">QA Plan Generator</span>
             </div>
             <div class="qa-overview-desc">Generate test plans and test cases from Jira requirements</div>
-            <button class="kickstart-btn" id="qa-overview-btn" style="margin-top: 1rem">GENERATE QA PLAN</button>
+            <button class="workflow-launch-btn" id="qa-overview-btn" style="margin-top: 1rem">GENERATE QA PLAN</button>
         </div>
     `;
     container.style.display = 'block';
