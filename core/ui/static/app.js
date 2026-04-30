@@ -53,7 +53,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     initNotifications();
     await initDecisions();
     await initQATab();
-    if (typeof initQAGenerateModal === 'function') initQAGenerateModal();
 
     // Initialize Aether (ambient feedback)
     Aether.init().then(result => {

@@ -143,6 +143,10 @@ Import-Module (Join-Path $PSScriptRoot "modules\StateBuilder.psm1") -Force
 Import-Module (Join-Path $PSScriptRoot "modules\NotificationPoller.psm1") -Force
 Import-Module (Join-Path $PSScriptRoot "modules\DecisionAPI.psm1") -Force
 Import-Module (Join-Path $PSScriptRoot "modules\InboxWatcher.psm1") -Force
+# Generic per-workflow run tracking — replaces the QA-specific .control/qa-runs/
+# storage. WorkflowRunStore must load before WorkflowRunsAPI (handlers depend on it).
+Import-Module (Join-Path $botRoot "core\runtime\modules\WorkflowRunStore.psm1") -Force -DisableNameChecking
+Import-Module (Join-Path $PSScriptRoot "modules\WorkflowRunsAPI.psm1") -Force
 
 # Import workflow manifest utilities (for installed workflows API)
 . (Join-Path $botRoot "core/runtime/modules/workflow-manifest.ps1")
@@ -393,6 +397,26 @@ function Get-WorkflowFormConfig {
                 }
                 foreach ($key in @('interview_label', 'interview_hint', 'prompt_placeholder')) {
                     if ($activeMode[$key]) { $workflowDialog[$key] = "$($activeMode[$key])" }
+                }
+                # Custom form fields: declarative inputs the workflow needs (text, textarea, toggle).
+                # The frontend renders these generically; submitted values are POSTed as form_input.
+                $modeFields = if ($mode -is [System.Collections.IDictionary]) { $mode['fields'] } else { $mode.fields }
+                if ($modeFields -and $modeFields.Count -gt 0) {
+                    $normalizedFields = @()
+                    foreach ($field in $modeFields) {
+                        if (-not $field) { continue }
+                        $entry = @{}
+                        foreach ($k in @('id', 'type', 'label', 'placeholder', 'default', 'required', 'rows', 'hint')) {
+                            $v = if ($field -is [System.Collections.IDictionary]) { $field[$k] } else { $field.$k }
+                            if ($null -ne $v) { $entry[$k] = $v }
+                        }
+                        if ($entry.Count -gt 0 -and $entry['id'] -and $entry['type']) {
+                            $normalizedFields += $entry
+                        }
+                    }
+                    if ($normalizedFields.Count -gt 0) {
+                        $workflowDialog['fields'] = $normalizedFields
+                    }
                 }
                 break
             }
@@ -3273,6 +3297,17 @@ $docContext
                                     $body.prompt | Set-Content -Path (Join-Path $launchersDir "workflow-launch-prompt.txt") -Encoding UTF8 -NoNewline
                                 }
 
+                                # Save custom form_input (declared via form.modes.fields) for prompt-template tasks to read.
+                                # Path is per-workflow so multiple workflows can launch without clobbering each other.
+                                if ($body -and $body.PSObject.Properties['form_input'] -and $body.form_input) {
+                                    $launchersDir = Join-Path $botRoot ".control\launchers"
+                                    if (-not (Test-Path $launchersDir)) {
+                                        New-Item -Path $launchersDir -ItemType Directory -Force | Out-Null
+                                    }
+                                    $formInputPath = Join-Path $launchersDir "$wfName-form-input.json"
+                                    $body.form_input | ConvertTo-Json -Depth 10 | Set-Content -Path $formInputPath -Encoding UTF8
+                                }
+
                                 $manifest = Read-WorkflowManifest -WorkflowDir $wfDir
 
                                 # Clear tasks if rerun: fresh
@@ -3295,6 +3330,67 @@ $docContext
 
                                 # Start-ProcessLaunch auto-detects max_concurrent for workflow type
                                 $launchResult = Start-ProcessLaunch -Type 'task-runner' -Continue $true -Description "Workflow: $wfName" -WorkflowName $wfName
+
+                                # Create a workflow-run record so the new generic /api/workflows/{name}/runs
+                                # endpoints have something to surface. This shadows the QA-specific
+                                # .control/qa-runs/ storage that /api/qa/generate writes (those endpoints stay
+                                # alive until later refactor steps remove them — see plan).
+                                $formInputHash = @{}
+                                if ($body -and $body.PSObject.Properties['form_input'] -and $body.form_input) {
+                                    foreach ($prop in $body.form_input.PSObject.Properties) {
+                                        $formInputHash[$prop.Name] = $prop.Value
+                                    }
+                                }
+                                $approvalMode = $false
+                                if ($formInputHash.ContainsKey('approval_mode')) { $approvalMode = [bool]$formInputHash['approval_mode'] }
+                                $taskIds = @($createdTasks | Where-Object { $_ -and $_.id } | ForEach-Object { $_.id })
+                                $runRecord = $null
+                                try {
+                                    $runRecord = New-WorkflowRun -BotRoot $botRoot -WorkflowName $wfName `
+                                        -FormInput $formInputHash -TaskIds $taskIds `
+                                        -ApprovalMode $approvalMode -ProcessId $launchResult.process_id
+                                } catch {
+                                    # Run record creation must never fail the launch — it's bookkeeping.
+                                    Write-BotLog -Level Warn -Message "WorkflowRunStore: failed to create run record for $wfName" -Exception $_ -ErrorAction SilentlyContinue
+                                }
+
+                                # TEMP COMPAT SHIM (QA refactor — Step 2): the QA tab reads from
+                                # .control/qa-runs/ and there are still QA endpoints (results, approve, chat,
+                                # revert, kill, delete) that depend on that file. Mirror the new run record
+                                # there so the QA tab keeps showing new runs through the transition.
+                                # REMOVE this block when the last /api/qa/* endpoint is deleted (Step 5/6).
+                                if ($runRecord -and $wfName -eq 'qa-via-jira') {
+                                    try {
+                                        $qaRunsDir = Join-Path $botRoot ".control\qa-runs"
+                                        if (-not (Test-Path $qaRunsDir)) {
+                                            New-Item -Path $qaRunsDir -ItemType Directory -Force | Out-Null
+                                        }
+                                        $jiraKeysCompat = if ($formInputHash.ContainsKey('jira_keys')) { $formInputHash['jira_keys'] } else { '' }
+                                        $confluenceCompat = if ($formInputHash.ContainsKey('confluence_urls')) { $formInputHash['confluence_urls'] } else { '' }
+                                        $instructionsCompat = if ($formInputHash.ContainsKey('instructions')) { $formInputHash['instructions'] } else { '' }
+                                        $qaRunMeta = @{
+                                            id = $runRecord.id
+                                            jira_keys = $jiraKeysCompat
+                                            confluence_urls = $confluenceCompat
+                                            instructions = $instructionsCompat
+                                            status = "processing"
+                                            workflow_name = $wfName
+                                            approval_mode = $approvalMode
+                                            process_id = $launchResult.process_id
+                                            pid = $launchResult.pid
+                                            created_at = $runRecord.started_at
+                                            completed_at = $null
+                                            scenario_count = 0
+                                            test_case_count = 0
+                                            task_count = $createdTasks.Count
+                                            approvals = @{ test_plan = $null; uat_plan = $null; test_cases = $null }
+                                        }
+                                        $qaRunMeta | ConvertTo-Json -Depth 3 | Set-Content (Join-Path $qaRunsDir "$($runRecord.id).json") -Encoding UTF8
+                                    } catch {
+                                        Write-BotLog -Level Warn -Message "QA compat shim: failed to write qa-runs/ mirror" -Exception $_ -ErrorAction SilentlyContinue
+                                    }
+                                }
+
                                 # NOTE: do not assign to $response here — that variable holds the HttpListenerResponse
                                 # used by the outer write loop. Shadowing it causes the response to never be sent.
                                 $runResponse = @{
@@ -3304,6 +3400,7 @@ $docContext
                                     slots_launched = $launchResult.slots_launched
                                     process_id = $launchResult.process_id
                                 }
+                                if ($runRecord) { $runResponse.run_id = $runRecord.id }
                                 if ($failedFiles -gt 0) { $runResponse.files_failed = $failedFiles }
                                 $content = $runResponse | ConvertTo-Json -Compress
                             }
@@ -3342,6 +3439,137 @@ $docContext
                         } catch {
                             $statusCode = 500
                             $content = @{ success = $false; error = "Failed to stop workflow: $($_.Exception.Message)" } | ConvertTo-Json -Compress
+                        }
+                    } else {
+                        $statusCode = 405
+                        $content = @{ success = $false; error = "Method not allowed" } | ConvertTo-Json -Compress
+                    }
+                    break
+                }
+
+                # ─── Generic per-workflow run management (replaces /api/qa/runs etc.) ───
+                # Pattern: /api/workflows/{name}/runs[/{run-id}[/stop|kill]]
+                # Routes to handlers in WorkflowRunsAPI.psm1 which delegate to WorkflowRunStore.
+
+                { $_ -match "^/api/workflows/[^/]+/runs/?$" } {
+                    if ($method -ne "GET") {
+                        $statusCode = 405
+                        $contentType = "application/json; charset=utf-8"
+                        $content = @{ success = $false; error = "Method not allowed" } | ConvertTo-Json -Compress
+                        break
+                    }
+                    $contentType = "application/json; charset=utf-8"
+                    $wfName = ($url -replace "^/api/workflows/", "" -replace "/runs/?$", "")
+                    if ($wfName -notmatch '^[a-zA-Z0-9_-]+$') {
+                        $statusCode = 400
+                        $content = @{ success = $false; error = "Invalid workflow name: $wfName" } | ConvertTo-Json -Compress
+                        break
+                    }
+                    try {
+                        $payload = Get-WorkflowRunsForApi -BotRoot $botRoot -WorkflowName $wfName
+                        $content = $payload | ConvertTo-Json -Depth 8 -Compress
+                    } catch {
+                        $statusCode = 500
+                        $content = @{ success = $false; error = "Failed to list runs: $($_.Exception.Message)" } | ConvertTo-Json -Compress
+                    }
+                    break
+                }
+
+                { $_ -match "^/api/workflows/[^/]+/runs/[^/]+/stop$" } {
+                    if ($method -ne "POST") {
+                        $statusCode = 405
+                        $contentType = "application/json; charset=utf-8"
+                        $content = @{ success = $false; error = "Method not allowed" } | ConvertTo-Json -Compress
+                        break
+                    }
+                    $contentType = "application/json; charset=utf-8"
+                    if ($url -match "^/api/workflows/([^/]+)/runs/([^/]+)/stop$") {
+                        $wfName = $matches[1]; $runId = $matches[2]
+                    } else {
+                        $statusCode = 400
+                        $content = @{ success = $false; error = "Bad path" } | ConvertTo-Json -Compress
+                        break
+                    }
+                    if ($wfName -notmatch '^[a-zA-Z0-9_-]+$' -or $runId -notmatch '^[a-zA-Z0-9_-]+$') {
+                        $statusCode = 400
+                        $content = @{ success = $false; error = "Invalid identifiers" } | ConvertTo-Json -Compress
+                        break
+                    }
+                    try {
+                        $result = Stop-WorkflowRunForApi -BotRoot $botRoot -WorkflowName $wfName -RunId $runId
+                        if (-not $result.success) { $statusCode = 404 }
+                        $content = $result | ConvertTo-Json -Compress
+                    } catch {
+                        $statusCode = 500
+                        $content = @{ success = $false; error = "Failed to stop run: $($_.Exception.Message)" } | ConvertTo-Json -Compress
+                    }
+                    break
+                }
+
+                { $_ -match "^/api/workflows/[^/]+/runs/[^/]+/kill$" } {
+                    if ($method -ne "POST") {
+                        $statusCode = 405
+                        $contentType = "application/json; charset=utf-8"
+                        $content = @{ success = $false; error = "Method not allowed" } | ConvertTo-Json -Compress
+                        break
+                    }
+                    $contentType = "application/json; charset=utf-8"
+                    if ($url -match "^/api/workflows/([^/]+)/runs/([^/]+)/kill$") {
+                        $wfName = $matches[1]; $runId = $matches[2]
+                    } else {
+                        $statusCode = 400
+                        $content = @{ success = $false; error = "Bad path" } | ConvertTo-Json -Compress
+                        break
+                    }
+                    if ($wfName -notmatch '^[a-zA-Z0-9_-]+$' -or $runId -notmatch '^[a-zA-Z0-9_-]+$') {
+                        $statusCode = 400
+                        $content = @{ success = $false; error = "Invalid identifiers" } | ConvertTo-Json -Compress
+                        break
+                    }
+                    try {
+                        $result = Stop-WorkflowRunHardForApi -BotRoot $botRoot -WorkflowName $wfName -RunId $runId
+                        if (-not $result.success) { $statusCode = 404 }
+                        $content = $result | ConvertTo-Json -Compress
+                    } catch {
+                        $statusCode = 500
+                        $content = @{ success = $false; error = "Failed to kill run: $($_.Exception.Message)" } | ConvertTo-Json -Compress
+                    }
+                    break
+                }
+
+                # GET single run / DELETE single run — single arm matches both methods.
+                # Must come AFTER the /stop and /kill arms so they win the regex race.
+                { $_ -match "^/api/workflows/[^/]+/runs/[^/]+/?$" } {
+                    $contentType = "application/json; charset=utf-8"
+                    if ($url -match "^/api/workflows/([^/]+)/runs/([^/]+)/?$") {
+                        $wfName = $matches[1]; $runId = $matches[2]
+                    } else {
+                        $statusCode = 400
+                        $content = @{ success = $false; error = "Bad path" } | ConvertTo-Json -Compress
+                        break
+                    }
+                    if ($wfName -notmatch '^[a-zA-Z0-9_-]+$' -or $runId -notmatch '^[a-zA-Z0-9_-]+$') {
+                        $statusCode = 400
+                        $content = @{ success = $false; error = "Invalid identifiers" } | ConvertTo-Json -Compress
+                        break
+                    }
+                    if ($method -eq "GET") {
+                        try {
+                            $result = Get-WorkflowRunForApi -BotRoot $botRoot -WorkflowName $wfName -RunId $runId
+                            if (-not $result.success) { $statusCode = 404 }
+                            $content = $result | ConvertTo-Json -Depth 8 -Compress
+                        } catch {
+                            $statusCode = 500
+                            $content = @{ success = $false; error = "Failed to get run: $($_.Exception.Message)" } | ConvertTo-Json -Compress
+                        }
+                    } elseif ($method -eq "DELETE") {
+                        try {
+                            $result = Remove-WorkflowRunForApi -BotRoot $botRoot -WorkflowName $wfName -RunId $runId
+                            if (-not $result.success) { $statusCode = 400 }
+                            $content = $result | ConvertTo-Json -Compress
+                        } catch {
+                            $statusCode = 500
+                            $content = @{ success = $false; error = "Failed to delete run: $($_.Exception.Message)" } | ConvertTo-Json -Compress
                         }
                     } else {
                         $statusCode = 405

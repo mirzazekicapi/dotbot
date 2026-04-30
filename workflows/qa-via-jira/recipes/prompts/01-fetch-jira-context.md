@@ -4,7 +4,14 @@ Gather comprehensive requirements data from Jira for the QA pipeline.
 
 ## Input
 
-The prompt includes Jira ticket keys (e.g., `PROJ-123, PROJ-456`) and optionally Confluence page URLs and additional instructions.
+Form inputs are written to `.bot/.control/launchers/qa-via-jira-form-input.json` by the workflow runner. **Read this file first** to obtain:
+
+- `jira_keys` — comma-separated Jira ticket keys (required, e.g. `"PROJ-123, PROJ-456"`)
+- `confluence_urls` — newline-separated Confluence page URLs (optional)
+- `instructions` — free-text guidance for the QA plan (optional)
+- `approval_mode` — boolean (currently informational; phase gating wired in a later step)
+
+If the form-input file is missing (legacy launches), fall back to extracting the Jira keys from the user prompt text.
 
 ## Output
 

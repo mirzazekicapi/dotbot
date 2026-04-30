@@ -36,9 +36,36 @@ form:
       label: "Generate QA Plan"
       description: "Generate QA test plans and test cases from Jira requirements."
       button: "GENERATE QA PLAN"
-      prompt_placeholder: "Enter Jira ticket keys (e.g., PROJ-123, PROJ-456) or paste full URLs"
+      show_prompt: false
       show_interview: false
       show_files: false
+      # Declarative form inputs — rendered generically by core/ui/static/modules/workflow-launch.js.
+      # Values land in .bot/.control/launchers/qa-via-jira-form-input.json and are read by the
+      # 01-fetch-jira-context.md prompt template via {form_input.<id>}.
+      fields:
+        - id: jira_keys
+          type: text
+          label: "Jira Tickets"
+          required: true
+          placeholder: "PROJ-123, PROJ-456 or paste full URLs"
+          hint: "One or more Jira issue keys, comma-separated"
+        - id: confluence_urls
+          type: textarea
+          label: "Confluence Pages"
+          rows: 2
+          placeholder: "https://site.atlassian.net/wiki/spaces/..."
+          hint: "Optional Confluence page URLs, one per line"
+        - id: instructions
+          type: textarea
+          label: "Additional Instructions"
+          rows: 3
+          placeholder: "Focus on API validation, include negative test cases..."
+          hint: "Optional free-text guidance for the QA plan generation"
+        - id: approval_mode
+          type: toggle
+          label: "Require approval between phases"
+          default: false
+          hint: "Stop after each artifact for review before continuing (wired in a later step)"
 
 domain:
   task_categories: ["qa-test-plan", "qa-test-cases", "qa-uat", "qa-automation"]

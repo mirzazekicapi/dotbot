@@ -16,6 +16,7 @@ let workflowPhases = [];      // workflow-driven phases from /api/info
 let workflowLaunchMode = null;      // server-evaluated form mode from workflow manifest
 let workflowLaunchSubmitting = false; // in-flight guard against double submit
 let preflightController = null;  // AbortController for preflight fetch + animation
+let workflowLaunchFormInput = null; // collected custom-field values from form.modes.fields
 
 /**
  * Cancellable delay — rejects with AbortError when signal aborts.
@@ -439,6 +440,118 @@ function applyWorkflowLaunchDialog(dialog, phases, mode) {
     const wrapper = document.getElementById('workflow-launch-phase-list');
     if (container) container.replaceChildren();
     if (wrapper) wrapper.style.display = 'none';
+
+    // Custom form fields declared by the workflow's form.modes.fields block.
+    // Rendered generically (text/textarea/toggle); collected at submit and
+    // POSTed as form_input so prompt-template tasks can read them.
+    renderWorkflowLaunchFields(dialog?.fields);
+}
+
+/**
+ * Render custom form fields (text/textarea/toggle) declared in workflow.yaml.
+ * Idempotent — clears any prior render so reopening the modal doesn't stack fields.
+ *
+ * @param {Array|null} fields - field defs from dialog.fields
+ */
+function renderWorkflowLaunchFields(fields) {
+    const host = document.getElementById('workflow-launch-fields');
+    if (!host) return;
+    host.replaceChildren();
+    if (!fields || !Array.isArray(fields) || fields.length === 0) {
+        host.style.display = 'none';
+        return;
+    }
+    host.style.display = '';
+    for (const field of fields) {
+        if (!field || !field.id || !field.type) continue;
+        const group = document.createElement('div');
+        group.className = field.type === 'toggle' ? 'form-option' : 'form-group';
+
+        if (field.type === 'toggle') {
+            const label = document.createElement('label');
+            label.className = 'form-checkbox-label';
+            const input = document.createElement('input');
+            input.type = 'checkbox';
+            input.id = `workflow-launch-field-${field.id}`;
+            input.dataset.fieldId = field.id;
+            input.dataset.fieldType = 'toggle';
+            input.classList.add('workflow-launch-field');
+            if (field.default === true) input.checked = true;
+            const text = document.createElement('span');
+            text.className = 'form-checkbox-text';
+            text.textContent = field.label || field.id;
+            label.appendChild(input);
+            label.appendChild(text);
+            group.appendChild(label);
+            if (field.hint) {
+                const hint = document.createElement('div');
+                hint.className = 'form-option-hint';
+                hint.textContent = field.hint;
+                group.appendChild(hint);
+            }
+        } else {
+            const label = document.createElement('label');
+            label.className = 'form-label';
+            label.htmlFor = `workflow-launch-field-${field.id}`;
+            label.textContent = field.label || field.id;
+            if (field.required) {
+                const req = document.createElement('span');
+                req.style.color = 'var(--color-accent)';
+                req.textContent = ' *';
+                label.appendChild(req);
+            }
+            group.appendChild(label);
+
+            let input;
+            if (field.type === 'textarea') {
+                input = document.createElement('textarea');
+                input.className = 'form-textarea';
+                input.rows = field.rows || 3;
+            } else {
+                // default: text
+                input = document.createElement('input');
+                input.type = 'text';
+                input.className = 'form-input';
+            }
+            input.id = `workflow-launch-field-${field.id}`;
+            input.dataset.fieldId = field.id;
+            input.dataset.fieldType = field.type;
+            input.classList.add('workflow-launch-field');
+            if (field.placeholder) input.placeholder = field.placeholder;
+            if (field.default != null && field.type !== 'toggle') input.value = field.default;
+            if (field.required) input.required = true;
+            group.appendChild(input);
+
+            if (field.hint) {
+                const hint = document.createElement('div');
+                hint.className = 'form-hint';
+                hint.textContent = field.hint;
+                group.appendChild(hint);
+            }
+        }
+        host.appendChild(group);
+    }
+}
+
+/**
+ * Collect values from the rendered custom fields into a plain object.
+ * Returns null if no fields are rendered.
+ */
+function collectWorkflowLaunchFormInput() {
+    const inputs = document.querySelectorAll('.workflow-launch-field');
+    if (!inputs.length) return null;
+    const out = {};
+    for (const el of inputs) {
+        const id = el.dataset.fieldId;
+        const type = el.dataset.fieldType;
+        if (!id) continue;
+        if (type === 'toggle') {
+            out[id] = !!el.checked;
+        } else {
+            out[id] = (el.value || '').trim();
+        }
+    }
+    return out;
 }
 
 /**
@@ -671,7 +784,28 @@ async function submitWorkflowLaunch() {
         skipPhases.push(cb.dataset.phaseId);
     });
 
-    if (!prompt) {
+    // Custom form fields (declared via form.modes.fields). Validate required ones
+    // and short-circuit before preflight if anything's missing. Stored at module
+    // scope so executeWorkflowLaunch can read it without changing call signatures.
+    workflowLaunchFormInput = collectWorkflowLaunchFormInput();
+    const fieldDefs = workflowLaunchDialog?.fields;
+    if (fieldDefs && Array.isArray(fieldDefs)) {
+        for (const def of fieldDefs) {
+            if (!def?.required) continue;
+            const val = workflowLaunchFormInput?.[def.id];
+            const empty = (def.type === 'toggle') ? false : !val;
+            if (empty) {
+                showToast(`Required: ${def.label || def.id}`, 'warning');
+                return;
+            }
+        }
+    }
+
+    // Prompt is only required when the prompt field is shown — when it's hidden,
+    // workflows rely on form fields instead. (The hidden default_prompt fallback
+    // already supplies a value when show_prompt is false but no fields exist.)
+    const promptVisible = workflowLaunchDialog?.show_prompt !== false;
+    if (promptVisible && !prompt) {
         showToast('Please describe your project', 'warning');
         return;
     }
@@ -748,16 +882,20 @@ async function executeWorkflowLaunch(prompt, needsInterview, autoWorkflow, skipP
     }
 
     try {
+        const runBody = {
+            prompt: prompt,
+            files: workflowLaunchFiles.map(f => ({
+                name: f.name,
+                content: f.content
+            }))
+        };
+        if (workflowLaunchFormInput && Object.keys(workflowLaunchFormInput).length > 0) {
+            runBody.form_input = workflowLaunchFormInput;
+        }
         const response = await fetch(`${API_BASE}/api/workflows/${encodeURIComponent(workflowLaunchName)}/run`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                prompt: prompt,
-                files: workflowLaunchFiles.map(f => ({
-                    name: f.name,
-                    content: f.content
-                }))
-            })
+            body: JSON.stringify(runBody)
         });
 
         const result = await response.json();
@@ -1428,83 +1566,8 @@ function renderQAOverviewSection(container) {
 
     const btn = document.getElementById('qa-overview-btn');
     if (btn) {
-        btn.addEventListener('click', () => {
-            const modal = document.getElementById('qa-generate-modal');
-            if (modal) modal.classList.add('visible');
-        });
-    }
-}
-
-/**
- * Initialize QA generate modal (called from app.js)
- */
-function initQAGenerateModal() {
-    const modal = document.getElementById('qa-generate-modal');
-    if (!modal) return;
-
-    const closeBtn = modal.querySelector('.modal-close');
-    const cancelBtn = document.getElementById('qa-modal-cancel');
-    const submitBtn = document.getElementById('qa-modal-submit');
-
-    const close = () => modal.classList.remove('visible');
-    if (closeBtn) closeBtn.addEventListener('click', close);
-    if (cancelBtn) cancelBtn.addEventListener('click', close);
-
-    if (submitBtn) {
-        submitBtn.addEventListener('click', async () => {
-            const jiraInput = document.getElementById('qa-modal-jira');
-            const confluenceInput = document.getElementById('qa-modal-confluence');
-            const instructionsInput = document.getElementById('qa-modal-instructions');
-            const statusEl = document.getElementById('qa-modal-status');
-
-            const jiraRaw = jiraInput ? jiraInput.value.trim() : '';
-            if (!jiraRaw) {
-                if (statusEl) { statusEl.textContent = 'Jira tickets required'; statusEl.style.color = 'var(--color-accent)'; }
-                return;
-            }
-
-            // Parse Jira keys (reuse parseJiraInput if available)
-            const jiraKeys = typeof parseJiraInput === 'function' ? parseJiraInput(jiraRaw) : jiraRaw;
-            if (!jiraKeys) {
-                if (statusEl) { statusEl.textContent = 'No valid Jira keys found'; statusEl.style.color = 'var(--color-accent)'; }
-                return;
-            }
-
-            submitBtn.disabled = true;
-            submitBtn.querySelector('.btn-text').textContent = 'Generating...';
-            if (statusEl) { statusEl.textContent = 'Launching QA pipeline...'; statusEl.style.color = ''; }
-
-            try {
-                const response = await fetch(`${API_BASE}/api/qa/generate`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        jira_keys: jiraKeys,
-                        confluence_urls: confluenceInput ? confluenceInput.value.trim() : '',
-                        instructions: instructionsInput ? instructionsInput.value.trim() : '',
-                        approval_mode: document.getElementById('qa-modal-approval')?.checked || false
-                    })
-                });
-                const data = await response.json();
-                if (data.success) {
-                    if (typeof showToast === 'function') showToast('QA pipeline launched', 'success');
-                    close();
-                    // Clear form
-                    if (jiraInput) jiraInput.value = '';
-                    if (confluenceInput) confluenceInput.value = '';
-                    if (instructionsInput) instructionsInput.value = '';
-                    // Switch to QA tab to see the run
-                    if (typeof switchToTab === 'function') switchToTab('qa');
-                    if (typeof loadQARuns === 'function') await loadQARuns();
-                } else {
-                    if (statusEl) { statusEl.textContent = data.error || 'Launch failed'; statusEl.style.color = 'var(--color-accent)'; }
-                }
-            } catch (err) {
-                if (statusEl) { statusEl.textContent = err.message; statusEl.style.color = 'var(--color-accent)'; }
-            } finally {
-                submitBtn.disabled = false;
-                submitBtn.querySelector('.btn-text').textContent = 'Generate';
-            }
-        });
+        // Route through the generic workflow-launch dialog so the form is
+        // rendered from qa-via-jira/workflow.yaml form.modes.fields.
+        btn.addEventListener('click', () => openWorkflowLaunchDialog('qa-via-jira'));
     }
 }
