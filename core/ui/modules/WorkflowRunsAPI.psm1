@@ -180,6 +180,61 @@ function Get-WorkflowRunResultsForApi {
     }
 }
 
+function Get-WorkflowRunVersionsForApi {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$BotRoot,
+        [Parameter(Mandatory)][string]$WorkflowName,
+        [Parameter(Mandatory)][string]$RunId
+    )
+    $run = Get-WorkflowRun -BotRoot $BotRoot -RunId $RunId
+    if (-not $run -or $run.workflow_name -ne $WorkflowName) {
+        return @{ success = $false; error = "Run not found: $RunId" }
+    }
+    $versions = @()
+    if (Get-Command Get-OutputsVersions -ErrorAction SilentlyContinue) {
+        $versions = @(Get-OutputsVersions -BotRoot $BotRoot -OutputsDirRel $run.outputs_dir)
+    }
+    return @{ success = $true; versions = $versions }
+}
+
+function Invoke-WorkflowRunRefineForApi {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$BotRoot,
+        [Parameter(Mandatory)][string]$WorkflowName,
+        [Parameter(Mandatory)][string]$RunId,
+        [Parameter(Mandatory)][string]$PhaseId,
+        [string]$Comment = ""
+    )
+    $run = Get-WorkflowRun -BotRoot $BotRoot -RunId $RunId
+    if (-not $run -or $run.workflow_name -ne $WorkflowName) {
+        return @{ success = $false; error = "Run not found: $RunId" }
+    }
+    if (-not (Get-Command Invoke-PhaseRefine -ErrorAction SilentlyContinue)) {
+        return @{ success = $false; error = "PhaseGate module not loaded" }
+    }
+    return Invoke-PhaseRefine -BotRoot $BotRoot -RunId $RunId -PhaseId $PhaseId -Comment $Comment
+}
+
+function Invoke-WorkflowRunRevertForApi {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$BotRoot,
+        [Parameter(Mandatory)][string]$WorkflowName,
+        [Parameter(Mandatory)][string]$RunId,
+        [Parameter(Mandatory)][string]$VersionId
+    )
+    $run = Get-WorkflowRun -BotRoot $BotRoot -RunId $RunId
+    if (-not $run -or $run.workflow_name -ne $WorkflowName) {
+        return @{ success = $false; error = "Run not found: $RunId" }
+    }
+    if (-not (Get-Command Restore-OutputsVersion -ErrorAction SilentlyContinue)) {
+        return @{ success = $false; error = "PhaseGate module not loaded" }
+    }
+    return Restore-OutputsVersion -BotRoot $BotRoot -OutputsDirRel $run.outputs_dir -VersionId $VersionId
+}
+
 function Remove-WorkflowRunForApi {
     [CmdletBinding()]
     param(
@@ -330,6 +385,9 @@ Export-ModuleMember -Function @(
     'Get-WorkflowRunsForApi',
     'Get-WorkflowRunForApi',
     'Get-WorkflowRunResultsForApi',
+    'Get-WorkflowRunVersionsForApi',
+    'Invoke-WorkflowRunRefineForApi',
+    'Invoke-WorkflowRunRevertForApi',
     'Stop-WorkflowRunForApi',
     'Stop-WorkflowRunHardForApi',
     'Remove-WorkflowRunForApi',

@@ -2391,6 +2391,136 @@ $docContext
                     break
                 }
 
+                # Refine — re-run a phase with user feedback. Body: { phase_id, comment }.
+                # Archives current outputs, stashes the comment for prompts to read,
+                # resets the phase-completing task so the runner regenerates.
+                { $_ -match "^/api/workflows/[^/]+/runs/[^/]+/refine$" } {
+                    if ($method -ne "POST") {
+                        $statusCode = 405
+                        $contentType = "application/json; charset=utf-8"
+                        $content = @{ success = $false; error = "Method not allowed" } | ConvertTo-Json -Compress
+                        break
+                    }
+                    $contentType = "application/json; charset=utf-8"
+                    if ($url -match "^/api/workflows/([^/]+)/runs/([^/]+)/refine$") {
+                        $wfName = $matches[1]; $runId = $matches[2]
+                    } else {
+                        $statusCode = 400
+                        $content = @{ success = $false; error = "Bad path" } | ConvertTo-Json -Compress
+                        break
+                    }
+                    if ($wfName -notmatch '^[a-zA-Z0-9_-]+$' -or $runId -notmatch '^[a-zA-Z0-9_-]+$') {
+                        $statusCode = 400
+                        $content = @{ success = $false; error = "Invalid identifiers" } | ConvertTo-Json -Compress
+                        break
+                    }
+                    try {
+                        $body = $null
+                        try {
+                            $reader = New-Object System.IO.StreamReader($request.InputStream)
+                            $rawBody = $reader.ReadToEnd()
+                            $reader.Close()
+                            if ($rawBody) { $body = $rawBody | ConvertFrom-Json }
+                        } catch { $body = $null }
+
+                        $phaseId = if ($body -and $body.PSObject.Properties['phase_id']) { "$($body.phase_id)" } else { $null }
+                        $comment = if ($body -and $body.PSObject.Properties['comment']) { "$($body.comment)" } else { "" }
+                        if (-not $phaseId) {
+                            $run = Get-WorkflowRun -BotRoot $botRoot -RunId $runId
+                            if ($run -and $run.PSObject.Properties['current_phase']) { $phaseId = "$($run.current_phase)" }
+                        }
+                        if (-not $phaseId) {
+                            $statusCode = 400
+                            $content = @{ success = $false; error = "No phase_id provided and run has no current_phase" } | ConvertTo-Json -Compress
+                            break
+                        }
+                        $result = Invoke-WorkflowRunRefineForApi -BotRoot $botRoot -WorkflowName $wfName -RunId $runId -PhaseId $phaseId -Comment $comment
+                        if (-not $result.success) { $statusCode = 400 }
+                        $content = $result | ConvertTo-Json -Depth 6 -Compress
+
+                        # Re-launch task-runner so the reset task gets picked up.
+                        if ($result.success) {
+                            try {
+                                Start-ProcessLaunch -Type 'task-runner' -Continue $true -Description "Workflow: $wfName (refine)" -WorkflowName $wfName | Out-Null
+                            } catch {
+                                Write-BotLog -Level Warn -Message "Refine: failed to relaunch task-runner for $wfName" -Exception $_ -ErrorAction SilentlyContinue
+                            }
+                        }
+                    } catch {
+                        $statusCode = 500
+                        $content = @{ success = $false; error = "Failed to refine: $($_.Exception.Message)" } | ConvertTo-Json -Compress
+                    }
+                    break
+                }
+
+                # Versions — list snapshot folders inside outputs_dir/.versions/
+                { $_ -match "^/api/workflows/[^/]+/runs/[^/]+/versions$" } {
+                    if ($method -ne "GET") {
+                        $statusCode = 405
+                        $contentType = "application/json; charset=utf-8"
+                        $content = @{ success = $false; error = "Method not allowed" } | ConvertTo-Json -Compress
+                        break
+                    }
+                    $contentType = "application/json; charset=utf-8"
+                    if ($url -match "^/api/workflows/([^/]+)/runs/([^/]+)/versions$") {
+                        $wfName = $matches[1]; $runId = $matches[2]
+                    } else {
+                        $statusCode = 400
+                        $content = @{ success = $false; error = "Bad path" } | ConvertTo-Json -Compress
+                        break
+                    }
+                    try {
+                        $result = Get-WorkflowRunVersionsForApi -BotRoot $botRoot -WorkflowName $wfName -RunId $runId
+                        if (-not $result.success) { $statusCode = 404 }
+                        $content = $result | ConvertTo-Json -Depth 6 -Compress
+                    } catch {
+                        $statusCode = 500
+                        $content = @{ success = $false; error = "Failed to list versions: $($_.Exception.Message)" } | ConvertTo-Json -Compress
+                    }
+                    break
+                }
+
+                # Revert — restore a chosen version's files to outputs_dir.
+                # Snapshots the current state first so the revert is reversible.
+                { $_ -match "^/api/workflows/[^/]+/runs/[^/]+/revert$" } {
+                    if ($method -ne "POST") {
+                        $statusCode = 405
+                        $contentType = "application/json; charset=utf-8"
+                        $content = @{ success = $false; error = "Method not allowed" } | ConvertTo-Json -Compress
+                        break
+                    }
+                    $contentType = "application/json; charset=utf-8"
+                    if ($url -match "^/api/workflows/([^/]+)/runs/([^/]+)/revert$") {
+                        $wfName = $matches[1]; $runId = $matches[2]
+                    } else {
+                        $statusCode = 400
+                        $content = @{ success = $false; error = "Bad path" } | ConvertTo-Json -Compress
+                        break
+                    }
+                    try {
+                        $body = $null
+                        try {
+                            $reader = New-Object System.IO.StreamReader($request.InputStream)
+                            $rawBody = $reader.ReadToEnd()
+                            $reader.Close()
+                            if ($rawBody) { $body = $rawBody | ConvertFrom-Json }
+                        } catch { $body = $null }
+                        $versionId = if ($body -and $body.PSObject.Properties['version']) { "$($body.version)" } else { $null }
+                        if (-not $versionId) {
+                            $statusCode = 400
+                            $content = @{ success = $false; error = "version is required in body" } | ConvertTo-Json -Compress
+                            break
+                        }
+                        $result = Invoke-WorkflowRunRevertForApi -BotRoot $botRoot -WorkflowName $wfName -RunId $runId -VersionId $versionId
+                        if (-not $result.success) { $statusCode = 400 }
+                        $content = $result | ConvertTo-Json -Depth 6 -Compress
+                    } catch {
+                        $statusCode = 500
+                        $content = @{ success = $false; error = "Failed to revert: $($_.Exception.Message)" } | ConvertTo-Json -Compress
+                    }
+                    break
+                }
+
                 { $_ -match "^/api/workflows/[^/]+/runs/[^/]+/results$" } {
                     if ($method -ne "GET") {
                         $statusCode = 405

@@ -257,11 +257,224 @@ function Skip-Phase {
     return Resume-RunFromPhase -BotRoot $BotRoot -RunId $RunId -PhaseId $PhaseId -Decision 'skipped'
 }
 
+# ---------------------------------------------------------------------------
+# Refine — archive current outputs, stash feedback, reset phase task so the
+# runner regenerates with the feedback in context.
+# ---------------------------------------------------------------------------
+
+function Save-OutputsSnapshot {
+    <#
+        Archive the current contents of outputs_dir into outputs_dir/.versions/{timestamp}/.
+        Excludes the .versions/ subdir itself. Returns the version id (timestamp folder
+        name) or $null when there is nothing to archive.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$BotRoot,
+        [Parameter(Mandatory)][string]$OutputsDirRel
+    )
+    $absDir = if ([System.IO.Path]::IsPathRooted($OutputsDirRel)) { $OutputsDirRel } else { Join-Path $BotRoot $OutputsDirRel }
+    if (-not (Test-Path $absDir)) { return $null }
+
+    $versionsRoot = Join-Path $absDir ".versions"
+    $stamp = (Get-Date).ToUniversalTime().ToString("yyyyMMdd-HHmmss")
+    $versionDir = Join-Path $versionsRoot $stamp
+    if (-not (Test-Path $versionsRoot)) { New-Item -Path $versionsRoot -ItemType Directory -Force | Out-Null }
+    if (Test-Path $versionDir) {
+        # Same-second collision — append a short suffix.
+        $versionDir = "$versionDir-$([guid]::NewGuid().ToString('N').Substring(0,4))"
+    }
+    New-Item -Path $versionDir -ItemType Directory -Force | Out-Null
+
+    Get-ChildItem -Path $absDir -Force -ErrorAction SilentlyContinue | Where-Object {
+        $_.Name -ne '.versions'
+    } | ForEach-Object {
+        try {
+            Copy-Item -Path $_.FullName -Destination $versionDir -Recurse -Force -ErrorAction Stop
+        } catch {
+            Write-Host "Save-OutputsSnapshot: failed to copy $($_.FullName) — $_" -ErrorAction SilentlyContinue
+        }
+    }
+
+    return (Split-Path -Leaf $versionDir)
+}
+
+function Get-OutputsVersions {
+    <#
+        Lists snapshot folders inside outputs_dir/.versions/ — newest first.
+        Each entry: @{ id; created_at; file_count }.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$BotRoot,
+        [Parameter(Mandatory)][string]$OutputsDirRel
+    )
+    $absDir = if ([System.IO.Path]::IsPathRooted($OutputsDirRel)) { $OutputsDirRel } else { Join-Path $BotRoot $OutputsDirRel }
+    $versionsRoot = Join-Path $absDir ".versions"
+    if (-not (Test-Path $versionsRoot)) { return @() }
+    $entries = @()
+    Get-ChildItem -Path $versionsRoot -Directory -ErrorAction SilentlyContinue | ForEach-Object {
+        $count = @(Get-ChildItem -Path $_.FullName -Recurse -File -ErrorAction SilentlyContinue).Count
+        $entries += [pscustomobject]@{
+            id         = $_.Name
+            created_at = $_.CreationTimeUtc.ToString("o")
+            file_count = $count
+        }
+    }
+    return @($entries | Sort-Object id -Descending)
+}
+
+function Restore-OutputsVersion {
+    <#
+        Snapshot the current outputs (so the user can revert the revert) and then
+        copy files from .versions/{VersionId}/ back into outputs_dir.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$BotRoot,
+        [Parameter(Mandatory)][string]$OutputsDirRel,
+        [Parameter(Mandatory)][string]$VersionId
+    )
+    $absDir = if ([System.IO.Path]::IsPathRooted($OutputsDirRel)) { $OutputsDirRel } else { Join-Path $BotRoot $OutputsDirRel }
+    $versionDir = Join-Path (Join-Path $absDir ".versions") $VersionId
+    if (-not (Test-Path $versionDir)) { return @{ success = $false; error = "Version not found: $VersionId" } }
+
+    # Snapshot current state before overwriting so a revert is itself reversible.
+    $preRevertId = Save-OutputsSnapshot -BotRoot $BotRoot -OutputsDirRel $OutputsDirRel
+
+    # Wipe the live outputs (excluding .versions) before copying the chosen version on top.
+    Get-ChildItem -Path $absDir -Force -ErrorAction SilentlyContinue | Where-Object {
+        $_.Name -ne '.versions'
+    } | ForEach-Object {
+        Remove-Item -Path $_.FullName -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Get-ChildItem -Path $versionDir -Force -ErrorAction SilentlyContinue | ForEach-Object {
+        try {
+            Copy-Item -Path $_.FullName -Destination $absDir -Recurse -Force -ErrorAction Stop
+        } catch { }
+    }
+    return @{ success = $true; restored = $VersionId; pre_revert_snapshot = $preRevertId }
+}
+
+function Invoke-PhaseRefine {
+    <#
+        Refine the current phase: archive outputs, stash the user's comment,
+        reset the phase-completing task so the runner re-generates with the
+        feedback in context. Caller is responsible for kicking off a task-runner
+        process if one isn't already alive (the launch handler does this).
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$BotRoot,
+        [Parameter(Mandatory)][string]$RunId,
+        [Parameter(Mandatory)][string]$PhaseId,
+        [string]$Comment = ""
+    )
+    $run = Get-WorkflowRun -BotRoot $BotRoot -RunId $RunId
+    if (-not $run) { return @{ success = $false; error = "Run not found" } }
+
+    $phase = $null
+    foreach ($p in $run.phases) {
+        if ($p.id -eq $PhaseId) { $phase = $p; break }
+    }
+    if (-not $phase) { return @{ success = $false; error = "Phase not found: $PhaseId" } }
+
+    # 1. Snapshot current outputs.
+    $versionId = Save-OutputsSnapshot -BotRoot $BotRoot -OutputsDirRel $run.outputs_dir
+
+    # 2. Persist the feedback both in run metadata (for UI history) and in a
+    # refine-feedback.json under outputs_dir (where prompts can read it).
+    $now = (Get-Date).ToUniversalTime().ToString("o")
+    $entry = [ordered]@{
+        timestamp = $now
+        phase_id  = $PhaseId
+        comment   = $Comment
+        version_archived = $versionId
+    }
+    $absOutDir = if ([System.IO.Path]::IsPathRooted($run.outputs_dir)) { $run.outputs_dir } else { Join-Path $BotRoot $run.outputs_dir }
+    if (-not (Test-Path $absOutDir)) { New-Item -Path $absOutDir -ItemType Directory -Force | Out-Null }
+    $feedbackPath = Join-Path $absOutDir "refine-feedback.json"
+    $existingFeedback = @()
+    if (Test-Path $feedbackPath) {
+        try { $existingFeedback = @(Get-Content $feedbackPath -Raw | ConvertFrom-Json) } catch { $existingFeedback = @() }
+    }
+    $existingFeedback = @($existingFeedback + (New-Object psobject -Property $entry))
+    $existingFeedback | ConvertTo-Json -Depth 4 | Set-Content -Path $feedbackPath -Encoding UTF8
+
+    # Append to run metadata.refine_history
+    $history = @()
+    if ($run.PSObject.Properties['metadata'] -and $run.metadata.PSObject.Properties['refine_history']) {
+        $history = @($run.metadata.refine_history)
+    }
+    $history += (New-Object psobject -Property $entry)
+
+    # 3. Reset the phase status back to "pending" and clear current_phase if it was
+    # this one — the guard will re-fire on next completion of completes_after_task.
+    $newPhases = @()
+    foreach ($p in $run.phases) {
+        if ($p.id -eq $PhaseId) {
+            $p | Add-Member -NotePropertyName 'status' -NotePropertyValue 'pending' -Force
+            $p | Add-Member -NotePropertyName 'decided_at' -NotePropertyValue $null -Force
+        }
+        $newPhases += $p
+    }
+
+    # 4. Reset the phase-completing task — find by name + run_id, move from done/
+    # back to todo/ so the runner picks it up. Downstream tasks that were already
+    # done stay as-is (user is only refining this one phase).
+    $resetTaskId = $null
+    $taskName = $phase.completes_after_task
+    if ($taskName) {
+        foreach ($srcDir in @('done', 'cancelled', 'skipped')) {
+            $path = Join-Path $BotRoot "workspace/tasks/$srcDir"
+            if (-not (Test-Path $path)) { continue }
+            Get-ChildItem -Path $path -Filter "*.json" -ErrorAction SilentlyContinue | ForEach-Object {
+                if ($resetTaskId) { return }
+                try {
+                    $tData = Get-Content $_.FullName -Raw | ConvertFrom-Json
+                    if (-not $tData.PSObject.Properties['run_id'] -or $tData.run_id -ne $RunId) { return }
+                    $cleanName = ($tData.name -replace "\s*\[.*\]$", "")
+                    if ($cleanName -ne $taskName) { return }
+                    # Move to todo with status reset.
+                    $tData | Add-Member -NotePropertyName 'status' -NotePropertyValue 'todo' -Force
+                    $tData | Add-Member -NotePropertyName 'completed_at' -NotePropertyValue $null -Force
+                    $tData | Add-Member -NotePropertyName 'updated_at' -NotePropertyValue ((Get-Date).ToUniversalTime().ToString("yyyy-MM-dd'T'HH:mm:ss'Z'")) -Force
+                    $destDir = Join-Path $BotRoot "workspace/tasks/todo"
+                    if (-not (Test-Path $destDir)) { New-Item -Path $destDir -ItemType Directory -Force | Out-Null }
+                    $destPath = Join-Path $destDir $_.Name
+                    $tData | ConvertTo-Json -Depth 20 | Set-Content -Path $destPath -Encoding UTF8
+                    Remove-Item -Path $_.FullName -Force -ErrorAction SilentlyContinue
+                    $resetTaskId = $tData.id
+                } catch { }
+            }
+        }
+    }
+
+    # 5. Update the run record.
+    Update-WorkflowRun -BotRoot $BotRoot -RunId $RunId -Properties @{
+        phases   = $newPhases
+        status   = 'running'
+        current_phase = $null
+        metadata = @{ refine_history = $history }
+    } | Out-Null
+
+    return @{
+        success            = $true
+        version_archived   = $versionId
+        reset_task_id      = $resetTaskId
+        comment_recorded   = -not [string]::IsNullOrWhiteSpace($Comment)
+    }
+}
+
 Export-ModuleMember -Function @(
     'ConvertTo-PhaseRecords',
     'Test-PhaseGateForTask',
     'Apply-PhaseGate',
     'Approve-Phase',
     'Skip-Phase',
-    'Resume-RunFromPhase'
+    'Resume-RunFromPhase',
+    'Save-OutputsSnapshot',
+    'Get-OutputsVersions',
+    'Restore-OutputsVersion',
+    'Invoke-PhaseRefine'
 )

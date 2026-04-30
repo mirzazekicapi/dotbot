@@ -3316,3 +3316,31 @@
     white-space: nowrap;
 }
 
+/* Version snapshots in run detail */
+
+.wf-version-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 10px;
+    border: 1px solid var(--bezel-color);
+    border-radius: 3px;
+    background: var(--bg-screen);
+    font-size: 11px;
+    margin-bottom: 4px;
+}
+
+.wf-version-id {
+    font-family: var(--font-mono, monospace);
+    color: var(--color-text);
+    flex-shrink: 0;
+}
+
+.wf-version-meta {
+    color: var(--color-text-dim);
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+

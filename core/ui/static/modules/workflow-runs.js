@@ -215,6 +215,7 @@ function renderWorkflowRunDetail(run, resultsPayload) {
     const actionButtons = isAwaitingApproval
         ? `<button class="ctrl-btn-xs primary wf-run-detail-approve-btn">Approve</button>
            <button class="ctrl-btn-xs wf-run-detail-skip-btn">Skip</button>
+           <button class="ctrl-btn-xs wf-run-detail-refine-btn">Refine</button>
            <button class="ctrl-btn-xs wf-run-detail-kill-btn">Kill</button>`
         : isActive
             ? `<button class="ctrl-btn-xs wf-run-detail-stop-btn">Stop</button>
@@ -257,6 +258,10 @@ function renderWorkflowRunDetail(run, resultsPayload) {
         <div class="workflow-run-detail-section">
             <div class="workflow-run-detail-label">Artifacts</div>
             ${artifactsList}
+        </div>
+        <div class="workflow-run-detail-section" id="workflow-run-versions-section" style="display:none">
+            <div class="workflow-run-detail-label">Snapshots</div>
+            <div id="workflow-run-versions-list"></div>
         </div>`;
 
     body.querySelector('.wf-run-detail-stop-btn')?.addEventListener('click', () => stopWorkflowRun(run.id, true));
@@ -264,6 +269,10 @@ function renderWorkflowRunDetail(run, resultsPayload) {
     body.querySelector('.wf-run-detail-delete-btn')?.addEventListener('click', () => deleteWorkflowRun(run.id, true));
     body.querySelector('.wf-run-detail-approve-btn')?.addEventListener('click', () => approveWorkflowRunPhase(run.id, run.current_phase));
     body.querySelector('.wf-run-detail-skip-btn')?.addEventListener('click', () => skipWorkflowRunPhase(run.id, run.current_phase));
+    body.querySelector('.wf-run-detail-refine-btn')?.addEventListener('click', () => openRefineDialog(run.id, run.current_phase));
+
+    // Background-load versions and only show the section when at least one exists.
+    refreshRunVersions(run.id);
     body.querySelectorAll('.wf-artifact-toggle').forEach(btn => {
         btn.addEventListener('click', e => {
             const card = e.target.closest('.wf-artifact-card');
@@ -364,6 +373,92 @@ async function killWorkflowRun(runId, fromDetail = false) {
         await fetch(`${API_BASE}/api/workflows/${wf}/runs/${encodeURIComponent(runId)}/kill`, { method: 'POST' });
         if (fromDetail) await refreshWorkflowRunDetail(runId); else await refreshWorkflowRuns();
         if (typeof showToast === 'function') showToast('Run killed', 'success');
+    } catch (err) {
+        if (typeof showToast === 'function') showToast(err.message, 'error');
+    }
+}
+
+function openRefineDialog(runId, phaseId) {
+    if (!workflowRunsCurrentWf || !phaseId) {
+        if (typeof showToast === 'function') showToast('No phase to refine — phase must be awaiting approval', 'warning');
+        return;
+    }
+    // Lightweight inline prompt — keeps the modal stack flat. browser prompt() is
+    // ugly but functional; can be upgraded to a styled dialog later.
+    const comment = window.prompt(`Refine "${phaseId}" — describe the changes you want:\n(The current outputs will be archived as a snapshot before regenerating.)`, '');
+    if (comment === null) return; // user cancelled
+    submitRefine(runId, phaseId, comment);
+}
+
+async function submitRefine(runId, phaseId, comment) {
+    const wf = encodeURIComponent(workflowRunsCurrentWf);
+    try {
+        const res = await fetch(`${API_BASE}/api/workflows/${wf}/runs/${encodeURIComponent(runId)}/refine`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ phase_id: phaseId, comment: comment })
+        });
+        const data = await res.json();
+        if (!data.success) {
+            if (typeof showToast === 'function') showToast(data.error || 'Refine failed', 'error');
+            return;
+        }
+        if (typeof showToast === 'function') showToast(`Phase "${phaseId}" sent for regeneration`, 'success');
+        await refreshWorkflowRunDetail(runId);
+    } catch (err) {
+        if (typeof showToast === 'function') showToast(err.message, 'error');
+    }
+}
+
+async function refreshRunVersions(runId) {
+    if (!workflowRunsCurrentWf) return;
+    const wf = encodeURIComponent(workflowRunsCurrentWf);
+    try {
+        const res = await fetch(`${API_BASE}/api/workflows/${wf}/runs/${encodeURIComponent(runId)}/versions`);
+        const data = await res.json();
+        const section = document.getElementById('workflow-run-versions-section');
+        const list = document.getElementById('workflow-run-versions-list');
+        if (!section || !list) return;
+        const versions = data.versions || [];
+        if (!versions.length) {
+            section.style.display = 'none';
+            return;
+        }
+        section.style.display = '';
+        list.innerHTML = versions.map(v => {
+            const formatted = formatRunTime(v.created_at);
+            return `<div class="wf-version-row" data-version-id="${escapeAttr(v.id)}">
+                <span class="wf-version-id">${escapeHtml(v.id)}</span>
+                <span class="wf-version-meta">${escapeHtml(formatted)} · ${v.file_count} file${v.file_count === 1 ? '' : 's'}</span>
+                <button class="ctrl-btn-xs wf-version-revert-btn">Revert</button>
+            </div>`;
+        }).join('');
+        list.querySelectorAll('.wf-version-row').forEach(row => {
+            const versionId = row.dataset.versionId;
+            row.querySelector('.wf-version-revert-btn')?.addEventListener('click', () => revertRun(runId, versionId));
+        });
+    } catch {
+        // Silently ignore — versions are optional UX; not worth a toast on failure.
+    }
+}
+
+async function revertRun(runId, versionId) {
+    if (!workflowRunsCurrentWf || !versionId) return;
+    if (!confirm(`Revert outputs to snapshot "${versionId}"? Current files will be archived as a new snapshot first.`)) return;
+    const wf = encodeURIComponent(workflowRunsCurrentWf);
+    try {
+        const res = await fetch(`${API_BASE}/api/workflows/${wf}/runs/${encodeURIComponent(runId)}/revert`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ version: versionId })
+        });
+        const data = await res.json();
+        if (!data.success) {
+            if (typeof showToast === 'function') showToast(data.error || 'Revert failed', 'error');
+            return;
+        }
+        if (typeof showToast === 'function') showToast(`Reverted to ${versionId}`, 'success');
+        await refreshWorkflowRunDetail(runId);
     } catch (err) {
         if (typeof showToast === 'function') showToast(err.message, 'error');
     }
