@@ -208,12 +208,18 @@ function renderWorkflowRunDetail(run, resultsPayload) {
 
     const formInputRows = renderFormInputTable(run.form_input);
     const tasksList = renderTasksList(run.task_ids);
+    const phasesList = renderPhasesList(run.phases, run.current_phase);
     const artifactsList = renderArtifactsList(resultsPayload?.artifacts || [], resultsPayload?.outputs_dir);
 
-    const actionButtons = isActive
-        ? `<button class="ctrl-btn-xs wf-run-detail-stop-btn">Stop</button>
+    const isAwaitingApproval = status === 'awaiting-approval';
+    const actionButtons = isAwaitingApproval
+        ? `<button class="ctrl-btn-xs primary wf-run-detail-approve-btn">Approve</button>
+           <button class="ctrl-btn-xs wf-run-detail-skip-btn">Skip</button>
            <button class="ctrl-btn-xs wf-run-detail-kill-btn">Kill</button>`
-        : `<button class="ctrl-btn-xs wf-run-detail-delete-btn">Delete</button>`;
+        : isActive
+            ? `<button class="ctrl-btn-xs wf-run-detail-stop-btn">Stop</button>
+               <button class="ctrl-btn-xs wf-run-detail-kill-btn">Kill</button>`
+            : `<button class="ctrl-btn-xs wf-run-detail-delete-btn">Delete</button>`;
 
     body.innerHTML = `
         <div class="workflow-run-detail-header">
@@ -238,6 +244,11 @@ function renderWorkflowRunDetail(run, resultsPayload) {
             <div class="workflow-run-detail-label">Form input</div>
             <div class="workflow-run-detail-rows">${formInputRows}</div>
         </div>` : ''}
+        ${phasesList ? `
+        <div class="workflow-run-detail-section">
+            <div class="workflow-run-detail-label">Phases</div>
+            ${phasesList}
+        </div>` : ''}
         ${tasksList ? `
         <div class="workflow-run-detail-section">
             <div class="workflow-run-detail-label">Tasks (${run.task_ids?.length || 0})</div>
@@ -251,6 +262,8 @@ function renderWorkflowRunDetail(run, resultsPayload) {
     body.querySelector('.wf-run-detail-stop-btn')?.addEventListener('click', () => stopWorkflowRun(run.id, true));
     body.querySelector('.wf-run-detail-kill-btn')?.addEventListener('click', () => killWorkflowRun(run.id, true));
     body.querySelector('.wf-run-detail-delete-btn')?.addEventListener('click', () => deleteWorkflowRun(run.id, true));
+    body.querySelector('.wf-run-detail-approve-btn')?.addEventListener('click', () => approveWorkflowRunPhase(run.id, run.current_phase));
+    body.querySelector('.wf-run-detail-skip-btn')?.addEventListener('click', () => skipWorkflowRunPhase(run.id, run.current_phase));
     body.querySelectorAll('.wf-artifact-toggle').forEach(btn => {
         btn.addEventListener('click', e => {
             const card = e.target.closest('.wf-artifact-card');
@@ -269,6 +282,26 @@ function renderFormInputTable(formInput) {
         const display = typeof v === 'boolean' ? (v ? 'yes' : 'no') : String(v);
         return `<div><span class="field-name">${escapeHtml(k)}:</span> ${escapeHtml(display)}</div>`;
     }).join('');
+}
+
+function renderPhasesList(phases, currentPhaseId) {
+    if (!phases || !Array.isArray(phases) || !phases.length) return '';
+    const items = phases.map(p => {
+        const isCurrent = p.id === currentPhaseId;
+        const status = p.status || 'pending';
+        const statusLabel = {
+            'pending': 'Pending',
+            'awaiting-approval': 'Awaiting approval',
+            'approved': 'Approved',
+            'skipped': 'Skipped'
+        }[status] || status;
+        return `<div class="wf-phase-row${isCurrent ? ' current' : ''}">
+            <span class="wf-phase-status status-${escapeAttr(status)}">${escapeHtml(statusLabel)}</span>
+            <span class="wf-phase-label">${escapeHtml(p.label || p.id)}</span>
+            <span class="wf-phase-task">→ ${escapeHtml(p.completes_after_task || '')}</span>
+        </div>`;
+    }).join('');
+    return `<div class="wf-phases-list">${items}</div>`;
 }
 
 function renderTasksList(taskIds) {
@@ -331,6 +364,49 @@ async function killWorkflowRun(runId, fromDetail = false) {
         await fetch(`${API_BASE}/api/workflows/${wf}/runs/${encodeURIComponent(runId)}/kill`, { method: 'POST' });
         if (fromDetail) await refreshWorkflowRunDetail(runId); else await refreshWorkflowRuns();
         if (typeof showToast === 'function') showToast('Run killed', 'success');
+    } catch (err) {
+        if (typeof showToast === 'function') showToast(err.message, 'error');
+    }
+}
+
+async function approveWorkflowRunPhase(runId, phaseId) {
+    if (!workflowRunsCurrentWf || !phaseId) return;
+    const wf = encodeURIComponent(workflowRunsCurrentWf);
+    try {
+        const res = await fetch(`${API_BASE}/api/workflows/${wf}/runs/${encodeURIComponent(runId)}/approve`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ phase_id: phaseId })
+        });
+        const data = await res.json();
+        if (!data.success) {
+            if (typeof showToast === 'function') showToast(data.error || 'Approve failed', 'error');
+            return;
+        }
+        if (typeof showToast === 'function') showToast(`Phase "${phaseId}" approved`, 'success');
+        await refreshWorkflowRunDetail(runId);
+    } catch (err) {
+        if (typeof showToast === 'function') showToast(err.message, 'error');
+    }
+}
+
+async function skipWorkflowRunPhase(runId, phaseId) {
+    if (!workflowRunsCurrentWf || !phaseId) return;
+    if (!confirm(`Skip phase "${phaseId}"? The run will continue without waiting for further review of this phase.`)) return;
+    const wf = encodeURIComponent(workflowRunsCurrentWf);
+    try {
+        const res = await fetch(`${API_BASE}/api/workflows/${wf}/runs/${encodeURIComponent(runId)}/skip`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ phase_id: phaseId })
+        });
+        const data = await res.json();
+        if (!data.success) {
+            if (typeof showToast === 'function') showToast(data.error || 'Skip failed', 'error');
+            return;
+        }
+        if (typeof showToast === 'function') showToast(`Phase "${phaseId}" skipped`, 'success');
+        await refreshWorkflowRunDetail(runId);
     } catch (err) {
         if (typeof showToast === 'function') showToast(err.message, 'error');
     }

@@ -218,6 +218,37 @@ function Invoke-TaskMarkDone {
         $result.task_content | ConvertTo-Json -Depth 20 | Set-Content -Path $result.file_path -Encoding UTF8
     }
 
+    # Phase gating — if this task carries a run_id and its name matches a
+    # phase boundary in the run's `phases:` manifest, freeze remaining tasks
+    # in needs-input/ until the user approves or skips. No-op when the run
+    # was launched with approval_mode=false (manifest-set requires_approval=false).
+    $gatedPhaseId = $null
+    try {
+        $taskRunId = if ($result.task_content.PSObject.Properties['run_id']) { $result.task_content.run_id } else { $null }
+        $taskName  = if ($result.task_content.PSObject.Properties['name']) { $result.task_content.name } else { $null }
+        if ($taskRunId -and $taskName) {
+            $botRoot = Join-Path $projectRoot ".bot"
+            $phaseGateModule = Join-Path $botRoot "core/runtime/modules/PhaseGate.psm1"
+            $runStoreModule = Join-Path $botRoot "core/runtime/modules/WorkflowRunStore.psm1"
+            if ((Test-Path $phaseGateModule) -and (Test-Path $runStoreModule)) {
+                Import-Module $runStoreModule -Force -DisableNameChecking -Global -ErrorAction SilentlyContinue
+                Import-Module $phaseGateModule -Force -DisableNameChecking -Global -ErrorAction SilentlyContinue
+                if (Get-Command Test-PhaseGateForTask -ErrorAction SilentlyContinue) {
+                    $phase = Test-PhaseGateForTask -BotRoot $botRoot -RunId $taskRunId -TaskName $taskName
+                    if ($phase) {
+                        $gateResult = Apply-PhaseGate -BotRoot $botRoot -RunId $taskRunId -PhaseId $phase.id
+                        if ($gateResult -and $gateResult.success) {
+                            $gatedPhaseId = $phase.id
+                        }
+                    }
+                }
+            }
+        }
+    } catch {
+        # Phase gating must never block task-mark-done from succeeding — log and continue.
+        Write-BotLog -Level Warn -Message "PhaseGate: failed to evaluate gate for task '$taskId'" -Exception $_ -ErrorAction SilentlyContinue
+    }
+
     return @{
         success              = $true
         message              = "Task marked as done"
@@ -228,6 +259,7 @@ function Invoke-TaskMarkDone {
         new_path             = $result.file_path
         verification_passed  = $true
         verification_results = $verificationResults.Scripts
+        phase_gated          = $gatedPhaseId
     }
 }
 

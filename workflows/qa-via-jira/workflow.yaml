@@ -70,6 +70,26 @@ form:
 domain:
   task_categories: ["qa-test-plan", "qa-test-cases", "qa-uat", "qa-automation"]
 
+# Phase boundaries for approval gating (Step 4 of QA refactor).
+# When the run is launched with form_input.approval_mode=true, the phase guard
+# pauses the run after each completing task and waits for /approve or /skip.
+# When approval_mode=false, all phases run straight through.
+phases:
+  - id: test_plan
+    label: "Test Plan"
+    completes_after_task: "Generate Test Plan"
+    requires_approval: true
+  - id: uat_plan
+    label: "UAT Plan"
+    completes_after_task: "Generate UAT Plan"
+    requires_approval: true
+    depends_on_phase: test_plan
+  - id: test_cases
+    label: "Test Cases"
+    completes_after_task: "Generate Test Cases"
+    requires_approval: true
+    depends_on_phase: uat_plan
+
 tasks:
   - name: "Fetch Jira Context"
     type: prompt_template

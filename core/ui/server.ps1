@@ -146,6 +146,8 @@ Import-Module (Join-Path $PSScriptRoot "modules\InboxWatcher.psm1") -Force
 # Generic per-workflow run tracking — replaces the QA-specific .control/qa-runs/
 # storage. WorkflowRunStore must load before WorkflowRunsAPI (handlers depend on it).
 Import-Module (Join-Path $botRoot "core\runtime\modules\WorkflowRunStore.psm1") -Force -DisableNameChecking
+# Phase gating (approve/skip) — used by /api/workflows/{name}/runs/{id}/approve|skip.
+Import-Module (Join-Path $botRoot "core\runtime\modules\PhaseGate.psm1") -Force -DisableNameChecking
 Import-Module (Join-Path $PSScriptRoot "modules\WorkflowRunsAPI.psm1") -Force
 
 # Import workflow manifest utilities (for installed workflows API)
@@ -2158,12 +2160,25 @@ $docContext
                                 $approvalMode = $false
                                 if ($formInputHash.ContainsKey('approval_mode')) { $approvalMode = [bool]$formInputHash['approval_mode'] }
                                 $taskIds = @($createdTasks | Where-Object { $_ -and $_.id } | ForEach-Object { $_.id })
+
+                                # Snapshot phases from the manifest into the run record so approve/skip
+                                # can mutate phase state without re-reading workflow.yaml later.
+                                $phaseRecords = @()
+                                if ($manifest.phases) {
+                                    try {
+                                        $phaseRecords = @(ConvertTo-PhaseRecords -Phases $manifest.phases -ApprovalMode $approvalMode)
+                                    } catch {
+                                        Write-BotLog -Level Warn -Message "PhaseGate: failed to normalise phases for $wfName" -Exception $_ -ErrorAction SilentlyContinue
+                                    }
+                                }
+
                                 $runRecord = $null
                                 try {
                                     $runRecord = New-WorkflowRun -BotRoot $botRoot -WorkflowName $wfName `
                                         -RunId $newRunId `
                                         -FormInput $formInputHash -TaskIds $taskIds `
-                                        -ApprovalMode $approvalMode -ProcessId $launchResult.process_id
+                                        -ApprovalMode $approvalMode -ProcessId $launchResult.process_id `
+                                        -Phases $phaseRecords
                                 } catch {
                                     # Run record creation must never fail the launch — it's bookkeeping.
                                     Write-BotLog -Level Warn -Message "WorkflowRunStore: failed to create run record for $wfName" -Exception $_ -ErrorAction SilentlyContinue
@@ -2311,6 +2326,67 @@ $docContext
                     } catch {
                         $statusCode = 500
                         $content = @{ success = $false; error = "Failed to kill run: $($_.Exception.Message)" } | ConvertTo-Json -Compress
+                    }
+                    break
+                }
+
+                # Approve / skip a phase. Body: { "phase_id": "test_plan" } — optional;
+                # when omitted we use the run's current_phase. Both endpoints share
+                # implementation via Resume-RunFromPhase (decision differs).
+                { $_ -match "^/api/workflows/[^/]+/runs/[^/]+/(approve|skip)$" } {
+                    if ($method -ne "POST") {
+                        $statusCode = 405
+                        $contentType = "application/json; charset=utf-8"
+                        $content = @{ success = $false; error = "Method not allowed" } | ConvertTo-Json -Compress
+                        break
+                    }
+                    $contentType = "application/json; charset=utf-8"
+                    if ($url -match "^/api/workflows/([^/]+)/runs/([^/]+)/(approve|skip)$") {
+                        $wfName = $matches[1]; $runId = $matches[2]; $action = $matches[3]
+                    } else {
+                        $statusCode = 400
+                        $content = @{ success = $false; error = "Bad path" } | ConvertTo-Json -Compress
+                        break
+                    }
+                    if ($wfName -notmatch '^[a-zA-Z0-9_-]+$' -or $runId -notmatch '^[a-zA-Z0-9_-]+$') {
+                        $statusCode = 400
+                        $content = @{ success = $false; error = "Invalid identifiers" } | ConvertTo-Json -Compress
+                        break
+                    }
+                    try {
+                        $body = $null
+                        try {
+                            $reader = New-Object System.IO.StreamReader($request.InputStream)
+                            $rawBody = $reader.ReadToEnd()
+                            $reader.Close()
+                            if ($rawBody) { $body = $rawBody | ConvertFrom-Json }
+                        } catch { $body = $null }
+
+                        $run = Get-WorkflowRun -BotRoot $botRoot -RunId $runId
+                        if (-not $run -or $run.workflow_name -ne $wfName) {
+                            $statusCode = 404
+                            $content = @{ success = $false; error = "Run not found" } | ConvertTo-Json -Compress
+                            break
+                        }
+                        $phaseId = if ($body -and $body.PSObject.Properties['phase_id'] -and $body.phase_id) {
+                            "$($body.phase_id)"
+                        } elseif ($run.PSObject.Properties['current_phase']) {
+                            "$($run.current_phase)"
+                        } else { $null }
+                        if (-not $phaseId) {
+                            $statusCode = 400
+                            $content = @{ success = $false; error = "No phase_id provided and run has no current_phase" } | ConvertTo-Json -Compress
+                            break
+                        }
+                        $result = if ($action -eq 'approve') {
+                            Approve-Phase -BotRoot $botRoot -RunId $runId -PhaseId $phaseId
+                        } else {
+                            Skip-Phase -BotRoot $botRoot -RunId $runId -PhaseId $phaseId
+                        }
+                        $content = $result | ConvertTo-Json -Depth 6 -Compress
+                    } catch {
+                        $statusCode = 500
+                        $content = @{ success = $false; error = "Failed to $action phase: $($_.Exception.Message)" } | ConvertTo-Json -Compress
                     }
                     break
                 }

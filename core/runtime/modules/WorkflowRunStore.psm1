@@ -82,7 +82,11 @@ function New-WorkflowRun {
         # Optional pre-generated run id — when the caller wants tasks to carry the
         # same run_id the run record will use (e.g. so prompts can resolve
         # {output_directory} to this run's outputs_dir without a current-run lookup).
-        [string]$RunId = $null
+        [string]$RunId = $null,
+        # Per-phase records (from PhaseGate.ConvertTo-PhaseRecords). Stored on the
+        # run so approve/skip endpoints can mutate phase state without re-reading
+        # the workflow manifest.
+        [object[]]$Phases = @()
     )
 
     $dir = Get-WorkflowRunsDir -BotRoot $BotRoot
@@ -105,7 +109,8 @@ function New-WorkflowRun {
         task_ids      = @($TaskIds)
         outputs_dir   = (Get-WorkflowRunOutputsDir -WorkflowName $WorkflowName -RunId $runId)
         approval_mode = [bool]$ApprovalMode
-        phases        = @()
+        phases        = @($Phases)
+        current_phase = $null
         metadata      = @{}
     }
 
