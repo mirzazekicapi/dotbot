@@ -142,9 +142,15 @@ function Build-TaskPrompt {
     }
     $prompt = $prompt -replace '\{\{QUESTIONS_RESOLVED\}\}', $questionsResolved
 
-    # Replace {output_directory} with the workflow run output path
+    # Replace {output_directory} with the workflow run's output path. When the
+    # task carries a run_id (stamped at New-WorkflowTask time), point at the
+    # generic per-run outputs dir surfaced by /api/workflows/{name}/runs/{id}/results.
+    # Falls back to the legacy QA path when run_id is absent (older tasks created
+    # before the workflow-runs refactor).
     $outputDir = ""
-    if ($Task.workflow) {
+    if ($Task.workflow -and $Task.PSObject.Properties['run_id'] -and $Task.run_id) {
+        $outputDir = ".bot/workspace/$($Task.workflow)/runs/$($Task.run_id)"
+    } elseif ($Task.workflow) {
         $outputDir = ".bot/workspace/product/qa-runs/$($Task.workflow)"
     }
     $prompt = $prompt -replace '\{output_directory\}', $outputDir

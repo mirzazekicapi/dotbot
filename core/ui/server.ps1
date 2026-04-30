@@ -2131,12 +2131,16 @@ $docContext
                                     }
                                 }
 
-                                # Create tasks from manifest
+                                # Generate the run id BEFORE creating tasks so each task can carry it
+                                # (prompt-builder.ps1 reads task.run_id to resolve {output_directory}).
+                                $newRunId = New-WorkflowRunId
+
+                                # Create tasks from manifest, stamping run_id on each
                                 $createdTasks = @()
                                 $taskDefs = @($manifest.tasks)
                                 foreach ($td in $taskDefs) {
                                     if ($td -and $td['name']) {
-                                        $result = New-WorkflowTask -ProjectBotDir $botRoot -WorkflowName $wfName -TaskDef $td
+                                        $result = New-WorkflowTask -ProjectBotDir $botRoot -WorkflowName $wfName -TaskDef $td -RunId $newRunId
                                         $createdTasks += $result
                                     }
                                 }
@@ -2144,9 +2148,7 @@ $docContext
                                 # Start-ProcessLaunch auto-detects max_concurrent for workflow type
                                 $launchResult = Start-ProcessLaunch -Type 'task-runner' -Continue $true -Description "Workflow: $wfName" -WorkflowName $wfName
 
-                                # Create a workflow-run record so the /api/workflows/{name}/runs
-                                # endpoints have something to surface. Replaces the old QA-specific
-                                # .control/qa-runs/ storage (deleted with the QA tab).
+                                # Create the workflow-run record using the same id stamped on tasks
                                 $formInputHash = @{}
                                 if ($body -and $body.PSObject.Properties['form_input'] -and $body.form_input) {
                                     foreach ($prop in $body.form_input.PSObject.Properties) {
@@ -2159,6 +2161,7 @@ $docContext
                                 $runRecord = $null
                                 try {
                                     $runRecord = New-WorkflowRun -BotRoot $botRoot -WorkflowName $wfName `
+                                        -RunId $newRunId `
                                         -FormInput $formInputHash -TaskIds $taskIds `
                                         -ApprovalMode $approvalMode -ProcessId $launchResult.process_id
                                 } catch {

@@ -274,7 +274,10 @@ function New-WorkflowTask {
         [hashtable]$TaskDef,             # from workflow.yaml tasks array
 
         [string]$Category = "workflow",
-        [string]$Effort = "XS"
+        [string]$Effort = "XS",
+        # Stamp the workflow-run id on the task so prompt-builder can resolve
+        # {output_directory} to the run's outputs_dir without a separate lookup.
+        [string]$RunId = $null
     )
 
     $tasksDir = Join-Path $ProjectBotDir "workspace\tasks\todo"
@@ -323,6 +326,7 @@ function New-WorkflowTask {
         status                = "todo"
         type                  = $type
         workflow              = $WorkflowName
+        run_id                = $RunId
         dependencies          = $deps
         skip_analysis         = $skipAnalysis
         skip_worktree         = $skipWorktree

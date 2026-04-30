@@ -15,7 +15,7 @@ If the form-input file is missing (legacy launches), fall back to extracting the
 
 ## Output
 
-Write all output to `.bot/workspace/product/qa-runs/` in the current run directory.
+Write all output to `{output_directory}` (substituted at task launch — points at this run's per-workflow outputs dir under `.bot/workspace/{workflow_name}/runs/{run_id}/`).
 
 ## Data Access Strategy
 

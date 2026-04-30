@@ -4,7 +4,7 @@ Identify all systems/components affected by the change, using the Jira context g
 
 ## Input
 
-Read `.bot/workspace/product/qa-runs/{run}/jira-context-full.md` and `jira-context.json` for the gathered Jira data.
+Read `{output_directory}/jira-context-full.md` and `{output_directory}/jira-context.json` for the gathered Jira data (written by the previous task in this workflow run).
 
 ## Output
 

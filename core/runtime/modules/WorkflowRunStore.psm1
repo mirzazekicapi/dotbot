@@ -78,7 +78,11 @@ function New-WorkflowRun {
         [string[]]$TaskIds = @(),
         [bool]$ApprovalMode = $false,
         [string]$ProcessId = $null,
-        [int]$Pid = 0
+        [int]$Pid = 0,
+        # Optional pre-generated run id — when the caller wants tasks to carry the
+        # same run_id the run record will use (e.g. so prompts can resolve
+        # {output_directory} to this run's outputs_dir without a current-run lookup).
+        [string]$RunId = $null
     )
 
     $dir = Get-WorkflowRunsDir -BotRoot $BotRoot
@@ -86,7 +90,7 @@ function New-WorkflowRun {
         New-Item -Path $dir -ItemType Directory -Force | Out-Null
     }
 
-    $runId = New-WorkflowRunId
+    $runId = if ($RunId) { $RunId } else { New-WorkflowRunId }
     $now = (Get-Date).ToUniversalTime().ToString("o")
 
     $record = [ordered]@{

@@ -74,9 +74,12 @@ tasks:
   - name: "Fetch Jira Context"
     type: prompt_template
     prompt: "recipes/prompts/01-fetch-jira-context.md"
-    outputs: ["qa-runs/jira-context.json"]
+    # Outputs are paths relative to the run's outputs_dir
+    # (.bot/workspace/qa-via-jira/runs/{run_id}/), surfaced by
+    # /api/workflows/{name}/runs/{id}/results.
+    outputs: ["jira-context.json", "jira-context-full.md"]
     commit:
-      paths: ["workspace/product/qa-runs/"]
+      paths: ["workspace/qa-via-jira/runs/"]
       message: "chore(qa): fetch jira context"
     priority: 1
     on_failure: halt
@@ -85,9 +88,9 @@ tasks:
     type: prompt_template
     prompt: "recipes/prompts/02-detect-systems.md"
     depends_on: ["Fetch Jira Context"]
-    outputs: ["qa-runs/systems.json"]
+    outputs: ["systems.json"]
     commit:
-      paths: ["workspace/product/qa-runs/"]
+      paths: ["workspace/qa-via-jira/runs/"]
       message: "chore(qa): detect affected systems"
     priority: 2
     on_failure: halt
@@ -96,9 +99,9 @@ tasks:
     type: prompt_template
     prompt: "recipes/prompts/03-generate-test-plan.md"
     depends_on: ["Detect Systems"]
-    outputs: ["qa-runs/test-plan.md"]
+    outputs: ["test-plan.md"]
     commit:
-      paths: ["workspace/product/qa-runs/"]
+      paths: ["workspace/qa-via-jira/runs/"]
       message: "chore(qa): generate overall test plan"
     priority: 3
 
@@ -106,9 +109,9 @@ tasks:
     type: prompt_template
     prompt: "recipes/prompts/04-generate-uat-plan.md"
     depends_on: ["Generate Test Plan"]
-    outputs: ["qa-runs/uat-plan.md"]
+    outputs: ["uat-plan.md"]
     commit:
-      paths: ["workspace/product/qa-runs/"]
+      paths: ["workspace/qa-via-jira/runs/"]
       message: "chore(qa): generate UAT plan"
     priority: 4
 
@@ -116,9 +119,8 @@ tasks:
     type: prompt_template
     prompt: "recipes/prompts/05-generate-system-plans.md"
     depends_on: ["Generate Test Plan"]
-    condition: ".bot/workspace/product/qa-runs/systems.json"
     commit:
-      paths: ["workspace/product/qa-runs/"]
+      paths: ["workspace/qa-via-jira/runs/"]
       message: "chore(qa): generate per-system test plans"
     priority: 5
 
@@ -127,7 +129,7 @@ tasks:
     prompt: "recipes/prompts/06-generate-test-cases.md"
     depends_on: ["Generate Per-System Plans", "Generate UAT Plan"]
     commit:
-      paths: ["workspace/product/qa-runs/"]
+      paths: ["workspace/qa-via-jira/runs/"]
       message: "chore(qa): generate test cases"
     priority: 6
 
@@ -135,8 +137,8 @@ tasks:
     type: prompt_template
     prompt: "recipes/prompts/07-validate-coverage.md"
     depends_on: ["Generate Test Cases"]
-    outputs: ["qa-runs/pipeline-complete.json"]
+    outputs: ["pipeline-complete.json"]
     commit:
-      paths: ["workspace/product/qa-runs/"]
+      paths: ["workspace/qa-via-jira/runs/"]
       message: "chore(qa): validate traceability and coverage"
     priority: 7
