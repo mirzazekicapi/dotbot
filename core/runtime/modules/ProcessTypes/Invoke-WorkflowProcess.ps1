@@ -1251,6 +1251,8 @@ Do NOT implement the task. Your job is research and preparation only.
                 if ($ShowVerbose) { $streamArgs['ShowVerbose'] = $true }
 
                 if ($permissionMode) { $streamArgs['PermissionMode'] = $permissionMode }
+                # Analysis phase runs before worktree creation, so cwd stays at project
+                # root. The phase is read-only by prompt contract (#314).
                 Invoke-ProviderStream @streamArgs
                 $exitCode = 0
             } catch {
@@ -1515,6 +1517,9 @@ Work on this task autonomously. When complete, ensure you call task_mark_done vi
                 if ($ShowVerbose) { $streamArgs['ShowVerbose'] = $true }
 
                 if ($permissionMode) { $streamArgs['PermissionMode'] = $permissionMode }
+                # Execution phase: pin Claude's cwd to the worktree so Edit/Write/Bash
+                # land on the task branch instead of project root (#314).
+                if ($worktreePath) { $streamArgs['WorkingDirectory'] = $worktreePath }
                 Invoke-ProviderStream @streamArgs
                 $exitCode = 0
             } catch {
