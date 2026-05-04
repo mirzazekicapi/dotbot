@@ -12,11 +12,6 @@ mcp_servers:
     type: http
     url: https://mcp.atlassian.com/v1/mcp
 
-remove_mcp_servers:
-  - context7
-  - playwright
-  - serena
-
 requires:
   mcp_servers:
     - name: atlassian

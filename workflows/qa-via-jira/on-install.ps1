@@ -39,20 +39,6 @@ if (Test-Path $mcpJsonPath) {
         Write-Status "  Authenticate via: claude mcp add atlassian (if not already done)"
     }
 
-    # Remove MCP servers unused by the QA workflow to reduce startup contention
-    $unused = @("context7", "playwright", "serena")
-    $removed = 0
-    foreach ($name in $unused) {
-        if ($mcpServers.PSObject.Properties.Name -contains $name) {
-            $mcpServers.PSObject.Properties.Remove($name)
-            $removed++
-        }
-    }
-    if ($removed -gt 0) {
-        $mcpConfig | ConvertTo-Json -Depth 5 | Set-Content -Path $mcpJsonPath -Encoding UTF8
-        Write-Success "Removed $removed unused MCP server(s) from .mcp.json"
-    }
-
     # Clean up any broken stdio atlassian entry (legacy from earlier QA profile versions)
     if ($mcpServers.PSObject.Properties.Name -contains "atlassian") {
         $atlEntry = $mcpServers.atlassian

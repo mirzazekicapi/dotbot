@@ -817,8 +817,9 @@ function updateExecutiveSummary() {
         renderWorkflowLaunchCTA(container);
         container.style.display = 'block';
     } else if (installedWorkflows && installedWorkflows.length > 0) {
-        // Installed workflows: show workflow section (QA gets custom section)
-        renderKickstartCTA(container);
+        // Installed workflows: show the workflow card grid in the executive
+        // summary slot when no product docs exist yet.
+        renderWorkflowCardGrid(container);
         container.style.display = 'block';
     } else {
         container.style.display = 'none';
