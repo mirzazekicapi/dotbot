@@ -1140,9 +1140,38 @@ try {
         # Mirrors the standalone analysis process behavior (line ~910)
         if ($task.skip_analysis -eq $true) {
             Write-Status "Auto-promoting task (skip_analysis): $($task.name)" -Type Info
-            Write-ProcessActivity -Id $procId -ActivityType "text" -Message "Auto-promoted $($task.name) (skip_analysis=true)"
             if ($task.status -ne 'analysing') {
-                Invoke-TaskMarkAnalysing -Arguments @{ task_id = $task.id } | Out-Null
+                # Capture the result — Invoke-TaskMarkAnalysing returns a structured
+                # error hashtable (rather than throwing) when its FrameworkIntegrity
+                # gate or other guards fail. Without this check the silent failure
+                # surfaces later as a confusing
+                # "Task not found in statuses: analysing, needs-input, analysed"
+                # from the subsequent Invoke-TaskMarkAnalysed call.
+                $analysingResult = Invoke-TaskMarkAnalysing -Arguments @{ task_id = $task.id }
+                if ($analysingResult -and $analysingResult.success -eq $false) {
+                    $gateReason = if ($analysingResult.reason) { $analysingResult.reason } else { 'unknown' }
+                    $gateMsg    = if ($analysingResult.error)  { $analysingResult.error  } else { 'auto-promote blocked' }
+                    # Surface the gate's `remediation` field too — it carries actionable
+                    # text like "run dotbot init --force" or "commit your .bot/ changes".
+                    # Without this the user sees the cause but not the fix.
+                    $gateFix = if ($analysingResult.remediation) { "$($analysingResult.remediation)" } else { $null }
+                    Write-Status "Auto-promote blocked ($gateReason): $gateMsg" -Type Error
+                    if ($gateFix) { Write-Status "Remediation: $gateFix" -Type Info }
+                    $activityMsg = "Auto-promote blocked for $($task.name) ($gateReason): $gateMsg"
+                    if ($gateFix) { $activityMsg += " — fix: $gateFix" }
+                    Write-ProcessActivity -Id $procId -ActivityType "text" -Message $activityMsg
+                    # Escalate to needs-input so the picker doesn't loop on this task.
+                    try {
+                        Invoke-TaskMarkNeedsInput -Arguments @{ task_id = $task.id; question = "Auto-promote blocked: $gateMsg ($gateReason)" } | Out-Null
+                    } catch {
+                        Write-BotLog -Level Debug -Message "Failed to escalate auto-promote-blocked task to needs-input" -Exception $_
+                    }
+                    if (-not $Continue) { break }
+                    $TaskId = $null
+                    $processData.task_id = $null
+                    $processData.task_name = $null
+                    continue
+                }
             }
             Invoke-TaskMarkAnalysed -Arguments @{
                 task_id = $task.id
@@ -1151,6 +1180,9 @@ try {
                     auto_promoted = $true
                 }
             } | Out-Null
+            # Log AFTER both transitions actually succeed so the activity stream
+            # doesn't claim "Auto-promoted" for tasks that were blocked above.
+            Write-ProcessActivity -Id $procId -ActivityType "text" -Message "Auto-promoted $($task.name) (skip_analysis=true)"
             # Fall through to execution phase
         } else {
 
