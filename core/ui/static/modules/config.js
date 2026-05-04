@@ -110,8 +110,12 @@ let installedWorkflows = [];
 // Installed workflow metadata keyed by name (from /api/workflows/installed)
 let installedWorkflowMap = {};
 
-// Pipeline workflow filter (null = show all)
+// Pipeline workflow filter — null = show all, "wfname" = workflow, "wr-..." = specific run
 let pipelineWorkflowFilter = null;
+// Cached cross-workflow runs list, populated by refreshPipelineRunsCache(). Drives the
+// per-run optgroups in the Pipeline filter dropdown.
+let pipelineRunsCache = [];
+let pipelineRunsCacheLastFetch = 0;
 
 // Client-side cache for file data (reduces API calls)
 const fileDataCache = new Map();

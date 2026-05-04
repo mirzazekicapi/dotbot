@@ -1927,6 +1927,14 @@ $docContext
                             $wfName = $_.Name
                             $manifest = Get-CachedManifest -Dir $wfDir
 
+                            # Skip directories that don't have a workflow.yaml manifest.
+                            # Without this guard the indexing into `$manifest['icon']` etc.
+                            # below blows up with "Cannot index into a null array" — happens
+                            # when an `.bot/workflows/{name}/` directory was created but
+                            # only partially populated (e.g. switching profiles via
+                            # `dotbot init --force`).
+                            if ($null -eq $manifest) { return }
+
                             # Task counts from pre-scanned bucket
                             $wfTasks = if ($tasksByWorkflow.ContainsKey($wfName)) { $tasksByWorkflow[$wfName] } else { @{ todo = 0; in_progress = 0; done = 0; total = 0 } }
 
@@ -2236,6 +2244,26 @@ $docContext
                     } else {
                         $statusCode = 405
                         $content = @{ success = $false; error = "Method not allowed" } | ConvertTo-Json -Compress
+                    }
+                    break
+                }
+
+                # Cross-workflow run listing — drives the Pipeline tab's per-run filter
+                # so it can populate <optgroup> options without N per-workflow fetches.
+                "/api/workflow-runs/all" {
+                    if ($method -ne "GET") {
+                        $statusCode = 405
+                        $contentType = "application/json; charset=utf-8"
+                        $content = @{ success = $false; error = "Method not allowed" } | ConvertTo-Json -Compress
+                        break
+                    }
+                    $contentType = "application/json; charset=utf-8"
+                    try {
+                        $payload = Get-AllWorkflowRunsForApi -BotRoot $botRoot
+                        $content = $payload | ConvertTo-Json -Depth 8 -Compress
+                    } catch {
+                        $statusCode = 500
+                        $content = @{ success = $false; error = "Failed to list runs: $($_.Exception.Message)" } | ConvertTo-Json -Compress
                     }
                     break
                 }

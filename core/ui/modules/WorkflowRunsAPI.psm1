@@ -29,6 +29,56 @@ if (-not (Get-Module WorkflowRunStore)) {
     }
 }
 
+function Get-AllWorkflowRunsForApi {
+    <#
+        Returns runs across every workflow — used by the Pipeline (Roadmap) tab's
+        per-run filter dropdown so it can list runs without doing N round-trips.
+        Each run is enriched with a friendly label derived from form_input
+        (first non-empty entry, truncated) and the standard derived status.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$BotRoot
+    )
+    $allRuns = @(Get-WorkflowRuns -BotRoot $BotRoot)
+    $derived = @()
+    foreach ($run in $allRuns) {
+        $r = $run | ConvertTo-Json -Depth 6 -Compress | ConvertFrom-Json
+        $r = Resolve-WorkflowRunDerivedStatus -BotRoot $BotRoot -Run $r
+        $r | Add-Member -NotePropertyName 'label' -NotePropertyValue (Get-WorkflowRunFriendlyLabel -Run $r) -Force
+        $derived += $r
+    }
+    return @{
+        success = $true
+        runs    = @($derived | Sort-Object { $_.started_at } -Descending)
+    }
+}
+
+function Get-WorkflowRunFriendlyLabel {
+    <#
+        Builds a one-liner label for a run from its form_input (first non-empty
+        truthy value), truncated to ~30 chars. Falls back to the run id when
+        form_input is empty.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][object]$Run
+    )
+    $maxLen = 30
+    if ($Run.PSObject.Properties['form_input'] -and $Run.form_input) {
+        foreach ($prop in $Run.form_input.PSObject.Properties) {
+            $val = $prop.Value
+            if ($null -eq $val) { continue }
+            if ($val -is [bool]) { continue }
+            $s = "$val".Trim()
+            if ([string]::IsNullOrEmpty($s)) { continue }
+            if ($s.Length -gt $maxLen) { $s = $s.Substring(0, $maxLen - 1) + '…' }
+            return $s
+        }
+    }
+    return $Run.id
+}
+
 function Get-WorkflowRunsForApi {
     [CmdletBinding()]
     param(
@@ -382,6 +432,7 @@ function Get-WorkflowRunTaskStats {
 }
 
 Export-ModuleMember -Function @(
+    'Get-AllWorkflowRunsForApi',
     'Get-WorkflowRunsForApi',
     'Get-WorkflowRunForApi',
     'Get-WorkflowRunResultsForApi',
@@ -392,5 +443,6 @@ Export-ModuleMember -Function @(
     'Stop-WorkflowRunHardForApi',
     'Remove-WorkflowRunForApi',
     'Resolve-WorkflowRunDerivedStatus',
-    'Get-WorkflowRunTaskStats'
+    'Get-WorkflowRunTaskStats',
+    'Get-WorkflowRunFriendlyLabel'
 )

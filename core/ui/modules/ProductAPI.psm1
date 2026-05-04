@@ -170,10 +170,82 @@ function Resolve-ProductDocumentPath {
     }
 }
 
+function Get-WorkflowRunDocs {
+    <#
+        Lists artifact files written by recent workflow runs (read from
+        .control/workflow-runs/) and returns them as virtual product docs under
+        a "runs/" prefix in their filename. Each file's `name` carries the run
+        id + relative path so Get-ProductDocument can resolve it back to disk.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$BotRoot)
+    $runsDir = Join-Path $BotRoot ".control\workflow-runs"
+    if (-not (Test-Path $runsDir)) { return @() }
+
+    $entries = @()
+    Get-ChildItem -Path $runsDir -Filter "*.json" -ErrorAction SilentlyContinue | ForEach-Object {
+        try {
+            $run = Get-Content $_.FullName -Raw | ConvertFrom-Json
+            $outputsRel = if ($run.PSObject.Properties['outputs_dir']) { $run.outputs_dir } else { $null }
+            if (-not $outputsRel) { return }
+            $absDir = if ([System.IO.Path]::IsPathRooted($outputsRel)) { $outputsRel } else { Join-Path $BotRoot $outputsRel }
+            if (-not (Test-Path $absDir)) { return }
+
+            # Friendly label: first non-empty truthy form_input value (matches
+            # Get-WorkflowRunFriendlyLabel in WorkflowRunsAPI), falls back to run id.
+            $label = $run.id
+            if ($run.PSObject.Properties['form_input'] -and $run.form_input) {
+                foreach ($prop in $run.form_input.PSObject.Properties) {
+                    $val = $prop.Value
+                    if ($null -eq $val -or $val -is [bool]) { continue }
+                    $s = "$val".Trim()
+                    if (-not [string]::IsNullOrEmpty($s)) {
+                        if ($s.Length -gt 30) { $s = $s.Substring(0, 29) + '…' }
+                        $label = $s
+                        break
+                    }
+                }
+            }
+            # Sanitise label for use as a path segment.
+            $safeLabel = ($label -replace '[\\/:\*\?"<>\|]', '_')
+            $folderName = "$safeLabel ($($run.id))"
+
+            Get-ChildItem -Path $absDir -Recurse -File -ErrorAction SilentlyContinue | ForEach-Object {
+                # Skip the .versions/ snapshot folder — those aren't current artifacts.
+                if ($_.FullName -like "*\.versions\*" -or $_.FullName -like "*/.versions/*") { return }
+                $rel = $_.FullName.Substring($absDir.Length).TrimStart('\','/').Replace('\','/')
+                $virtualPath = "runs/$($run.workflow_name)/$folderName/$rel"
+                $depth = ($virtualPath -split '/').Length - 1
+                $type = switch -Wildcard ($_.Name) {
+                    '*.md'   { 'md'   }
+                    '*.json' { 'json' }
+                    '*.yaml' { 'yaml' }
+                    '*.yml'  { 'yaml' }
+                    default  { 'txt'  }
+                }
+                $entries += @{
+                    name     = "wfrun:$($run.id):$rel"
+                    filename = $virtualPath
+                    depth    = $depth
+                    type     = $type
+                    size     = $_.Length
+                }
+            }
+        } catch { }
+    }
+    return $entries
+}
+
 function Get-ProductList {
     $botRoot = $script:Config.BotRoot
     $productDir = Join-Path $botRoot "workspace\product"
     $docs = @()
+
+    # Workflow-run artifacts — surfaces files written into outputs_dir
+    # (workspace/{wf}/runs/{run_id}/...) under a virtual `runs/` prefix so the
+    # Products page sidebar groups them by run. Replaces the old QA-tab grouping
+    # that used the legacy workspace/product/qa-runs/{run}/ folder.
+    $docs += Get-WorkflowRunDocs -BotRoot $botRoot
 
     if (Test-Path $productDir) {
         $allFiles = @(Get-ChildItem -Path $productDir -File -Recurse -ErrorAction SilentlyContinue |
@@ -261,6 +333,18 @@ function Get-ProductDocument {
         [Parameter(Mandatory)] [string]$Name
     )
     $botRoot = $script:Config.BotRoot
+
+    # Workflow-run virtual docs — name format is "wfrun:{run_id}:{relative_path}".
+    # Resolve back to the run's outputs_dir on disk.
+    if ($Name -like 'wfrun:*') {
+        $resolved = Resolve-WorkflowRunDocPath -BotRoot $botRoot -Name $Name
+        if ($resolved -and (Test-Path -LiteralPath $resolved)) {
+            $content = Get-Content -LiteralPath $resolved -Raw
+            return @{ success = $true; name = $Name; content = $content }
+        }
+        return @{ _statusCode = 404; success = $false; error = "Workflow-run document not found: $Name" }
+    }
+
     $productDir = Join-Path $botRoot "workspace\product"
     $resolvedDoc = Resolve-ProductDocumentPath -Name $Name -ProductDir $productDir
 
@@ -278,6 +362,38 @@ function Get-ProductDocument {
             error = "Document not found: $Name"
         }
     }
+}
+
+function Resolve-WorkflowRunDocPath {
+    <#
+        Decodes the "wfrun:{run_id}:{rel_path}" virtual name produced by
+        Get-WorkflowRunDocs and returns the absolute path on disk. Validates that
+        the relative path stays inside the run's outputs_dir (no ../ traversal).
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$BotRoot,
+        [Parameter(Mandatory)][string]$Name
+    )
+    if ($Name -notmatch '^wfrun:([^:]+):(.+)$') { return $null }
+    $runId = $matches[1]
+    $relPath = $matches[2]
+    if ($relPath -match '\.\.[\\/]' -or $relPath -match '^[\\/]' -or $relPath -match ':') { return $null }
+
+    $runRecordPath = Join-Path $BotRoot ".control/workflow-runs/$runId.json"
+    if (-not (Test-Path $runRecordPath)) { return $null }
+    $run = Get-Content $runRecordPath -Raw | ConvertFrom-Json
+    $outputsRel = if ($run.PSObject.Properties['outputs_dir']) { $run.outputs_dir } else { $null }
+    if (-not $outputsRel) { return $null }
+    $absDir = if ([System.IO.Path]::IsPathRooted($outputsRel)) { $outputsRel } else { Join-Path $BotRoot $outputsRel }
+
+    $candidate = Join-Path $absDir $relPath
+    # Realpath check: ensure $candidate is within $absDir.
+    $absDirReal = (Resolve-Path -LiteralPath $absDir -ErrorAction SilentlyContinue)?.ProviderPath
+    $candidateReal = (Resolve-Path -LiteralPath $candidate -ErrorAction SilentlyContinue)?.ProviderPath
+    if (-not $absDirReal -or -not $candidateReal) { return $null }
+    if (-not $candidateReal.StartsWith($absDirReal, [System.StringComparison]::OrdinalIgnoreCase)) { return $null }
+    return $candidateReal
 }
 
 function Get-ProductDocumentRaw {
@@ -836,7 +952,9 @@ Export-ModuleMember -Function @(
     'Get-ProductDocumentRaw',
     'Get-PreflightResults',
     'Start-RoadmapPlanning',
-    'Get-WorkflowStatus'
+    'Get-WorkflowStatus',
+    'Get-WorkflowRunDocs',
+    'Resolve-WorkflowRunDocPath'
 )
 
 

@@ -51,6 +51,15 @@ async function pollState() {
             updateInstalledWorkflowControls();
         }
 
+        // Throttled: refresh the pipeline runs cache so the per-run filter
+        // dropdown in the Roadmap tab stays current. ~10 s cadence at 2 s polls.
+        if (typeof refreshPipelineRunsCache === 'function') {
+            const sinceLast = Date.now() - (typeof pipelineRunsCacheLastFetch === 'number' ? pipelineRunsCacheLastFetch : 0);
+            if (sinceLast > 10000 || (Array.isArray(pipelineRunsCache) && pipelineRunsCache.length === 0)) {
+                refreshPipelineRunsCache();
+            }
+        }
+
     } catch (error) {
         console.error('Poll error:', error);
         setConnectionStatus('error');

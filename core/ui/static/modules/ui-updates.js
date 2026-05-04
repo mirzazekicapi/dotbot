@@ -403,11 +403,16 @@ function updatePipelineView(tasks) {
     let analysed = Array.isArray(tasks.analysed_list) ? tasks.analysed_list : [];
     let inProgress = tasks.current ? [tasks.current] : [];
 
-    // Apply workflow filter if set
+    // Apply workflow filter if set. Two flavours:
+    // - filter starts with "wr-" → match by task.run_id (post-Step-3 stamping)
+    // - otherwise → match by task.workflow (workflow name) with the legacy
+    //   "qa" → "qa-PAPI-79115-150953" prefix-match for backward compat
     if (pipelineWorkflowFilter) {
         const wf = pipelineWorkflowFilter;
-        // Match exact workflow name OR dynamic run names (e.g., "qa" matches "qa-PAPI-79115-150953")
-        const matchesFilter = (t) => t.workflow === wf || (t.workflow && t.workflow.startsWith(wf + '-'));
+        const isRunFilter = wf.startsWith('wr-');
+        const matchesFilter = isRunFilter
+            ? (t) => t.run_id === wf
+            : (t) => t.workflow === wf || (t.workflow && t.workflow.startsWith(wf + '-'));
         upcoming = upcoming.filter(matchesFilter);
         completed = completed.filter(matchesFilter);
         analysing = analysing.filter(matchesFilter);
@@ -526,13 +531,88 @@ function updatePipelineFilterOptions() {
     const select = document.getElementById('pipeline-workflow-filter');
     if (!select) return;
     const workflows = lastState?.workflows ? Object.keys(lastState.workflows) : [];
-    // Only update if options changed
-    const currentOptions = Array.from(select.options).slice(1).map(o => o.value);
-    if (JSON.stringify(currentOptions) === JSON.stringify(workflows)) return;
-    // Preserve current selection
+    const runs = Array.isArray(pipelineRunsCache) ? pipelineRunsCache : [];
+
+    // Group runs by workflow_name.
+    const runsByWorkflow = {};
+    for (const r of runs) {
+        if (!r || !r.workflow_name) continue;
+        if (!runsByWorkflow[r.workflow_name]) runsByWorkflow[r.workflow_name] = [];
+        runsByWorkflow[r.workflow_name].push(r);
+    }
+
+    // Build a fingerprint so we don't rebuild the DOM on every poll when nothing changed.
+    const fingerprint = JSON.stringify({
+        workflows,
+        runs: runs.map(r => `${r.id}|${r.status}|${r.label || ''}`)
+    });
+    if (select.dataset.fingerprint === fingerprint) return;
+    select.dataset.fingerprint = fingerprint;
+
     const current = select.value;
-    select.innerHTML = '<option value="">All Workflows</option>' +
-        workflows.map(name => `<option value="${escapeHtml(name)}"${name === current ? ' selected' : ''}>${escapeHtml(name)}</option>`).join('');
+    let html = '<option value="">All Workflows</option>';
+    for (const name of workflows) {
+        const wfRuns = runsByWorkflow[name] || [];
+        if (wfRuns.length === 0) {
+            // No runs yet — single option for the workflow itself.
+            html += `<option value="${escapeAttr(name)}"${name === current ? ' selected' : ''}>${escapeHtml(name)}</option>`;
+            continue;
+        }
+        html += `<optgroup label="${escapeAttr(name)}">`;
+        html += `<option value="${escapeAttr(name)}"${name === current ? ' selected' : ''}>All runs of ${escapeHtml(name)}</option>`;
+        for (const r of wfRuns) {
+            const label = (r.label && r.label !== r.id) ? `${r.label} — ${formatRelativeTime(r.started_at)}` : `${r.id.slice(0, 22)} — ${formatRelativeTime(r.started_at)}`;
+            html += `<option value="${escapeAttr(r.id)}"${r.id === current ? ' selected' : ''}>${escapeHtml(label)}</option>`;
+        }
+        html += '</optgroup>';
+    }
+    select.innerHTML = html;
+}
+
+/**
+ * Compact relative-time formatter for filter option labels.
+ * "2m ago" / "3h ago" / "yesterday" / "Apr 30".
+ */
+function formatRelativeTime(iso) {
+    if (!iso) return '';
+    try {
+        const d = new Date(iso);
+        const diff = (Date.now() - d.getTime()) / 1000;
+        if (diff < 60) return 'just now';
+        if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
+        if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
+        if (diff < 172800) return 'yesterday';
+        return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+    } catch {
+        return iso;
+    }
+}
+
+/**
+ * Helper: HTML-attribute-safe escape (for `value="..."`). Differs from escapeHtml
+ * which is for text content; here we also escape quotes for attribute context.
+ */
+function escapeAttr(s) {
+    if (s == null) return '';
+    return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+/**
+ * Fetch the cross-workflow runs list and refresh the dropdown.
+ * Called on dashboard load and lazily during polling.
+ */
+async function refreshPipelineRunsCache() {
+    try {
+        const res = await fetch(`${API_BASE}/api/workflow-runs/all`);
+        const data = await res.json();
+        if (data && data.success && Array.isArray(data.runs)) {
+            pipelineRunsCache = data.runs;
+            pipelineRunsCacheLastFetch = Date.now();
+            updatePipelineFilterOptions();
+        }
+    } catch {
+        // Non-fatal — dropdown falls back to workflow-name-only options.
+    }
 }
 
 function initPipelineInfiniteScroll() {

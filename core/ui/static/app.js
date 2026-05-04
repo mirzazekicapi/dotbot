@@ -53,6 +53,9 @@ document.addEventListener('DOMContentLoaded', async () => {
     initNotifications();
     await initDecisions();
     if (typeof initWorkflowRuns === 'function') initWorkflowRuns();
+    // Pre-fill the Pipeline filter's per-run optgroups before the first poll tick
+    // so they're populated when the user lands on the Roadmap tab.
+    if (typeof refreshPipelineRunsCache === 'function') refreshPipelineRunsCache();
 
     // Initialize Aether (ambient feedback)
     Aether.init().then(result => {
