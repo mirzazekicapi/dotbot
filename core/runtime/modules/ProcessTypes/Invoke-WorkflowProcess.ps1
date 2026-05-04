@@ -789,16 +789,16 @@ try {
         # normal analysis+execution path instead of being dispatched (and skipped).
         if ($taskTypeVal -eq 'task_gen' -and -not $task.script_path -and $task.workflow) {
             try {
-                $wfManifestPath = Join-Path $botRoot "workflows\$($task.workflow)\workflow.yaml"
-                if (Test-Path $wfManifestPath) {
-                    if (-not (Get-Command Read-WorkflowManifest -ErrorAction SilentlyContinue)) {
-                        . (Join-Path $botRoot "core/runtime/modules/workflow-manifest.ps1")
-                    }
-                    $wfManifest = Read-WorkflowManifest -WorkflowDir (Join-Path $botRoot "workflows\$($task.workflow)")
+                if (-not (Get-Command Read-WorkflowManifest -ErrorAction SilentlyContinue)) {
+                    . (Join-Path $botRoot "core/runtime/modules/workflow-manifest.ps1")
+                }
+                $wfTaskDir = Join-Path $botRoot "workflows\$($task.workflow)"
+                if (Test-ValidWorkflowDir -Dir $wfTaskDir) {
+                    $wfManifest = Read-WorkflowManifest -WorkflowDir $wfTaskDir
                     $matchingPhase = $wfManifest.tasks | Where-Object { $_['name'] -eq $task.name } | Select-Object -First 1
                     if ($matchingPhase -and $matchingPhase['workflow']) {
                         $recoveredPromptPath = "recipes/prompts/$($matchingPhase['workflow'])"
-                        $tplPath = Join-Path (Join-Path $botRoot "workflows\$($task.workflow)") $recoveredPromptPath
+                        $tplPath = Join-Path $wfTaskDir $recoveredPromptPath
                         if (-not (Test-Path $tplPath)) { $tplPath = Join-Path $botRoot $recoveredPromptPath }
                         if (Test-Path $tplPath) {
                             Write-Status "Recovering task_gen '$($task.name)' as prompt_template: $recoveredPromptPath" -Type Info
@@ -835,7 +835,7 @@ try {
                     Write-Status $typeError -Type Error
                     Write-ProcessActivity -Id $procId -ActivityType "error" -Message "$($task.name): $typeError"
                     try {
-                        Invoke-TaskMarkSkipped -Arguments @{ task_id = $task.id; skip_reason = $typeError } | Out-Null
+                        Invoke-TaskMarkSkipped -Arguments @{ task_id = $task.id; skip_reason = 'non-recoverable'; skip_detail = $typeError } | Out-Null
                     } catch { Write-BotLog -Level Debug -Message "Logging operation failed" -Exception $_ }
                     if (Test-TaskIsMandatory $task) {
                         Write-Status "Mandatory task failed: $($task.name) - stopping workflow" -Type Error
@@ -876,7 +876,7 @@ try {
                     Write-Status $typeError -Type Error
                     Write-ProcessActivity -Id $procId -ActivityType "error" -Message "$($task.name): $typeError"
                     try {
-                        Invoke-TaskMarkSkipped -Arguments @{ task_id = $task.id; skip_reason = $typeError } | Out-Null
+                        Invoke-TaskMarkSkipped -Arguments @{ task_id = $task.id; skip_reason = 'non-recoverable'; skip_detail = $typeError } | Out-Null
                     } catch { Write-BotLog -Level Debug -Message "Logging operation failed" -Exception $_ }
                     if (Test-TaskIsMandatory $task) {
                         Write-Status "Mandatory task failed: $($task.name) - stopping workflow" -Type Error
@@ -1100,7 +1100,7 @@ try {
             } else {
                 Write-Status "Task failed: $($task.name)" -Type Error
                 try {
-                    Invoke-TaskMarkSkipped -Arguments @{ task_id = $task.id; skip_reason = "$taskTypeVal execution failed: $typeError" } | Out-Null
+                    Invoke-TaskMarkSkipped -Arguments @{ task_id = $task.id; skip_reason = 'non-recoverable'; skip_detail = "$taskTypeVal execution failed: $typeError" } | Out-Null
                 } catch { Write-BotLog -Level Debug -Message "Session operation failed" -Exception $_ }
 
                 # Mandatory-task halt (#213): script/mcp/task_gen failure
@@ -1283,6 +1283,8 @@ Do NOT implement the task. Your job is research and preparation only.
                 if ($ShowVerbose) { $streamArgs['ShowVerbose'] = $true }
 
                 if ($permissionMode) { $streamArgs['PermissionMode'] = $permissionMode }
+                # Analysis phase runs before worktree creation, so cwd stays at project
+                # root. The phase is read-only by prompt contract (#314).
                 Invoke-ProviderStream @streamArgs
                 $exitCode = 0
             } catch {
@@ -1514,6 +1516,12 @@ Work on this task autonomously. When complete, ensure you call task_mark_done vi
         # — its worktree must be retained so the executor can resume after
         # task_answer_question moves the task back to analysing/.
         $taskParked = $false
+        # Set when the task ended in a terminal state other than done
+        # (skipped/cancelled/split). Distinct from taskSuccess because we must
+        # NOT squash-merge the worktree, NOT count the task as completed, and
+        # NOT log "task -> done". The worktree still has to be cleaned up.
+        $taskTerminal = $false
+        $taskTerminalState = $null
         $postScriptFailed = $false
         $postScriptError = $null
         # Distinguishes which post-task hook actually flipped postScriptFailed
@@ -1547,6 +1555,9 @@ Work on this task autonomously. When complete, ensure you call task_mark_done vi
                 if ($ShowVerbose) { $streamArgs['ShowVerbose'] = $true }
 
                 if ($permissionMode) { $streamArgs['PermissionMode'] = $permissionMode }
+                # Execution phase: pin Claude's cwd to the worktree so Edit/Write/Bash
+                # land on the task branch instead of project root (#314).
+                if ($worktreePath) { $streamArgs['WorkingDirectory'] = $worktreePath }
                 Invoke-ProviderStream @streamArgs
                 $exitCode = 0
             } catch {
@@ -1589,8 +1600,21 @@ Work on this task autonomously. When complete, ensure you call task_mark_done vi
 
             # Check completion
             $completionCheck = Test-TaskCompletion -TaskId $task.id
-            Write-Diag "Completion check: completed=$($completionCheck.completed)"
+            Write-Diag "Completion check: completed=$($completionCheck.completed) method=$($completionCheck.method) terminal_state=$($completionCheck.terminal_state)"
             if ($completionCheck.completed) {
+                # Issue #318: distinguish done from other terminal states
+                # (skipped/cancelled/split). Only done squash-merges to main and
+                # counts as a completed task. Other terminals must clean up the
+                # worktree without merging — otherwise an agent calling
+                # task_mark_skipped silently merges its abandoned work.
+                if ($completionCheck.method -eq 'TerminalState' -and $completionCheck.terminal_state -ne 'done') {
+                    $taskTerminalState = $completionCheck.terminal_state
+                    Write-Status "Task ended in terminal state: $taskTerminalState" -Type Info
+                    Write-Information "task_state_change: $($task.id) -> $taskTerminalState [execution]" -Tags @('dotbot', 'task', 'state')
+                    Write-ProcessActivity -Id $procId -ActivityType "text" -Message "Task ended in terminal state '$taskTerminalState': $($task.name)"
+                    $taskTerminal = $true
+                    break
+                }
                 Write-Status "Task completed!" -Type Complete
                 Write-Information "task_state_change: $($task.id) -> done [execution]" -Tags @('dotbot', 'task', 'state')
                 Invoke-SessionIncrementCompleted -Arguments @{} | Out-Null
@@ -1642,7 +1666,8 @@ Work on this task autonomously. When complete, ensure you call task_mark_done vi
             if (-not $failureReason.recoverable) {
                 Write-Status "Non-recoverable failure - skipping" -Type Error
                 try {
-                    Invoke-TaskMarkSkipped -Arguments @{ task_id = $task.id; skip_reason = "non-recoverable" } | Out-Null
+                    $detail = $failureReason.description ?? $failureReason.type ?? 'non-recoverable failure'
+                    Invoke-TaskMarkSkipped -Arguments @{ task_id = $task.id; skip_reason = 'non-recoverable'; skip_detail = $detail } | Out-Null
                 } catch { Write-BotLog -Level Warn -Message "Task operation failed" -Exception $_ }
                 break
             }
@@ -1650,7 +1675,7 @@ Work on this task autonomously. When complete, ensure you call task_mark_done vi
             if ($attemptNumber -ge $maxRetriesPerTask) {
                 Write-Status "Max retries exhausted" -Type Error
                 try {
-                    Invoke-TaskMarkSkipped -Arguments @{ task_id = $task.id; skip_reason = "max-retries" } | Out-Null
+                    Invoke-TaskMarkSkipped -Arguments @{ task_id = $task.id; skip_reason = 'max-retries'; skip_detail = "Retry budget exhausted after $attemptNumber attempt(s)" } | Out-Null
                 } catch { Write-BotLog -Level Warn -Message "Task operation failed" -Exception $_ }
                 break
             }
@@ -1900,6 +1925,31 @@ Work on this task autonomously. When complete, ensure you call task_mark_done vi
                 Write-Status "$sourceLabel escalation failed: $($_.Exception.Message)" -Type Error
                 Write-ProcessActivity -Id $procId -ActivityType "error" -Message "$sourceLabel escalation failed for $($task.name): $($_.Exception.Message)"
             }
+        } elseif ($taskTerminal) {
+            # Issue #318: task settled into a terminal state other than done
+            # (skipped/cancelled/split). Clean up the worktree without
+            # squash-merging — the work is intentionally abandoned (intentional
+            # skip) or the agent already produced child tasks (split). Do NOT
+            # bump consecutive_failures — these are not failures.
+            Write-ProcessActivity -Id $procId -ActivityType "text" -Message "Task ended in terminal state '$taskTerminalState': $($task.name) — cleaning worktree, no merge"
+            if ($worktreePath) {
+                Write-Status "Cleaning up worktree for $taskTerminalState task..." -Type Info
+                try {
+                    Remove-Junctions -WorktreePath $worktreePath -ErrorOnFailure $false | Out-Null
+                    git -C $projectRoot worktree remove $worktreePath --force 2>$null
+                    git -C $projectRoot branch -D $branchName 2>$null
+                } finally {
+                    Initialize-WorktreeMap -BotRoot $botRoot
+                    Invoke-WorktreeMapLocked -Action {
+                        $cleanupMap = Read-WorktreeMap
+                        $cleanupMap.Remove($task.id)
+                        Write-WorktreeMap -Map $cleanupMap
+                    }
+                    try { Assert-OnBaseBranch -ProjectRoot $projectRoot | Out-Null } catch { Write-BotLog -Level Warn -Message "Task operation failed" -Exception $_ }
+                }
+            }
+            $processData.heartbeat_status = "Terminal ($taskTerminalState): $($task.name)"
+            Write-ProcessFile -Id $procId -Data $processData
         } else {
             Write-ProcessActivity -Id $procId -ActivityType "text" -Message "Task failed: $($task.name)"
 

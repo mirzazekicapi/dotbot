@@ -683,11 +683,13 @@ try {
     Assert-Equal -Name "No deadlock when no skipped tasks exist" `
         -Expected 0 -Actual $result1.BlockedCount
 
-    # ── Scenario 2: Deadlock — todo task depends on a skipped task ──
-    $skippedTask = [ordered]@{
-        id = "dl-skipped-prereq"
-        name = "Skipped prerequisite"
-        description = "Was skipped"
+    # ── Scenario 2 (issue #318): No deadlock — INTENTIONAL skip satisfies deps ──
+    # An intentional skip (task_mark_skipped with not-applicable etc.) should
+    # unblock dependents, not deadlock them.
+    $intentionalSkipped = [ordered]@{
+        id = "dl-intentional-prereq"
+        name = "Intentional skip prereq"
+        description = "Intentionally skipped (not applicable)"
         category = "feature"
         priority = 5
         effort = "S"
@@ -700,35 +702,62 @@ try {
         created_at = "2026-03-06T12:00:00Z"
         updated_at = "2026-03-06T12:00:00Z"
         completed_at = $null
+        skip_history = @(@{ skipped_at = "2026-03-06T12:30:00Z"; reason = "not-applicable" })
     }
-    $skippedTask | ConvertTo-Json -Depth 10 | Set-Content `
-        -Path (Join-Path $skippedDir "dl-skipped-prereq.json") -Encoding UTF8
+    $intentionalSkipped | ConvertTo-Json -Depth 10 | Set-Content `
+        -Path (Join-Path $skippedDir "dl-intentional-prereq.json") -Encoding UTF8
 
-    # Add a todo task that depends on the skipped task
     New-TestTaskFile -TasksTodoDir $todoDir `
-        -TaskId "dl-blocked-1" -Name "Blocked by skipped" `
-        -Description "Depends on skipped prerequisite" -Priority 20 `
-        -Dependencies @("dl-skipped-prereq") | Out-Null
+        -TaskId "dl-after-intentional" -Name "Runs after intentional skip" `
+        -Description "Depends on intentionally skipped prereq" -Priority 20 `
+        -Dependencies @("dl-intentional-prereq") | Out-Null
+
+    Initialize-TaskIndex -TasksBaseDir $tasksBaseDir
+    $resultIntentional = Get-DeadlockedTasks
+    Assert-Equal -Name "No deadlock: intentional skip satisfies dependency (issue #318)" `
+        -Expected 0 -Actual $resultIntentional.BlockedCount
+
+    # ── Scenario 3 (issue #318): Deadlock — todo depends on a FRAMEWORK-ERROR skip ──
+    # Same skipped/ directory, but skip_history reason is 'non-recoverable'.
+    $frameworkSkipped = [ordered]@{
+        id = "dl-framework-prereq"
+        name = "Framework-error prereq"
+        description = "Skipped due to non-recoverable error"
+        category = "feature"
+        priority = 5
+        effort = "S"
+        status = "skipped"
+        dependencies = @()
+        acceptance_criteria = @()
+        steps = @()
+        applicable_standards = @()
+        applicable_agents = @()
+        created_at = "2026-03-06T12:00:00Z"
+        updated_at = "2026-03-06T12:00:00Z"
+        completed_at = $null
+        skip_history = @(@{ skipped_at = "2026-03-06T12:30:00Z"; reason = "non-recoverable"; detail = "missing dependency" })
+    }
+    $frameworkSkipped | ConvertTo-Json -Depth 10 | Set-Content `
+        -Path (Join-Path $skippedDir "dl-framework-prereq.json") -Encoding UTF8
+
+    New-TestTaskFile -TasksTodoDir $todoDir `
+        -TaskId "dl-blocked-1" -Name "Blocked by framework error" `
+        -Description "Depends on framework-error prereq" -Priority 20 `
+        -Dependencies @("dl-framework-prereq") | Out-Null
 
     Initialize-TaskIndex -TasksBaseDir $tasksBaseDir
     $result2 = Get-DeadlockedTasks
-    Assert-Equal -Name "Deadlock detected: one todo task blocked by skipped prerequisite" `
+    Assert-Equal -Name "Deadlock detected: todo blocked by framework-error skip (issue #318)" `
         -Expected 1 -Actual $result2.BlockedCount
     Assert-True -Name "Deadlock reports correct blocker name" `
-        -Condition ($result2.BlockerNames -contains "Skipped prerequisite") `
-        -Message "Expected blocker name 'Skipped prerequisite', got: $($result2.BlockerNames -join ', ')"
-
-    # ── Scenario 3: No deadlock — todo task has no deps (should not count) ──
-    # dl-free-1 (no deps) is still in todo alongside dl-blocked-1 (blocked).
-    # BlockedCount should still be 1, not 2.
-    Assert-Equal -Name "Unblocked todo tasks are not counted as deadlocked" `
-        -Expected 1 -Actual $result2.BlockedCount
+        -Condition ($result2.BlockerNames -contains "Framework-error prereq") `
+        -Message "Expected blocker name 'Framework-error prereq', got: $($result2.BlockerNames -join ', ')"
 
     # ── Scenario 4: Dependency satisfied by done task — not a deadlock ──
     $doneTask = [ordered]@{
-        id = "dl-skipped-prereq"
-        name = "Skipped prerequisite"
-        description = "Was skipped but then completed"
+        id = "dl-framework-prereq"
+        name = "Framework-error prereq"
+        description = "Recovered and completed"
         category = "feature"
         priority = 5
         effort = "S"
@@ -743,8 +772,9 @@ try {
         completed_at = "2026-03-06T13:00:00Z"
     }
     $doneDir = Join-Path $tasksBaseDir "done"
+    Remove-Item -Path (Join-Path $skippedDir "dl-framework-prereq.json") -Force -ErrorAction SilentlyContinue
     $doneTask | ConvertTo-Json -Depth 10 | Set-Content `
-        -Path (Join-Path $doneDir "dl-skipped-prereq.json") -Encoding UTF8
+        -Path (Join-Path $doneDir "dl-framework-prereq.json") -Encoding UTF8
 
     Initialize-TaskIndex -TasksBaseDir $tasksBaseDir
     $result4 = Get-DeadlockedTasks
@@ -752,6 +782,274 @@ try {
         -Expected 0 -Actual $result4.BlockedCount
 }
 finally {
+    if ($testProject) {
+        Remove-TestProject -Path $testProject
+    }
+}
+
+# ─── Test-TaskCompletion terminal-state detection (issue #318) ──────────────
+# Verifies the runtime sees skipped/cancelled/split as terminal so the runner
+# stops the retry loop (and skips the squash-merge) when an agent calls
+# task_mark_skipped or a task_get-next-driven auto-skip lands the task in
+# skipped/.
+
+$testProject = $null
+$savedDotbotProjectRoot = $global:DotbotProjectRoot
+try {
+    $testProject = New-SourceBackedTestProject -RepoRoot $repoRoot
+    $botDir       = Join-Path $testProject ".bot"
+    $tasksBaseDir = Join-Path $botDir "workspace\tasks"
+    $skippedDir   = Join-Path $tasksBaseDir "skipped"
+    $cancelledDir = Join-Path $tasksBaseDir "cancelled"
+    $splitDir     = Join-Path $tasksBaseDir "split"
+    $doneDir      = Join-Path $tasksBaseDir "done"
+    $inProgressDir = Join-Path $tasksBaseDir "in-progress"
+
+    $global:DotbotProjectRoot = $testProject
+
+    $taskIndexModule = Join-Path $botDir "core/mcp/modules/TaskIndexCache.psm1"
+    Import-Module $taskIndexModule -Force
+
+    Assert-True -Name "TaskIndexCache exports Get-TaskTerminalState (issue #318)" `
+        -Condition ((Get-Command -Module TaskIndexCache).Name -contains 'Get-TaskTerminalState') `
+        -Message "Expected Get-TaskTerminalState to be exported"
+
+    # Dot-source the runtime helper (not a module — it caches a reference to
+    # $global:DotbotProjectRoot via Initialize-TaskIndex on first load).
+    $completionScript = Join-Path $botDir "core/runtime/modules/test-task-completion.ps1"
+    . $completionScript
+
+    Assert-True -Name "test-task-completion dot-source exposes Test-TaskCompletion" `
+        -Condition ($null -ne (Get-Command Test-TaskCompletion -ErrorAction SilentlyContinue)) `
+        -Message "Expected Test-TaskCompletion to be defined after dot-sourcing"
+
+    function New-TerminalStateFixture {
+        param(
+            [Parameter(Mandatory)][string]$TaskId,
+            [Parameter(Mandatory)][string]$Status,
+            [Parameter(Mandatory)][string]$Dir,
+            [object]$SkipHistory
+        )
+        $task = [ordered]@{
+            id = $TaskId
+            name = "Fixture $TaskId"
+            description = "Terminal-state fixture for #318"
+            category = "feature"
+            priority = 5
+            effort = "S"
+            status = $Status
+            dependencies = @()
+            acceptance_criteria = @()
+            steps = @()
+            applicable_standards = @()
+            applicable_agents = @()
+            created_at = "2026-03-06T12:00:00Z"
+            updated_at = "2026-03-06T12:00:00Z"
+            completed_at = $null
+        }
+        if ($SkipHistory) { $task.skip_history = $SkipHistory }
+        $task | ConvertTo-Json -Depth 10 | Set-Content -Path (Join-Path $Dir "$TaskId.json") -Encoding UTF8
+    }
+
+    # ── Scenario 1: intentional skip → terminal ──
+    New-TerminalStateFixture -TaskId "tc-intent" -Status "skipped" -Dir $skippedDir `
+        -SkipHistory @(@{ skipped_at = "2026-03-06T12:30:00Z"; reason = "not-applicable" })
+
+    Initialize-TaskIndex -TasksBaseDir $tasksBaseDir
+    $resultIntent = Test-TaskCompletion -TaskId "tc-intent"
+    Assert-True -Name "Intentional skip is reported completed=true (issue #318)" `
+        -Condition ($resultIntent.completed -eq $true) `
+        -Message "Expected completed=true, got $($resultIntent.completed)"
+    Assert-Equal -Name "Intentional skip reports method=TerminalState" `
+        -Expected "TerminalState" -Actual $resultIntent.method
+    Assert-Equal -Name "Intentional skip reports terminal_state=skipped" `
+        -Expected "skipped" -Actual $resultIntent.terminal_state
+
+    # ── Scenario 2: framework-error skip → still terminal (runner cleans up) ──
+    New-TerminalStateFixture -TaskId "tc-framework" -Status "skipped" -Dir $skippedDir `
+        -SkipHistory @(@{ skipped_at = "2026-03-06T12:30:00Z"; reason = "non-recoverable"; detail = "boom" })
+
+    Initialize-TaskIndex -TasksBaseDir $tasksBaseDir
+    $resultFramework = Test-TaskCompletion -TaskId "tc-framework"
+    Assert-True -Name "Framework-error skip is reported completed=true (issue #318)" `
+        -Condition ($resultFramework.completed -eq $true) `
+        -Message "Expected completed=true, got $($resultFramework.completed)"
+    Assert-Equal -Name "Framework-error skip reports method=TerminalState" `
+        -Expected "TerminalState" -Actual $resultFramework.method
+    Assert-Equal -Name "Framework-error skip reports terminal_state=skipped" `
+        -Expected "skipped" -Actual $resultFramework.terminal_state
+
+    # ── Scenario 3: cancelled → terminal ──
+    New-TerminalStateFixture -TaskId "tc-cancelled" -Status "cancelled" -Dir $cancelledDir
+    Initialize-TaskIndex -TasksBaseDir $tasksBaseDir
+    $resultCancelled = Test-TaskCompletion -TaskId "tc-cancelled"
+    Assert-Equal -Name "Cancelled task reports terminal_state=cancelled" `
+        -Expected "cancelled" -Actual $resultCancelled.terminal_state
+
+    # ── Scenario 4: split → terminal (children replace parent) ──
+    New-TerminalStateFixture -TaskId "tc-split" -Status "split" -Dir $splitDir
+    Initialize-TaskIndex -TasksBaseDir $tasksBaseDir
+    $resultSplit = Test-TaskCompletion -TaskId "tc-split"
+    Assert-Equal -Name "Split task reports terminal_state=split" `
+        -Expected "split" -Actual $resultSplit.terminal_state
+
+    # ── Scenario 5: done → method=TaskStatusCheck (regression guard) ──
+    # The new terminal-state branch must come AFTER the done check so the
+    # runner still squash-merges done tasks the way it always has.
+    New-TerminalStateFixture -TaskId "tc-done" -Status "done" -Dir $doneDir
+    Initialize-TaskIndex -TasksBaseDir $tasksBaseDir
+    $resultDone = Test-TaskCompletion -TaskId "tc-done"
+    Assert-Equal -Name "Done task still reports method=TaskStatusCheck (not TerminalState)" `
+        -Expected "TaskStatusCheck" -Actual $resultDone.method
+
+    # ── Scenario 6: in-progress (no terminal) → completed=false ──
+    New-TerminalStateFixture -TaskId "tc-running" -Status "in-progress" -Dir $inProgressDir
+    Initialize-TaskIndex -TasksBaseDir $tasksBaseDir
+    $resultRunning = Test-TaskCompletion -TaskId "tc-running"
+    Assert-True -Name "In-progress task reports completed=false" `
+        -Condition ($resultRunning.completed -eq $false) `
+        -Message "Expected completed=false for in-progress task, got $($resultRunning.completed)"
+}
+finally {
+    $global:DotbotProjectRoot = $savedDotbotProjectRoot
+    if ($testProject) {
+        Remove-TestProject -Path $testProject
+    }
+}
+
+# ─── Reset-SkippedTasks polarity guard (issue #318) ──────────────────────────
+# Headline runtime fix: framework-error skips auto-retry, intentional skips do
+# NOT. A regression that flips this comparison (`-in` vs `-notin`) would
+# silently re-introduce the original bug — the agent's "not applicable"
+# decision being wiped out on next workflow restart.
+
+$testProject = $null
+$savedDotbotProjectRoot = $global:DotbotProjectRoot
+try {
+    $testProject = New-SourceBackedTestProject -RepoRoot $repoRoot
+    $botDir       = Join-Path $testProject ".bot"
+    $tasksBaseDir = Join-Path $botDir "workspace\tasks"
+    $todoDir      = Join-Path $tasksBaseDir "todo"
+    $skippedDir   = Join-Path $tasksBaseDir "skipped"
+
+    $global:DotbotProjectRoot = $testProject
+
+    # Reset-SkippedTasks lives in task-reset.ps1 (dot-sourced, not a module).
+    # It calls Test-IsFrameworkErrorSkip from TaskIndexCache, so import that first.
+    Import-Module (Join-Path $botDir "core/mcp/modules/TaskIndexCache.psm1") -Force
+    . (Join-Path $botDir "core/runtime/modules/task-reset.ps1")
+
+    function New-SkippedFixture {
+        param(
+            [Parameter(Mandatory)][string]$TaskId,
+            [Parameter(Mandatory)][string]$Reason,
+            [string]$Detail,
+            [int]$HistoryCount = 1
+        )
+        $history = @()
+        for ($i = 1; $i -le $HistoryCount; $i++) {
+            $entry = [ordered]@{
+                skipped_at = "2026-04-29T12:0${i}:00Z"
+                reason     = $Reason
+            }
+            if ($Detail) { $entry.detail = $Detail }
+            $history += $entry
+        }
+        $task = [ordered]@{
+            id = $TaskId
+            name = "Fixture $TaskId"
+            description = "Reset-SkippedTasks fixture for #318"
+            category = "feature"
+            priority = 5
+            effort = "S"
+            status = "skipped"
+            dependencies = @()
+            acceptance_criteria = @()
+            steps = @()
+            applicable_standards = @()
+            applicable_agents = @()
+            created_at = "2026-04-29T11:00:00Z"
+            updated_at = "2026-04-29T11:00:00Z"
+            completed_at = $null
+            skip_history = $history
+        }
+        $task | ConvertTo-Json -Depth 10 | Set-Content -Path (Join-Path $skippedDir "$TaskId.json") -Encoding UTF8
+    }
+
+    # ── Scenario 1: intentional skip is LEFT ALONE ──
+    New-SkippedFixture -TaskId "rs-intent" -Reason "not-applicable"
+    $reset1 = Reset-SkippedTasks -TasksBaseDir $tasksBaseDir
+    Assert-True -Name "Reset-SkippedTasks: intentional skip not retried (issue #318)" `
+        -Condition (-not ($reset1 | Where-Object { $_.id -eq 'rs-intent' })) `
+        -Message "Expected rs-intent to be left alone, got reset"
+    Assert-True -Name "Reset-SkippedTasks: intentional skip stays in skipped/" `
+        -Condition (Test-Path (Join-Path $skippedDir "rs-intent.json")) `
+        -Message "Expected rs-intent.json to remain in skipped/"
+    Assert-True -Name "Reset-SkippedTasks: intentional skip not moved to todo/" `
+        -Condition (-not (Test-Path (Join-Path $todoDir "rs-intent.json"))) `
+        -Message "Expected rs-intent.json NOT to appear in todo/"
+
+    # ── Scenario 2: framework-error skip IS retried ──
+    New-SkippedFixture -TaskId "rs-framework" -Reason "non-recoverable" -Detail "boom"
+    $reset2 = Reset-SkippedTasks -TasksBaseDir $tasksBaseDir
+    $frameworkReset = $reset2 | Where-Object { $_.id -eq 'rs-framework' }
+    Assert-True -Name "Reset-SkippedTasks: framework-error skip is retried" `
+        -Condition ($null -ne $frameworkReset) `
+        -Message "Expected rs-framework to be reset, got nothing"
+    Assert-Equal -Name "Reset-SkippedTasks: reset entry reports last_reason" `
+        -Expected "non-recoverable" -Actual $frameworkReset.last_reason
+    Assert-True -Name "Reset-SkippedTasks: framework-error skip moved to todo/" `
+        -Condition (Test-Path (Join-Path $todoDir "rs-framework.json")) `
+        -Message "Expected rs-framework.json in todo/"
+    Assert-True -Name "Reset-SkippedTasks: framework-error skip removed from skipped/" `
+        -Condition (-not (Test-Path (Join-Path $skippedDir "rs-framework.json"))) `
+        -Message "Expected rs-framework.json removed from skipped/"
+
+    # ── Scenario 3: persistently failing framework skip is left alone (>=3 attempts) ──
+    New-SkippedFixture -TaskId "rs-stuck" -Reason "max-retries" -HistoryCount 3
+    $reset3 = Reset-SkippedTasks -TasksBaseDir $tasksBaseDir
+    Assert-True -Name "Reset-SkippedTasks: skip_count>=3 left for manual review" `
+        -Condition (-not ($reset3 | Where-Object { $_.id -eq 'rs-stuck' })) `
+        -Message "Expected rs-stuck to remain in skipped/ for manual review"
+    Assert-True -Name "Reset-SkippedTasks: stuck task stays in skipped/" `
+        -Condition (Test-Path (Join-Path $skippedDir "rs-stuck.json")) `
+        -Message "Expected rs-stuck.json to remain in skipped/"
+
+    # ── Scenario 4: top-level skip_reason fallback (task-get-next path) ──
+    # task-get-next writes top-level skip_reason without populating skip_history.
+    # Reset-SkippedTasks must classify those correctly via the fallback.
+    $conditionTask = [ordered]@{
+        id = "rs-condition"
+        name = "Condition skip"
+        description = "Condition not met at runtime"
+        category = "feature"
+        priority = 5
+        effort = "S"
+        status = "skipped"
+        dependencies = @()
+        acceptance_criteria = @()
+        steps = @()
+        applicable_standards = @()
+        applicable_agents = @()
+        created_at = "2026-04-29T11:00:00Z"
+        updated_at = "2026-04-29T11:00:00Z"
+        completed_at = $null
+        skip_reason = "condition-not-met"
+        skip_detail = "platform != linux"
+    }
+    $conditionTask | ConvertTo-Json -Depth 10 | Set-Content `
+        -Path (Join-Path $skippedDir "rs-condition.json") -Encoding UTF8
+
+    $reset4 = Reset-SkippedTasks -TasksBaseDir $tasksBaseDir
+    Assert-True -Name "Reset-SkippedTasks: top-level intentional skip_reason left alone" `
+        -Condition (-not ($reset4 | Where-Object { $_.id -eq 'rs-condition' })) `
+        -Message "Expected condition-not-met task to be left alone (intentional)"
+    Assert-True -Name "Reset-SkippedTasks: condition-not-met task stays in skipped/" `
+        -Condition (Test-Path (Join-Path $skippedDir "rs-condition.json")) `
+        -Message "Expected rs-condition.json to remain in skipped/"
+}
+finally {
+    $global:DotbotProjectRoot = $savedDotbotProjectRoot
     if ($testProject) {
         Remove-TestProject -Path $testProject
     }
