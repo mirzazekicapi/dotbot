@@ -175,6 +175,36 @@ function Invoke-TaskMarkDone {
         }
     }
 
+    # Review gate: when the task carries review_gate=true, redirect to needs-input
+    # for human approval instead of completing. task-answer-question handles the response:
+    # key 'A' → done, any other key → back to in-progress for rework.
+    if ($taskContent.PSObject.Properties['review_gate'] -and [bool]$taskContent.review_gate) {
+        $redirectedAt = (Get-Date).ToUniversalTime().ToString("yyyy-MM-dd'T'HH:mm:ss'Z'")
+        $needsInputDir = Join-Path $projectRoot ".bot\workspace\tasks\needs-input"
+        if (-not (Test-Path $needsInputDir)) { New-Item -ItemType Directory -Force -Path $needsInputDir | Out-Null }
+
+        $taskContent.status     = 'needs-input'
+        $taskContent.updated_at = $redirectedAt
+        $taskContent.pending_question = [ordered]@{
+            id       = "review_gate_$($taskContent.id)"
+            question = "Review '$($taskContent.name)': approve to mark as done, or reject with redo instructions."
+            context  = "The task has completed execution. Review the output and decide."
+        }
+        $newFilePath = Join-Path $needsInputDir (Split-Path -Leaf $found.File.FullName)
+        $taskContent | ConvertTo-Json -Depth 20 | Set-Content -Path $newFilePath -Encoding UTF8
+        Remove-Item -Path $found.File.FullName -Force
+
+        return @{
+            success     = $true
+            message     = "Task pending review — awaiting approval before done"
+            task_id     = $taskId
+            task_name   = $taskContent.name
+            old_status  = $found.Status
+            new_status  = 'needs-input'
+            review_gate = $true
+        }
+    }
+
     # Extract commit information
     $commitUpdates = @{}
     try {

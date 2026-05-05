@@ -316,6 +316,48 @@ function Invoke-TaskAnswerQuestion {
     # Check if the answer indicates the task should be skipped
     $isSkipAnswer = $resolvedAnswer -match '(?i)skip\s*task|skip\s*-|already\s*exist'
 
+    # Review gate: task was redirected here from task_mark_done for human approval
+    $isReviewGate = $taskContent.PSObject.Properties['review_gate'] -and $taskContent.review_gate -eq $true
+    if ($isReviewGate -and -not $isSkipAnswer) {
+        $doneDir   = Join-Path $tasksBaseDir 'done'
+        $inProgDir = Join-Path $tasksBaseDir 'in-progress'
+        if ($answerType -eq 'option' -and $answerKey -eq 'A') {
+            if (-not (Test-Path $doneDir)) { New-Item -ItemType Directory -Force -Path $doneDir | Out-Null }
+            $taskContent.status     = 'done'
+            $taskContent.review_gate = $false
+            if ($taskContent.PSObject.Properties['completed_at']) { $taskContent.completed_at = $answeredAt }
+            else { $taskContent | Add-Member -NotePropertyName 'completed_at' -NotePropertyValue $answeredAt -Force }
+            $newFilePath = Join-Path $doneDir $taskFile.Name
+            $newStatus   = 'done'
+            $message     = 'Approved — task marked as done'
+        } else {
+            # Move to analysed so the task runner picks it up again for re-execution.
+            # Keep review_gate=true so the next completion also goes through review.
+            $analysedDir = Join-Path $tasksBaseDir 'analysed'
+            if (-not (Test-Path $analysedDir)) { New-Item -ItemType Directory -Force -Path $analysedDir | Out-Null }
+            $taskContent.status = 'analysed'
+            if (-not $taskContent.PSObject.Properties['review_feedback']) {
+                $taskContent | Add-Member -NotePropertyName 'review_feedback' -NotePropertyValue @() -Force
+            }
+            $taskContent.review_feedback = @(@($taskContent.review_feedback) + @(@{ feedback = $resolvedAnswer; given_at = $answeredAt }))
+            $newFilePath = Join-Path $analysedDir $taskFile.Name
+            $newStatus   = 'analysed'
+            $message     = 'Changes requested — task queued for re-execution'
+        }
+        $taskContent | ConvertTo-Json -Depth 20 | Set-Content -Path $newFilePath -Encoding UTF8
+        Remove-Item -Path $taskFile.FullName -Force
+        return @{
+            success    = $true
+            message    = $message
+            task_id    = $taskId
+            task_name  = $taskContent.name
+            old_status = 'needs-input'
+            new_status = $newStatus
+            answer     = $resolvedAnswer
+            file_path  = $newFilePath
+        }
+    }
+
     if ($isSkipAnswer) {
         # Transition directly to skipped
         $taskContent.status = 'skipped'

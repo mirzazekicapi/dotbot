@@ -293,6 +293,12 @@ function renderActionItems(container, items) {
  */
 function renderQuestionItem(item) {
     const question = item.question || {};
+    const isReviewGate = question.id && question.id.startsWith('review_gate_');
+
+    if (isReviewGate) {
+        return renderReviewGateItem(item);
+    }
+
     const options = question.options || [];
     const isMultiSelect = question.multi_select || false;
 
@@ -310,9 +316,9 @@ function renderQuestionItem(item) {
             <div class="action-item-body">
                 <div class="action-question-text">${escapeHtml(question.question || 'No question text')}</div>
                 ${question.context ? `<div class="action-question-context">${escapeHtml(question.context)}</div>` : ''}
-                
+
                 ${isMultiSelect ? '<div class="multi-select-hint">Select one or more options</div>' : ''}
-                
+
                 <div class="answer-options" data-multi-select="${isMultiSelect}">
                     ${options.map(opt => `
                         <div class="answer-option"
@@ -325,8 +331,17 @@ function renderQuestionItem(item) {
                             </div>
                         </div>
                     `).join('')}
+                    <div class="answer-options-separator"></div>
+                    <div class="answer-option answer-option-approved"
+                         data-key="__approved__"
+                         data-label="Approved">
+                        <span class="answer-key">&#10003;</span>
+                        <div class="answer-content">
+                            <div class="answer-label">Approved — mark task as done</div>
+                        </div>
+                    </div>
                 </div>
-                
+
                 <div class="custom-answer-section">
                     <div class="custom-answer-label">Or provide custom response</div>
                     <textarea class="custom-answer-input" placeholder="Type a custom answer..."></textarea>
@@ -343,6 +358,47 @@ function renderQuestionItem(item) {
                     </div>
                     <input type="file" class="answer-file-input" style="display: none;" multiple accept=".md,.docx,.xlsx,.pdf,.txt">
                     <div class="answer-file-list"></div>
+                </div>
+
+                <div class="action-submit">
+                    <button class="ctrl-btn primary submit-answer">Submit Answer</button>
+                </div>
+            </div>
+        </div>
+    `;
+}
+
+function renderReviewGateItem(item) {
+    const question = item.question || {};
+    return `
+        <div class="action-item" data-task-id="${escapeHtml(item.task_id)}" data-type="question">
+            <div class="action-item-header">
+                <span class="action-item-type question">Review</span>
+                <span class="action-item-task">${escapeHtml(item.task_name)}</span>
+            </div>
+            <div class="action-item-body">
+                <div class="action-question-text">${escapeHtml(question.question || 'Review task output')}</div>
+                ${question.context ? `<div class="action-question-context">${escapeHtml(question.context)}</div>` : ''}
+
+                <div class="answer-options" data-multi-select="false">
+                    <div class="answer-option answer-option-reject"
+                         data-key="__reject__"
+                         data-label="Reject">
+                        <span class="answer-key">&#10007;</span>
+                        <div class="answer-content">
+                            <div class="answer-label">Reject — mark as redo</div>
+                            <textarea class="reject-reason-input" placeholder="Describe what needs to be redone..."></textarea>
+                        </div>
+                    </div>
+                    <div class="answer-options-separator"></div>
+                    <div class="answer-option answer-option-approved"
+                         data-key="__approved__"
+                         data-label="Approved">
+                        <span class="answer-key">&#10003;</span>
+                        <div class="answer-content">
+                            <div class="answer-label">Approve — mark as done</div>
+                        </div>
+                    </div>
                 </div>
 
                 <div class="action-submit">
@@ -580,6 +636,9 @@ function attachActionHandlers(container) {
     // Answer option selection
     container.querySelectorAll('.answer-option').forEach(option => {
         option.addEventListener('click', (e) => {
+            // Don't toggle selection when clicking inside the reject textarea
+            if (e.target.classList.contains('reject-reason-input')) return;
+
             const optionsContainer = option.closest('.answer-options');
             const isMultiSelect = optionsContainer?.dataset.multiSelect === 'true';
             const taskId = option.closest('.action-item')?.dataset.taskId;
@@ -617,6 +676,85 @@ function attachActionHandlers(container) {
             const actionItem = btn.closest('.action-item');
             const taskId = actionItem?.dataset.taskId;
             if (!taskId) return;
+
+            // Check if "Reject" was selected — validate redo instructions then send as feedback
+            const rejectEl = actionItem.querySelector('.answer-option.selected[data-key="__reject__"]');
+            if (rejectEl) {
+                const rejectText = rejectEl.querySelector('.reject-reason-input')?.value?.trim() || '';
+                if (!rejectText) {
+                    showToast('Please describe what needs to be redone before rejecting', 'warning');
+                    return;
+                }
+                btn.disabled = true;
+                btn.textContent = 'Submitting...';
+                try {
+                    const response = await fetch(`${API_BASE}/api/task/answer`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ task_id: taskId, answer: rejectText })
+                    });
+                    const result = await response.json();
+                    if (result.success) {
+                        actionItem.remove();
+                        delete selectedAnswers[taskId];
+                        const remaining = document.querySelectorAll('.action-item').length;
+                        updateActionWidget(remaining);
+                        actionWidgetSuppressUntil = Date.now() + 4000;
+                        if (remaining === 0) {
+                            document.getElementById('slideout-content').innerHTML =
+                                '<div class="empty-state">No pending actions</div>';
+                        }
+                        if (typeof pollState === 'function') pollState();
+                    } else {
+                        showToast('Failed to reject task: ' + (result.error || 'Unknown error'), 'error');
+                        btn.disabled = false;
+                        btn.textContent = 'Submit Answer';
+                    }
+                } catch (error) {
+                    console.error('Error rejecting task:', error);
+                    showToast('Error rejecting task', 'error');
+                    btn.disabled = false;
+                    btn.textContent = 'Submit Answer';
+                }
+                return;
+            }
+
+            // Check if "Approved" was selected — bypass question flow, mark done directly
+            const approvedEl = actionItem.querySelector('.answer-option.selected[data-key="__approved__"]');
+            if (approvedEl) {
+                btn.disabled = true;
+                btn.textContent = 'Approving...';
+                try {
+                    const response = await fetch(`${API_BASE}/api/task/approve`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ task_id: taskId })
+                    });
+                    const result = await response.json();
+                    if (result.success) {
+                        actionItem.remove();
+                        delete selectedAnswers[taskId];
+                        const remaining = document.querySelectorAll('.action-item').length;
+                        updateActionWidget(remaining);
+                        actionWidgetSuppressUntil = Date.now() + 4000;
+                        if (remaining === 0) {
+                            document.getElementById('slideout-content').innerHTML =
+                                '<div class="empty-state">No pending actions</div>';
+                        }
+                        if (typeof pollState === 'function') pollState();
+                    } else {
+                        showToast('Failed to approve task: ' + (result.error || 'Unknown error'), 'error');
+                        btn.disabled = false;
+                        btn.textContent = 'Submit Answer';
+                    }
+                } catch (error) {
+                    console.error('Error approving task:', error);
+                    showToast('Error approving task', 'error');
+                    btn.disabled = false;
+                    btn.textContent = 'Submit Answer';
+                }
+                return;
+            }
 
             const selected = selectedAnswers[taskId] || [];
             const customText = actionItem.querySelector('.custom-answer-input')?.value?.trim() || '';
