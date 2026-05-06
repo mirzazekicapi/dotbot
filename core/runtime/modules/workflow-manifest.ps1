@@ -339,7 +339,10 @@ function New-WorkflowTask {
         [string]$Effort = "XS",
         # Stamp the workflow-run id on the task so prompt-builder can resolve
         # {output_directory} to the run's outputs_dir without a separate lookup.
-        [string]$RunId = $null
+        [string]$RunId = $null,
+        # When true, task_mark_done redirects to needs-input for human approval
+        # before the task is considered complete (approval_mode=true runs).
+        [bool]$ReviewGate = $false
     )
 
     $tasksDir = Join-Path $ProjectBotDir "workspace\tasks\todo"
@@ -398,6 +401,7 @@ function New-WorkflowTask {
     }
 
     # Optional fields — only set if declared (keeps task JSON clean)
+    if ($ReviewGate)                           { $task["review_gate"] = $true }
     if ($scriptPath)                           { $task["script_path"] = $scriptPath }
     if ($promptFromWorkflow)                   { $task["prompt"] = $promptFromWorkflow }
     if ($mcpTool)                              { $task["mcp_tool"] = $mcpTool }

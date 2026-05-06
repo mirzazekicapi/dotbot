@@ -1410,6 +1410,25 @@ $docContext
                     break
                 }
 
+                "/api/task/approve" {
+                    if ($method -eq "POST") {
+                        $contentType = "application/json; charset=utf-8"
+                        try {
+                            $reader = New-Object System.IO.StreamReader($request.InputStream)
+                            $body = $reader.ReadToEnd() | ConvertFrom-Json
+                            $reader.Close()
+                            $content = Approve-Task -TaskId $body.task_id | ConvertTo-Json -Depth 10 -Compress
+                        } catch {
+                            $statusCode = 500
+                            $content = @{ success = $false; error = "Failed to approve task: $($_.Exception.Message)" } | ConvertTo-Json -Compress
+                        }
+                    } else {
+                        $statusCode = 405
+                        $content = @{ success = $false; error = "Method not allowed" } | ConvertTo-Json -Compress
+                    }
+                    break
+                }
+
                 "/api/task/approve-split" {
                     if ($method -eq "POST") {
                         $contentType = "application/json; charset=utf-8"
@@ -2154,20 +2173,7 @@ $docContext
                                 # (prompt-builder.ps1 reads task.run_id to resolve {output_directory}).
                                 $newRunId = New-WorkflowRunId
 
-                                # Create tasks from manifest, stamping run_id on each
-                                $createdTasks = @()
-                                $taskDefs = @($manifest.tasks)
-                                foreach ($td in $taskDefs) {
-                                    if ($td -and $td['name']) {
-                                        $result = New-WorkflowTask -ProjectBotDir $botRoot -WorkflowName $wfName -TaskDef $td -RunId $newRunId
-                                        $createdTasks += $result
-                                    }
-                                }
-
-                                # Start-ProcessLaunch auto-detects max_concurrent for workflow type
-                                $launchResult = Start-ProcessLaunch -Type 'task-runner' -Continue $true -Description "Workflow: $wfName" -WorkflowName $wfName
-
-                                # Create the workflow-run record using the same id stamped on tasks
+                                # Resolve approval_mode from form input before creating tasks
                                 $formInputHash = @{}
                                 if ($body -and $body.PSObject.Properties['form_input'] -and $body.form_input) {
                                     foreach ($prop in $body.form_input.PSObject.Properties) {
@@ -2176,6 +2182,19 @@ $docContext
                                 }
                                 $approvalMode = $false
                                 if ($formInputHash.ContainsKey('approval_mode')) { $approvalMode = [bool]$formInputHash['approval_mode'] }
+
+                                # Create tasks from manifest, stamping run_id on each
+                                $createdTasks = @()
+                                $taskDefs = @($manifest.tasks)
+                                foreach ($td in $taskDefs) {
+                                    if ($td -and $td['name']) {
+                                        $result = New-WorkflowTask -ProjectBotDir $botRoot -WorkflowName $wfName -TaskDef $td -RunId $newRunId -ReviewGate $approvalMode
+                                        $createdTasks += $result
+                                    }
+                                }
+
+                                # Start-ProcessLaunch auto-detects max_concurrent for workflow type
+                                $launchResult = Start-ProcessLaunch -Type 'task-runner' -Continue $true -Description "Workflow: $wfName" -WorkflowName $wfName
                                 $taskIds = @($createdTasks | Where-Object { $_ -and $_.id } | ForEach-Object { $_.id })
 
                                 # Snapshot phases from the manifest into the run record so approve/skip

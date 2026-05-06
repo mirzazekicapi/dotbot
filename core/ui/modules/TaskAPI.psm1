@@ -313,7 +313,9 @@ function Get-ActionRequired {
                         questions = $task.pending_questions
                         created_at = $task.updated_at
                     }
-                } else {
+                } elseif (-not ($task.PSObject.Properties['pending_approval_resume_to'] -and $task.pending_approval_resume_to)) {
+                    # Skip phase-gated tasks (pending_approval_resume_to set) — they are
+                    # approved via the workflow run UI, not the Action Required panel.
                     $actionItems += @{
                         type = "question"
                         task_id = $task.id
@@ -451,6 +453,57 @@ function Submit-TaskAnswer {
 
     Write-Status "Answered question for task: $TaskId" -Type Success
     return $result
+}
+
+function Approve-Task {
+    param(
+        [Parameter(Mandatory)] [string]$TaskId
+    )
+
+    $tasksBaseDir = Get-TasksBaseDir
+    $needsInputDir = Join-Path $tasksBaseDir 'needs-input'
+    $doneDir       = Join-Path $tasksBaseDir 'done'
+
+    $taskFile = Get-ChildItem -Path $needsInputDir -Filter "*.json" -ErrorAction SilentlyContinue |
+        Where-Object { (Get-Content $_.FullName -Raw | ConvertFrom-Json).id -eq $TaskId } |
+        Select-Object -First 1
+
+    if (-not $taskFile) {
+        return @{ success = $false; error = "Task '$TaskId' not found in needs-input" }
+    }
+
+    $taskContent = Get-Content $taskFile.FullName -Raw | ConvertFrom-Json
+
+    # Refuse to fast-complete a phase-gated task — it must go back through the runner.
+    if ($taskContent.PSObject.Properties['pending_approval_resume_to'] -and $taskContent.pending_approval_resume_to) {
+        return @{ success = $false; error = "Task '$TaskId' is awaiting phase approval — use the workflow run approve endpoint instead" }
+    }
+
+    $approvedAt  = (Get-Date).ToUniversalTime().ToString("yyyy-MM-dd'T'HH:mm:ss'Z'")
+
+    $taskContent.status     = 'done'
+    $taskContent.updated_at = $approvedAt
+
+    if ($taskContent.PSObject.Properties['completed_at']) {
+        $taskContent.completed_at = $approvedAt
+    } else {
+        $taskContent | Add-Member -NotePropertyName 'completed_at' -NotePropertyValue $approvedAt -Force
+    }
+
+    if (-not (Test-Path $doneDir)) { New-Item -ItemType Directory -Force -Path $doneDir | Out-Null }
+
+    $newFilePath = Join-Path $doneDir $taskFile.Name
+    $taskContent | ConvertTo-Json -Depth 20 | Set-Content -Path $newFilePath -Encoding UTF8
+    Remove-Item -Path $taskFile.FullName -Force
+
+    return @{
+        success    = $true
+        message    = 'Task approved and marked as done'
+        task_id    = $TaskId
+        task_name  = $taskContent.name
+        old_status = 'needs-input'
+        new_status = 'done'
+    }
 }
 
 function Submit-SplitApproval {
@@ -617,6 +670,7 @@ Export-ModuleMember -Function @(
     'Get-TaskPlan',
     'Get-ActionRequired',
     'Submit-TaskAnswer',
+    'Approve-Task',
     'Submit-SplitApproval',
     'Start-TaskCreation',
     'Set-RoadmapTaskIgnore',
