@@ -96,6 +96,7 @@ function formatFriendlyDate(isoString) {
     if (!isoString) return '';
     try {
         const date = new Date(isoString);
+        if (isNaN(date.getTime())) return '';
         const days = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
         const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
         const dayOfWeek = days[date.getDay()];
