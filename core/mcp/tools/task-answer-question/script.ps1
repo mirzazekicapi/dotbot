@@ -43,10 +43,9 @@ function Invoke-TaskAnswerQuestion {
 
     # Type-specific validation (PRD §4.1, §4.6)
     $validDecisions = @{
-        approval       = @('approved', 'rejected', 'abstained')
-        documentReview = @('approved', 'changes_requested', 'comment_only')
+        approval = @('approved', 'rejected')
     }
-    $validTypes = @('singleChoice', 'approval', 'documentReview', 'freeText', 'priorityRanking')
+    $validTypes = @('singleChoice', 'approval', 'freeText', 'priorityRanking')
     if ($questionType -and $questionType -notin $validTypes) {
         throw "Invalid 'type' value '$questionType'. Allowed: $($validTypes -join ', ')"
     }
@@ -58,8 +57,8 @@ function Invoke-TaskAnswerQuestion {
         if ($decision -notin $validDecisions[$questionType]) {
             throw "Invalid 'decision' value '$decision' for type '$questionType'. Allowed: $($validDecisions[$questionType] -join ', ')"
         }
-        if ($decision -in @('rejected', 'changes_requested') -and -not $comment) {
-            throw "'comment' is required when decision='$decision'"
+        if ($decision -eq 'rejected' -and -not $comment) {
+            throw "'comment' is required when decision='rejected'"
         }
     } elseif ($questionType -eq 'priorityRanking') {
         if (-not $rankedItems -or @($rankedItems).Count -eq 0) {
@@ -78,11 +77,11 @@ function Invoke-TaskAnswerQuestion {
     # 'type' is omitted — legacy callers default to singleChoice for this check
     # so decision/comment/ranked_items can't sneak in alongside a plain answer.
     $effectiveType = if ($questionType) { $questionType } else { 'singleChoice' }
-    if ($decision -and $effectiveType -notin @('approval', 'documentReview')) {
-        throw "'decision' is only valid for type 'approval' or 'documentReview', got type='$effectiveType'"
+    if ($decision -and $effectiveType -ne 'approval') {
+        throw "'decision' is only valid for type 'approval', got type='$effectiveType'"
     }
-    if ($comment -and $effectiveType -notin @('approval', 'documentReview')) {
-        throw "'comment' is only valid for type 'approval' or 'documentReview', got type='$effectiveType'"
+    if ($comment -and $effectiveType -ne 'approval') {
+        throw "'comment' is only valid for type 'approval', got type='$effectiveType'"
     }
     if ($rankedItems -and $effectiveType -ne 'priorityRanking') {
         throw "'ranked_items' is only valid for type 'priorityRanking', got type='$effectiveType'"
@@ -90,7 +89,7 @@ function Invoke-TaskAnswerQuestion {
     # Reject 'answer' when caller passes it alongside a typed payload — would
     # produce inconsistent resolvedEntry (e.g., answer='A' + approval_decision='approved').
     if ($answer -and $effectiveType -notin @('singleChoice', 'freeText')) {
-        throw "'answer' is only valid for type 'singleChoice' or 'freeText', got type='$effectiveType'. Use 'decision' (approval/documentReview) or 'ranked_items' (priorityRanking)."
+        throw "'answer' is only valid for type 'singleChoice' or 'freeText', got type='$effectiveType'. Use 'decision' (approval) or 'ranked_items' (priorityRanking)."
     }
 
     # Synthesize an answer string for non-question types so downstream

@@ -265,8 +265,8 @@ function Send-TaskNotification {
     Optional notification settings. If not provided, reads from config.
 
     .PARAMETER Type
-    PRD §4.6 question type — singleChoice (default) | approval | documentReview |
-    freeText | priorityRanking. Drives card rendering and response parsing.
+    PRD sec. 4.6 question type — singleChoice (default) | approval | freeText |
+    priorityRanking. Drives card rendering and response parsing.
 
     .PARAMETER DeliverableSummary
     Optional 1-3 line summary shown in channel notifications (PRD §5.2).
@@ -802,7 +802,7 @@ function ConvertTo-TypedResponse {
     Hashtable. Keys (only set when applicable):
       answer_type        - the type string echoed back
       answer             - resolved string for singleChoice (key) / freeText (string)
-      approval_decision  - approval / documentReview decision value
+      approval_decision  - approval decision value
       comment            - free-text comment
       ranked_items       - array for priorityRanking
       attachment_refs    - array of @{ name; size_bytes; storage_ref; description }
@@ -857,10 +857,6 @@ function ConvertTo-TypedResponse {
 
     switch ($Type) {
         'approval' {
-            if ($decision) { $out['approval_decision'] = $decision }
-            if ($comment)  { $out['comment']           = $comment  }
-        }
-        'documentReview' {
             if ($decision) { $out['approval_decision'] = $decision }
             if ($comment)  { $out['comment']           = $comment  }
         }

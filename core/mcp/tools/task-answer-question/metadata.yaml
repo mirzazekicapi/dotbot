@@ -11,11 +11,12 @@ inputSchema:
       description: "The answer - either an option key (A, B, C, D, E) or a custom freeform answer. Required for singleChoice/freeText types."
     type:
       type: string
-      enum: [singleChoice, approval, documentReview, freeText, priorityRanking]
+      enum: [singleChoice, approval, freeText, priorityRanking]
       description: "Question type. Determines which fields are required/validated."
     decision:
       type: string
-      description: "Required for approval/documentReview. Allowed values vary per type (PRD Section 4.1)."
+      enum: [approved, rejected]
+      description: "Required for approval. Allowed values: approved, rejected."
     comment:
       type: string
       description: "Required when decision=rejected on an approval question."

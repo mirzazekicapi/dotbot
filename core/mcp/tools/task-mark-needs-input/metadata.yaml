@@ -114,7 +114,7 @@ inputSchema:
         - sub_tasks
     type:
       type: string
-      enum: [singleChoice, approval, documentReview, freeText, priorityRanking]
+      enum: [singleChoice, approval, freeText, priorityRanking]
       default: singleChoice
       description: "Question type (PRD Section 4.6). Drives card rendering and response parsing."
     deliverable_summary:

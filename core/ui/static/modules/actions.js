@@ -306,8 +306,30 @@ function renderQuestionItem(item) {
     }
 
     if (questionType === 'approval') {
+        const attachments = Array.isArray(question.attachments) ? question.attachments
+            : Array.isArray(question.attachmentList) ? question.attachmentList
+            : [];
+        const hasAttachments = attachments.length > 0;
+        const attachmentListHtml = hasAttachments ? `
+                <div class="approval-attachments">
+                    <div class="approval-attachments-label">Confirm the attachments you reviewed:</div>
+                    <ul class="approval-attachment-list">
+                        ${attachments.map(att => {
+                            const id = att.attachmentId || att.id || att.attachment_id || '';
+                            const name = att.name || 'attachment';
+                            return `
+                                <li class="approval-attachment-item">
+                                    <label>
+                                        <input type="checkbox" class="approval-reviewed-attachment" data-attachment-id="${escapeAttr(id)}" />
+                                        <span class="approval-attachment-name">${escapeHtml(name)}</span>
+                                    </label>
+                                </li>
+                            `;
+                        }).join('')}
+                    </ul>
+                </div>` : '';
         return `
-        <div class="action-item" data-task-id="${escapeHtml(item.task_id)}" data-type="question" data-question-type="approval">
+        <div class="action-item" data-task-id="${escapeHtml(item.task_id)}" data-type="question" data-question-type="approval" data-has-attachments="${hasAttachments ? 'true' : 'false'}">
             <div class="action-item-header">
                 <span class="action-item-type question">Approval</span>
                 <span class="action-item-task">${escapeHtml(item.task_name)}</span>
@@ -315,9 +337,9 @@ function renderQuestionItem(item) {
             <div class="action-item-body">
                 <div class="action-question-text">${escapeHtml(question.question || 'No question text')}</div>
                 ${question.context ? `<div class="action-question-context">${escapeHtml(question.context)}</div>` : ''}
+                ${attachmentListHtml}
                 <div class="approval-buttons">
                     <button class="ctrl-btn approval-decision" data-decision="approved">Approve</button>
-                    <button class="ctrl-btn approval-decision" data-decision="abstained">Abstain</button>
                     <button class="ctrl-btn approval-decision danger" data-decision="rejected">Reject</button>
                 </div>
                 <div class="approval-comment-section" style="display:none;">
@@ -868,19 +890,32 @@ function attachActionHandlers(container) {
                 return;
             }
 
+            let reviewedAttachmentIds = null;
+            if (actionItem.dataset.hasAttachments === 'true') {
+                reviewedAttachmentIds = Array.from(
+                    actionItem.querySelectorAll('.approval-reviewed-attachment:checked')
+                ).map(cb => cb.dataset.attachmentId).filter(Boolean);
+                if (reviewedAttachmentIds.length === 0) {
+                    showToast('Please confirm you reviewed at least one attachment', 'warning');
+                    return;
+                }
+            }
+
             btn.disabled = true;
             btn.textContent = 'Submitting...';
 
             try {
+                const body = {
+                    task_id: taskId,
+                    answer: decision,
+                    decision: decision,
+                    comment: comment || null
+                };
+                if (reviewedAttachmentIds) body.reviewed_attachment_ids = reviewedAttachmentIds;
                 const response = await fetch(`${API_BASE}/api/task/answer`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        task_id: taskId,
-                        answer: decision,
-                        decision: decision,
-                        comment: comment || null
-                    })
+                    body: JSON.stringify(body)
                 });
 
                 if (!response.ok) {

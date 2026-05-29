@@ -20,7 +20,7 @@ function Invoke-TaskMarkNeedsInput {
     if (-not $question -and -not $questionsArg -and -not $splitProposal) { throw "Either 'questions' array, 'question' object, or 'split_proposal' is required" }
     if (($question -or $questionsArg) -and $splitProposal) { throw "Cannot provide both questions and split_proposal - use one at a time" }
 
-    $validTypes = @('singleChoice', 'approval', 'documentReview', 'freeText', 'priorityRanking')
+    $validTypes = @('singleChoice', 'approval', 'freeText', 'priorityRanking')
     if ($questionType -notin $validTypes) {
         throw "Invalid 'type' value '$questionType'. Allowed: $($validTypes -join ', ')"
     }

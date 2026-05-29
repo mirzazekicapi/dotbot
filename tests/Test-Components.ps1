@@ -3312,16 +3312,16 @@ if (Test-Path $notifModule) {
         -Condition ($typedApproval.answer_type -eq 'approval') `
         -Message "Expected answer_type=approval"
 
-    # ConvertTo-TypedResponse: documentReview with attachments (metadata only)
+    # ConvertTo-TypedResponse: approval with attachments (metadata only)
     $docReviewResp = [PSCustomObject]@{
-        approvalDecision = 'changes_requested'
+        approvalDecision = 'rejected'
         comment          = 'see notes'
         attachments      = @(
             [PSCustomObject]@{ name = 'notes.pdf'; sizeBytes = 1024; storageRef = 'sref-1'; description = 'reviewer notes' }
         )
     }
-    $typedDoc = ConvertTo-TypedResponse -Response $docReviewResp -Type 'documentReview'
-    Assert-True -Name "ConvertTo-TypedResponse documentReview includes attachment_refs metadata" `
+    $typedDoc = ConvertTo-TypedResponse -Response $docReviewResp -Type 'approval'
+    Assert-True -Name "ConvertTo-TypedResponse approval with attachments includes attachment_refs metadata" `
         -Condition ($typedDoc.attachment_refs -and @($typedDoc.attachment_refs).Count -eq 1 -and $typedDoc.attachment_refs[0].storage_ref -eq 'sref-1') `
         -Message "Expected attachment_refs[0].storage_ref=sref-1"
     Assert-True -Name "ConvertTo-TypedResponse does NOT eager-download (no path field)" `
@@ -4115,13 +4115,12 @@ if ((Test-Path $mniMeta) -and (Test-Path $aqMeta)) {
                 -Condition ($threw -and $msg -match "ranked_items.*required") `
                 -Message "Expected throw on missing ranked_items, got: $msg"
 
-            # documentReview with allowed decision should NOT throw on validation —
-            # it will fail later at the task-not-found check, but only AFTER passing validation.
+            # approval with attachments (formerly documentReview) — rejected as a type
             $threw = $false; $msg = ""
             try { Invoke-TaskAnswerQuestion -Arguments @{ task_id='x'; type='documentReview'; decision='approved' } } catch { $threw = $true; $msg = $_.Exception.Message }
-            Assert-True -Name "task-answer-question accepts documentReview decision=approved (passes validation)" `
-                -Condition ($threw -and $msg -match "not found in needs-input") `
-                -Message "Expected validation to pass and fail on task lookup, got: $msg"
+            Assert-True -Name "task-answer-question rejects deprecated documentReview type" `
+                -Condition ($threw -and $msg -match "Invalid 'type'") `
+                -Message "Expected throw on deprecated documentReview type, got: $msg"
 
             # Invalid type
             $threw = $false; $msg = ""
@@ -4175,12 +4174,12 @@ if ((Test-Path $mniMeta) -and (Test-Path $aqMeta)) {
                 -Condition ($threw -and $msg -match "'answer' is only valid") `
                 -Message "Expected throw, got: $msg"
 
-            # changes_requested requires a comment — same requirement as rejected
+            # changes_requested was a documentReview value — now invalid on the merged approval type
             $threw = $false; $msg = ""
-            try { Invoke-TaskAnswerQuestion -Arguments @{ task_id='x'; type='documentReview'; decision='changes_requested' } } catch { $threw = $true; $msg = $_.Exception.Message }
-            Assert-True -Name "task-answer-question rejects changes_requested without comment" `
-                -Condition ($threw -and $msg -match "comment.*required") `
-                -Message "Expected throw on missing comment for changes_requested, got: $msg"
+            try { Invoke-TaskAnswerQuestion -Arguments @{ task_id='x'; type='approval'; decision='changes_requested'; comment='ok' } } catch { $threw = $true; $msg = $_.Exception.Message }
+            Assert-True -Name "task-answer-question rejects legacy changes_requested decision on approval" `
+                -Condition ($threw -and $msg -match "Invalid 'decision'") `
+                -Message "Expected throw on legacy changes_requested decision, got: $msg"
 
             # priorityRanking synthesis must normalize PSCustomObject ranked_items to strings —
             # (verify the synthesis-time -join stays safe even for PSCustomObject input)
