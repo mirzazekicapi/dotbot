@@ -575,7 +575,7 @@ function renderReviewItem(item) {
         if (item.commit_sha) parts.push(`<span class="review-meta-commit">commit <code>${escapeHtml(item.commit_sha.substring(0, 8))}</code></span>`);
         if (item.review_requested_at) {
             const d = new Date(item.review_requested_at);
-            const label = isNaN(d) ? item.review_requested_at : d.toLocaleString();
+            const label = isNaN(d) ? item.review_requested_at : formatFriendlyDate(item.review_requested_at);
             parts.push(`<span class="review-meta-time">${escapeHtml(label)}</span>`);
         }
         return parts.length ? `<div class="review-meta">${parts.join('')}</div>` : '';
