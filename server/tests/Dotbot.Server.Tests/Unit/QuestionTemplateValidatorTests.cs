@@ -73,39 +73,30 @@ public class QuestionTemplateValidatorTests
     [InlineData(QuestionTypes.MultiChoice)]
     [InlineData(QuestionTypes.FreeText)]
     [InlineData(QuestionTypes.PriorityRanking)]
-    [InlineData(QuestionTypes.Approval)]
     public void TypeWithoutDeliverableSummaryRequirement_NoErrorWhenSummaryMissing(string type)
         => Assert.Empty(Validate(Template(type: type)));
 
-    // CheckDeliverableSummary is currently parked out of the validator
-    // rules array pending outpost support for preparing the summary of
-    // attachments. The skipped tests below document the intended behaviour
-    // and should be re-enabled once the rule is restored.
-    [Theory(Skip = "CheckDeliverableSummary parked; restore when outpost emits the summary")]
-    [InlineData(null)]
-    [InlineData("")]
-    [InlineData("   ")]
-    public void ApprovalWithAttachmentsAndNoDeliverableSummary_OneError(string? summary)
+    [Theory]
+    [InlineData(QuestionTypes.Approval, null)]
+    [InlineData(QuestionTypes.Approval, "")]
+    [InlineData(QuestionTypes.Approval, "   ")]
+    [InlineData(QuestionTypes.DocumentReview, null)]
+    [InlineData(QuestionTypes.DocumentReview, "")]
+    [InlineData(QuestionTypes.DocumentReview, "   ")]
+    public void ApprovalOrDocumentReviewWithoutDeliverableSummary_OneError(string type, string? summary)
     {
-        var errors = Validate(Template(
-            type: QuestionTypes.Approval,
-            deliverableSummary: summary,
-            attachments: [new QuestionAttachment { AttachmentId = Guid.NewGuid(), Name = "n", Url = "https://x" }]));
+        var errors = Validate(Template(type: type, deliverableSummary: summary));
         Assert.Single(errors);
         Assert.Contains("deliverableSummary", errors[0]);
-        Assert.Contains("approval", errors[0]);
+        Assert.Contains(type, errors[0]);
     }
 
-    [Fact]
-    public void ApprovalWithAttachmentsAndDeliverableSummary_NoErrors()
-        => Assert.Empty(Validate(Template(
-            type: QuestionTypes.Approval,
-            deliverableSummary: "ship plan v1",
-            attachments: [new QuestionAttachment { AttachmentId = Guid.NewGuid(), Name = "n", Url = "https://x" }])));
-
-    [Fact]
-    public void ApprovalWithoutAttachments_NoDeliverableSummaryRequired()
-        => Assert.Empty(Validate(Template(type: QuestionTypes.Approval)));
+    [Theory]
+    [InlineData(QuestionTypes.Approval)]
+    [InlineData(QuestionTypes.DocumentReview)]
+    public void ApprovalOrDocumentReviewWithDeliverableSummary_NoErrors(string type)
+        => Assert.Empty(Validate(
+            Template(type: type, deliverableSummary: "ship plan v1")));
 
     [Fact]
     public void NullAttachments_NoErrors()
@@ -181,13 +172,12 @@ public class QuestionTemplateValidatorTests
         Assert.Contains("bogus", errors[1]);
     }
 
-    [Fact(Skip = "CheckDeliverableSummary parked; restore when outpost emits the summary")]
-    public void ProjectIdEmptyAndApprovalWithAttachmentsWithoutSummary_TwoErrors()
+    [Fact]
+    public void ProjectIdEmptyAndApprovalWithoutSummary_TwoErrors()
     {
         var errors = Validate(Template(
             projectId: "",
-            type: QuestionTypes.Approval,
-            attachments: [new QuestionAttachment { AttachmentId = Guid.NewGuid(), Name = "n", Url = "https://x" }]));
+            type: QuestionTypes.Approval));
         Assert.Equal(2, errors.Count);
         Assert.Contains("project.projectId", errors[0]);
         Assert.Contains("deliverableSummary", errors[1]);

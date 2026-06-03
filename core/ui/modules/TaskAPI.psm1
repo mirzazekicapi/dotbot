@@ -382,17 +382,12 @@ function Get-ActionRequired {
 function Submit-TaskAnswer {
     param(
         [Parameter(Mandatory)] [string]$TaskId,
-        [string]$Type,           # Question type — "approval" / "singleChoice" / "freeText" /
-                                 # "priorityRanking". The UI knows which card it rendered and
-                                 # passes the type so the MCP tool can validate the typed payload
-                                 # without re-inferring.
-        $Answer,                 # For approval, this is the decision string ("approved" / "rejected").
-                                 # For singleChoice, the option key or custom text.
-                                 # For freeText, the response text.
+        $Answer,
         [string]$CustomText,
-        $Attachments,            # array of { name, size, content (base64) } from frontend
-        [string]$QuestionId,     # Optional: specific question ID for pending_questions batch
-        [string]$Comment         # required when Type='approval' and Answer='rejected'
+        $Attachments,  # array of { name, size, content (base64) } from frontend
+        [string]$QuestionId,  # Optional: specific question ID for pending_questions batch
+        [string]$Decision,    # approval decision: "approved" | "rejected" | "abstained"
+        [string]$Comment      # required when Decision = "rejected"
     )
 
     # Use custom text as answer when no option selected
@@ -400,13 +395,11 @@ function Submit-TaskAnswer {
         $Answer = $CustomText
     }
 
-    $isApproval = ($Type -eq 'approval')
-
     # Always resolve the question ID so it is used consistently for both attachment
     # placement and the answer submission — not only when attachments are present.
     $resolvedQuestionId = $QuestionId
-    $notificationMeta   = $null   # captured for Send-LocalApprovalResponse on approval answers
-    if (-not $resolvedQuestionId -or $isApproval) {
+    $notificationMeta   = $null   # captured for Send-LocalApprovalResponse if Decision present
+    if (-not $resolvedQuestionId -or $Decision) {
         $needsInputDir = Join-Path $script:Config.BotRoot "workspace\tasks\needs-input"
         $taskFilePath  = Get-ChildItem -Path $needsInputDir -Filter "*.json" -ErrorAction SilentlyContinue |
             Where-Object { (Get-Content $_.FullName -Raw | ConvertFrom-Json).id -eq $TaskId } |
@@ -421,7 +414,7 @@ function Submit-TaskAnswer {
                 }
             }
             # Capture notification metadata for dual-surface push-back
-            if ($isApproval) {
+            if ($Decision) {
                 $notifSource = $null
                 if ($resolvedQuestionId -and $taskData.PSObject.Properties['notifications'] -and $taskData.notifications.PSObject.Properties[$resolvedQuestionId]) {
                     $notifSource = $taskData.notifications.($resolvedQuestionId)
@@ -474,11 +467,8 @@ function Submit-TaskAnswer {
         }
     }
 
-    # If attachments were saved AND this is a free-form answer (not an approval
-    # or other typed payload), embed their paths in the answer text so the AI
-    # can locate them. For typed payloads (approval / priorityRanking), the
-    # answer field carries the typed value verbatim and must not be polluted.
-    if ($attachmentMeta.Count -gt 0 -and -not $isApproval) {
+    # If attachments were saved, embed their paths in the answer so the AI can locate them
+    if ($attachmentMeta.Count -gt 0) {
         $pathList = ($attachmentMeta | ForEach-Object { $_.path }) -join ', '
         $pathNote = "Attached: $pathList"
         $Answer = if ($Answer) { "$Answer`n$pathNote" } else { $pathNote }
@@ -493,17 +483,15 @@ function Submit-TaskAnswer {
         task_id = $TaskId
         answer  = $Answer
     }
-    if ($Type)                       { $toolArgs['type']        = $Type        }
-    if ($resolvedQuestionId)         { $toolArgs['question_id'] = $resolvedQuestionId }
+    if ($resolvedQuestionId) { $toolArgs['question_id'] = $resolvedQuestionId }
     if ($attachmentMeta.Count -gt 0) { $toolArgs['attachments'] = $attachmentMeta }
-    if ($Comment)                    { $toolArgs['comment']     = $Comment     }
+    if ($Decision) { $toolArgs['decision'] = $Decision }
+    if ($Comment)  { $toolArgs['comment']  = $Comment  }
 
     $result = Invoke-TaskAnswerQuestion -Arguments $toolArgs
 
-    # Push approval decision to Mothership so both surfaces stay in sync.
-    # The approval answer carries the decision string verbatim, so pass it through
-    # as ApprovalDecision unchanged.
-    if ($isApproval -and $notificationMeta) {
+    # Push approval decision to Mothership so both surfaces stay in sync
+    if ($Decision -and $notificationMeta) {
         $notifClientModule = Join-Path $script:Config.BotRoot "core/mcp/modules/NotificationClient.psm1"
         if (Test-Path $notifClientModule) {
             Import-Module $notifClientModule -DisableNameChecking -Global -Force:$false
@@ -514,7 +502,7 @@ function Submit-TaskAnswer {
                 -ProjectId        "$($notificationMeta.project_id)" `
                 -QuestionId       "$($notificationMeta.question_id)" `
                 -InstanceId       "$($notificationMeta.instance_id)" `
-                -ApprovalDecision $Answer `
+                -ApprovalDecision $Decision `
                 -Comment          $Comment `
                 -QuestionVersion  $qv
             if (-not $pushResult.success) {

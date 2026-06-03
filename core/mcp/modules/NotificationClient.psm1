@@ -265,8 +265,8 @@ function Send-TaskNotification {
     Optional notification settings. If not provided, reads from config.
 
     .PARAMETER Type
-    PRD sec. 4.6 question type — singleChoice (default) | approval | freeText |
-    priorityRanking. Drives card rendering and response parsing.
+    PRD §4.6 question type — singleChoice (default) | approval | documentReview |
+    freeText | priorityRanking. Drives card rendering and response parsing.
 
     .PARAMETER DeliverableSummary
     Optional 1-3 line summary shown in channel notifications (PRD §5.2).
@@ -801,12 +801,10 @@ function ConvertTo-TypedResponse {
     .OUTPUTS
     Hashtable. Keys (only set when applicable):
       answer_type        - the type string echoed back
-      answer             - response value (option key for singleChoice, free text
-                           for freeText, "approved"/"rejected" for approval)
-      comment            - free-text comment (approval only)
+      answer             - resolved string for singleChoice (key) / freeText (string)
+      approval_decision  - approval / documentReview decision value
+      comment            - free-text comment
       ranked_items       - array for priorityRanking
-      reviewed_attachment_ids - GUIDs of attachments the reviewer ticked
-                                (approval with attachments only)
       attachment_refs    - array of @{ name; size_bytes; storage_ref; description }
     Returns $null when no meaningful payload found.
     #>
@@ -859,19 +857,12 @@ function ConvertTo-TypedResponse {
 
     switch ($Type) {
         'approval' {
-            # For approval, `answer` carries the decision value ("approved" /
-            # "rejected") — same wire shape as singleChoice/freeText so callers
-            # never need a separate decision field to extract the response.
-            if ($decision) { $out['answer']  = $decision }
-            if ($comment)  { $out['comment'] = $comment  }
-            # For approval-with-attachments, the server-side respond form
-            # records which attachments the reviewer confirmed reading. Pull
-            # that list through so the local task's questions_resolved entry
-            # carries the same fidelity as the server-side ResponseRecordV2.
-            $reviewedIds = if ($Response.PSObject.Properties['reviewedAttachmentIds']) { @($Response.reviewedAttachmentIds) }
-                           elseif ($Response.PSObject.Properties['reviewed_attachment_ids']) { @($Response.reviewed_attachment_ids) }
-                           else { @() }
-            if ($reviewedIds.Count -gt 0) { $out['reviewed_attachment_ids'] = $reviewedIds }
+            if ($decision) { $out['approval_decision'] = $decision }
+            if ($comment)  { $out['comment']           = $comment  }
+        }
+        'documentReview' {
+            if ($decision) { $out['approval_decision'] = $decision }
+            if ($comment)  { $out['comment']           = $comment  }
         }
         'priorityRanking' {
             if ($rankedItems) {

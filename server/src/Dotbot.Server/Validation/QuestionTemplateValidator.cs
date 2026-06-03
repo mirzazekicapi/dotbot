@@ -19,7 +19,7 @@ public class QuestionTemplateValidator
             CheckQuestionId,
             CheckProjectId,
             CheckType,
-            // CheckDeliverableSummary,
+            CheckDeliverableSummary,
             CheckOptionUniqueness,
             CheckAttachments,
             CheckReferenceLinks,
@@ -48,16 +48,11 @@ public class QuestionTemplateValidator
             yield return $"Unknown type '{t.Type}'. Allowed types: {string.Join(", ", QuestionTypes.AllowedTypes)}";
     }
 
-    // TODO: unskip when outpost supports preparing summary of attachments
     private IEnumerable<string> CheckDeliverableSummary(QuestionTemplate t)
     {
-        // Required only when an approval question carries attachments — that is the
-        // doc-review case where a reviewer needs a 1-3 line summary of what they're
-        // approving. Plain approvals (no doc) don't need it.
-        if (t.Type == QuestionTypes.Approval
-            && t.Attachments is { Count: > 0 }
+        if ((t.Type == QuestionTypes.Approval || t.Type == QuestionTypes.DocumentReview)
             && string.IsNullOrWhiteSpace(t.DeliverableSummary))
-            yield return "deliverableSummary is required when type is 'approval' and attachments are present";
+            yield return $"deliverableSummary is required when type is '{t.Type}'";
     }
 
     private IEnumerable<string> CheckOptionUniqueness(QuestionTemplate t)

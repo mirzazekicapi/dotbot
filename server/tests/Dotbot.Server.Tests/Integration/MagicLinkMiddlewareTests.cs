@@ -41,7 +41,7 @@ public sealed class MagicLinkMiddlewareTests(DotbotApiFactory factory)
             QuestionId = questionId,
             Version = 1,
             Title = $"Review {suffix}",
-            Type = QuestionTypes.Approval,
+            Type = QuestionTypes.DocumentReview,
             DeliverableSummary = "review",
             Options = new(),
             Project = new ProjectRef { ProjectId = ProjectId, Name = "MW" },

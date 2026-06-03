@@ -3,9 +3,9 @@
 .SYNOPSIS
     Layer 5: Mothership web UI E2E — Playwright against live server + Azurite.
 .DESCRIPTION
-    Runs Playwright specs that navigate the magic-link respond flow for all
-    question types: singleChoice, multiChoice, freeText, approval (with and
-    without attachments), priorityRanking.
+    Runs Playwright specs that navigate the magic-link respond flow for all six
+    question types: singleChoice, multiChoice, freeText, approval,
+    documentReview, priorityRanking.
 
     For each question type the script:
       1. POST /api/templates  — creates a template
@@ -173,13 +173,25 @@ $questionTypes = @(
         Submit  = @{ selectedKey = "opt_a" }
     }
     @{
-        Type    = "approval"
-        Title   = "Playwright E2E: approval"
+        Type               = "approval"
+        Title              = "Playwright E2E: approval"
+        DeliverableSummary = "Playwright E2E test deliverable for approval"
+        Options = @(
+            @{ key = "approve"; label = "Approve" }
+            @{ key = "reject";  label = "Reject"  }
+            @{ key = "abstain"; label = "Abstain" }
+        )
+        Submit  = @{ approvalDecision = "approve" }
+    }
+    @{
+        Type               = "documentReview"
+        Title              = "Playwright E2E: documentReview"
+        DeliverableSummary = "Playwright E2E test deliverable for documentReview"
         Options = @(
             @{ key = "approve"; label = "Approve" }
             @{ key = "reject";  label = "Reject"  }
         )
-        Submit  = @{ approvalDecision = "approved" }
+        Submit  = @{ approvalDecision = "approve" }
     }
     @{
         Type   = "freeText"

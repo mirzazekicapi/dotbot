@@ -39,8 +39,9 @@ public static class RespondFormHandler
 
         return template.Type switch
         {
-            QuestionTypes.Approval => ValidateApproval(template, input),
+            QuestionTypes.Approval => ValidateApproval(input),
             QuestionTypes.FreeText => ValidateFreeText(input),
+            QuestionTypes.DocumentReview => ValidateDocumentReview(template, input),
             QuestionTypes.PriorityRanking => ValidatePriorityRanking(template, input),
             QuestionTypes.SingleChoice or QuestionTypes.MultiChoice
                 => ValidateSingleOrMultiChoice(template, input),
@@ -48,14 +49,43 @@ public static class RespondFormHandler
         };
     }
 
-    private static RespondFormResult ValidateApproval(QuestionTemplate template, RespondFormInput input)
+    private static RespondFormResult ValidateApproval(RespondFormInput input)
     {
         var decision = input.ApprovalDecision?.Trim().ToLowerInvariant();
         if (string.IsNullOrEmpty(decision) || !ApprovalDecisions.ApprovalAllowed.Contains(decision))
-            return RespondFormResult.Fail("Please choose Approve or Reject.");
+            return RespondFormResult.Fail("Please choose Approve, Reject, or Abstain.");
 
-        if (decision == ApprovalDecisions.Rejected && string.IsNullOrWhiteSpace(input.Comment))
+        if (decision == ApprovalDecisions.Reject && string.IsNullOrWhiteSpace(input.Comment))
             return RespondFormResult.Fail("A comment is required when rejecting.");
+
+        return new RespondFormResult
+        {
+            ApprovalDecision = decision,
+            Comment = NullIfBlank(input.Comment),
+            SelectionLabel = ApprovalDecisions.Label(decision),
+        };
+    }
+
+    private static RespondFormResult ValidateFreeText(RespondFormInput input)
+    {
+        if (string.IsNullOrWhiteSpace(input.FreeText))
+            return RespondFormResult.Fail("Please type a response.");
+
+        return new RespondFormResult
+        {
+            FreeText = input.FreeText.Trim(),
+            SelectionLabel = "Free-text response",
+        };
+    }
+
+    private static RespondFormResult ValidateDocumentReview(QuestionTemplate template, RespondFormInput input)
+    {
+        var decision = input.ApprovalDecision?.Trim().ToLowerInvariant();
+        if (string.IsNullOrEmpty(decision) || !ApprovalDecisions.DocumentReviewAllowed.Contains(decision))
+            return RespondFormResult.Fail("Please choose Approve, Request Changes, or Comment Only.");
+
+        if (decision == ApprovalDecisions.RequestChanges && string.IsNullOrWhiteSpace(input.Comment))
+            return RespondFormResult.Fail("A comment is required when requesting changes.");
 
         var templateAttachments = template.Attachments ?? new List<QuestionAttachment>();
         if (templateAttachments.Count > 0)
@@ -87,18 +117,6 @@ public static class RespondFormHandler
             ApprovalDecision = decision,
             Comment = NullIfBlank(input.Comment),
             SelectionLabel = ApprovalDecisions.Label(decision),
-        };
-    }
-
-    private static RespondFormResult ValidateFreeText(RespondFormInput input)
-    {
-        if (string.IsNullOrWhiteSpace(input.FreeText))
-            return RespondFormResult.Fail("Please type a response.");
-
-        return new RespondFormResult
-        {
-            FreeText = input.FreeText.Trim(),
-            SelectionLabel = "Free-text response",
         };
     }
 

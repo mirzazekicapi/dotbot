@@ -486,15 +486,12 @@ NotificationPoller.psm1                 ResponseStorageService
  Task JSON updated:
    questions_resolved: [{
      id, question, answer, answer_type,
-     comment,                    <- NEW (approval only)
+     approval_decision,          <- NEW for approval types
+     comment,                    <- NEW
      attachment_refs,            <- NEW (refs only, not bytes)
      asked_at, answered_at,
      answered_via: "notification"
    }]
-
- For approval-typed answers, the decision ("approved" / "rejected") is
- carried in the `answer` field — there is no separate
- approval_decision field on persisted entries.
 ```
 
 ### 5.5 Dual-Surface Approval Sync
@@ -508,8 +505,8 @@ Approvals can be submitted from two surfaces: the **Mothership web form** (via c
        |  User approves locally                |  User approves via magic link
        v                                       v
  Save to local task JSON               Save ResponseRecordV2 blob
- answer: "approved"                     approvalDecision: "approved"
- answered_via: "outpost"                -> available on next poll
+ approval_decision: "approved"         approvalDecision: "approved"
+ answered_via: "outpost"               -> available on next poll
        |                                       |
        v                                       v
  POST /api/responses ----------->  Store as ResponseRecordV2

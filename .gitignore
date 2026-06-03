@@ -53,9 +53,6 @@ server/publish.zip
 server/teams-app/manifest.json
 server/teams-app/*.zip
 
-# Visual Studio user-local project settings
-*.csproj.user
-
 # Enterprise proposal analysis (proprietary)
 docs/proposal-v4/
 
