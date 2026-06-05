@@ -2041,29 +2041,57 @@ function Remove-OrphanWorktrees {
     if ($map.Count -eq 0) { return }
 
     $tasksBaseDir = Join-Path $BotRoot "workspace/tasks"
+    # A task's worktree is kept while the task is in an active (non-terminal) status.
     # 'done' is included: tasks that just completed execution may still have a live worktree
     # pending squash-merge by Complete-TaskWorktree. Removing them here would race with that.
-    $activeDirs = @('todo', 'needs-input', 'in-progress', 'needs-review', 'done')
+    # Terminal statuses (done excepted) are reapable: failed/skipped/cancelled.
+    $activeStatuses = @('todo', 'needs-input', 'in-progress', 'needs-review', 'done')
     $orphanIds = @()
 
-    foreach ($taskId in @($map.Keys)) {
-        $isActive = $false
-        foreach ($dir in $activeDirs) {
-            $dirPath = Join-Path $tasksBaseDir $dir
-            if (-not (Test-Path $dirPath)) { continue }
-            $files = Get-ChildItem -Path $dirPath -Filter "*.json" -File -ErrorAction SilentlyContinue
-            foreach ($f in $files) {
-                try {
-                    $content = Get-Content -Path $f.FullName -Raw | ConvertFrom-Json
-                    if ($content.id -eq $taskId) {
-                        $isActive = $true
-                        break
-                    }
-                } catch { Write-BotLog -Level Debug -Message "Failed to read task file $($f.FullName)" -Exception $_ }
+    # v4 stores tasks as workspace/tasks/workflow-runs/<run>/<id>.json and
+    # workspace/tasks/standalone/<id>.json with the lifecycle in a 'status' FIELD —
+    # there are no per-status directories. Scan those locations (and, for v3.5
+    # back-compat, the legacy status directories) and collect the ids of tasks
+    # that are currently active. A worktree is an orphan only if its task is not
+    # in that active set.
+    $taskFileDirs = @()
+    $wfRunsDir = Join-Path $tasksBaseDir 'workflow-runs'
+    if (Test-Path $wfRunsDir) {
+        $taskFileDirs += @(Get-ChildItem -Path $wfRunsDir -Directory -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName })
+    }
+    foreach ($legacy in @('standalone', 'todo', 'needs-input', 'in-progress', 'needs-review', 'done')) {
+        $legacyDir = Join-Path $tasksBaseDir $legacy
+        if (Test-Path $legacyDir) { $taskFileDirs += $legacyDir }
+    }
+
+    $activeIds = @{}
+    $sawAnyTaskFile = $false
+    foreach ($dir in $taskFileDirs) {
+        $files = Get-ChildItem -Path $dir -Filter "*.json" -File -ErrorAction SilentlyContinue
+        foreach ($f in $files) {
+            try {
+                $content = Get-Content -Path $f.FullName -Raw | ConvertFrom-Json
+            } catch {
+                Write-BotLog -Level Debug -Message "Failed to read task file $($f.FullName)" -Exception $_
+                continue
             }
-            if ($isActive) { break }
+            if (-not $content.id) { continue }   # run.json / form-input / non-task files
+            $sawAnyTaskFile = $true
+            if ($activeStatuses -contains $content.status) {
+                $activeIds[$content.id] = $true
+            }
         }
-        if (-not $isActive) { $orphanIds += $taskId }
+    }
+
+    # Safety: if the scan found no task files at all (missing/unreadable task tree),
+    # do NOT treat every mapped worktree as an orphan — bail rather than mass-delete.
+    if (-not $sawAnyTaskFile) {
+        Write-BotLog -Level Warn -Message "Remove-OrphanWorktrees: no task files found under $tasksBaseDir — skipping orphan cleanup to avoid mass worktree removal"
+        return
+    }
+
+    foreach ($taskId in @($map.Keys)) {
+        if (-not $activeIds.ContainsKey($taskId)) { $orphanIds += $taskId }
     }
 
     foreach ($taskId in $orphanIds) {

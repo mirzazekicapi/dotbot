@@ -31,6 +31,34 @@ function Initialize-ProductAPI {
     $script:Config.ControlDir = $ControlDir
 }
 
+function Get-DotbotPendingProductRoots {
+    # Artifacts produced by a task live in that task's git worktree until the
+    # task reaches `done` and squash-merges to the main checkout. To let
+    # reviewers see them on the Products page BEFORE approval, return the
+    # workspace/product dir of every active (unmerged) task worktree, read from
+    # the runtime's worktree map (.control/worktree-map.json). Each entry:
+    #   @{ task_id; task_name; product_dir }
+    $roots = @()
+    $botRoot = $script:Config.BotRoot
+    if (-not $botRoot) { return $roots }
+    $mapPath = Join-Path $botRoot ".control/worktree-map.json"
+    if (-not (Test-Path -LiteralPath $mapPath)) { return $roots }
+    try {
+        $raw = Get-Content -LiteralPath $mapPath -Raw -ErrorAction Stop
+        if ([string]::IsNullOrWhiteSpace($raw)) { return $roots }
+        $map = $raw | ConvertFrom-Json -ErrorAction Stop
+    } catch { return $roots }
+    foreach ($prop in $map.PSObject.Properties) {
+        $wt = [string]$prop.Value.worktree_path
+        if ([string]::IsNullOrWhiteSpace($wt)) { continue }
+        $pd = Join-Path $wt ".bot/workspace/product"
+        if (Test-Path -LiteralPath $pd -PathType Container) {
+            $roots += @{ task_id = $prop.Name; task_name = [string]$prop.Value.task_name; product_dir = $pd }
+        }
+    }
+    return $roots
+}
+
 function Resolve-ProductDocumentInfo {
     param(
         [Parameter(Mandatory)] [System.IO.FileInfo]$File,
@@ -257,6 +285,33 @@ function Get-ProductList {
         }
     }
 
+    # Surface artifacts parked in active task worktrees (not yet merged to the
+    # main checkout) so reviewers can see them on the Products page before
+    # Approve. Tagged pending_review so the UI can flag them; a doc already
+    # present in the merged set (same name) wins and the pending copy is skipped.
+    $existingNames = @{}
+    foreach ($d in $docs) { if ($d.name) { $existingNames[[string]$d.name] = $true } }
+    foreach ($root in (Get-DotbotPendingProductRoots)) {
+        $pendingFiles = @(Get-ChildItem -Path $root.product_dir -File -Recurse -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -ne '.gitkeep' })
+        foreach ($file in $pendingFiles) {
+            if ($null -eq $file) { continue }
+            $doc = Resolve-ProductDocumentInfo -File $file -ProductDir $root.product_dir
+            if ($existingNames.ContainsKey([string]$doc.Name)) { continue }
+            $existingNames[[string]$doc.Name] = $true
+            $docs += @{
+                name = $doc.Name
+                filename = $doc.Filename
+                depth = $doc.Depth
+                type = $doc.Type
+                size = $doc.Size
+                pending_review = $true
+                task_id = $root.task_id
+                task_name = $root.task_name
+            }
+        }
+    }
+
     return @{ docs = $docs }
 }
 
@@ -267,6 +322,14 @@ function Get-ProductDocument {
     $botRoot = $script:Config.BotRoot
     $productDir = Join-Path $botRoot "workspace/product"
     $resolvedDoc = Resolve-ProductDocumentPath -Name $Name -ProductDir $productDir
+
+    if (-not ($resolvedDoc -and (Test-Path -LiteralPath $resolvedDoc.FullPath))) {
+        # Fall back to artifacts parked in active task worktrees (pending review).
+        foreach ($root in (Get-DotbotPendingProductRoots)) {
+            $cand = Resolve-ProductDocumentPath -Name $Name -ProductDir $root.product_dir
+            if ($cand -and (Test-Path -LiteralPath $cand.FullPath)) { $resolvedDoc = $cand; break }
+        }
+    }
 
     if ($resolvedDoc -and (Test-Path -LiteralPath $resolvedDoc.FullPath)) {
         $docContent = Get-Content -LiteralPath $resolvedDoc.FullPath -Raw
@@ -291,6 +354,14 @@ function Get-ProductDocumentRaw {
     $botRoot = $script:Config.BotRoot
     $productDir = Join-Path $botRoot "workspace/product"
     $resolvedDoc = Resolve-ProductDocumentPath -Name $Name -ProductDir $productDir
+
+    if (-not ($resolvedDoc -and (Test-Path -LiteralPath $resolvedDoc.FullPath))) {
+        # Fall back to artifacts parked in active task worktrees (pending review).
+        foreach ($root in (Get-DotbotPendingProductRoots)) {
+            $cand = Resolve-ProductDocumentPath -Name $Name -ProductDir $root.product_dir
+            if ($cand -and (Test-Path -LiteralPath $cand.FullPath)) { $resolvedDoc = $cand; break }
+        }
+    }
 
     if (-not $resolvedDoc -or -not (Test-Path -LiteralPath $resolvedDoc.FullPath)) {
         return @{ Found = $false }
