@@ -1286,6 +1286,51 @@ function Apply-TaskBranchPatch {
                     ForEach-Object { "$_" } |
                     Where-Object { $_ }
             )
+
+            # Auto-resolve known JSON accumulator files that are shared across task
+            # worktrees. These files accumulate append-only entries from multiple tasks;
+            # concurrent completions cause a predictable 3-way conflict. Resolve by
+            # merging both sides' answer arrays and deduplicating by question_id.
+            $jsonAccumulators = @('.bot/workspace/product/interview-answers.json')
+            $unresolvedConflicts = [System.Collections.Generic.List[string]]::new()
+            foreach ($cf in $conflictFiles) {
+                $normalized = $cf -replace '\\', '/'
+                if ($jsonAccumulators -contains $normalized) {
+                    try {
+                        $headContent   = (git -C $ProjectRoot show "HEAD:$normalized"          2>$null) -join "`n"
+                        $branchContent = (git -C $ProjectRoot show "${BranchName}:$normalized" 2>$null) -join "`n"
+                        if ($headContent -and $branchContent) {
+                            $headJson   = $headContent   | ConvertFrom-Json
+                            $branchJson = $branchContent | ConvertFrom-Json
+                            $allAnswers = @($headJson.answers) + @($branchJson.answers)
+                            $merged = @(
+                                $allAnswers |
+                                    Group-Object question_id |
+                                    ForEach-Object {
+                                        $_.Group | Sort-Object answered_at | Select-Object -Last 1
+                                    } |
+                                    Sort-Object answered_at
+                            )
+                            $resolvedPath = Join-Path $ProjectRoot ($normalized -replace '/', [System.IO.Path]::DirectorySeparatorChar)
+                            @{ answers = $merged } | ConvertTo-Json -Depth 10 |
+                                Set-Content -LiteralPath $resolvedPath -Encoding UTF8NoBOM
+                            git -C $ProjectRoot add -- $normalized 2>$null | Out-Null
+                            continue
+                        }
+                    } catch { }
+                }
+                $unresolvedConflicts.Add($cf)
+            }
+
+            # All conflicts were JSON-merged — treat the apply as successful.
+            if ($unresolvedConflicts.Count -eq 0 -and $conflictFiles.Count -gt 0) {
+                return @{
+                    success = $true
+                    output  = @($applyOutput | ForEach-Object { "$_" })
+                }
+            }
+
+            $conflictFiles = @($unresolvedConflicts)
             return @{
                 success        = $false
                 output         = @($applyOutput | ForEach-Object { "$_" })
