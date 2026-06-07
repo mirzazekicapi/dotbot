@@ -537,6 +537,9 @@ function Ensure-DotbotWorktreeExcludes {
         '.bot/content/'
         '.bot/hooks/'
         '.bot/settings/'
+        # Shared run-level audit log — must never be tracked per-worktree (causes
+        # squash-merge conflicts when multiple tasks each append their answer entries).
+        '.bot/workspace/product/interview-answers.json'
         $markerEnd
     )
 

@@ -366,7 +366,10 @@ function Write-TaskInputInterviewAnswer {
         [hashtable]$Entry
     )
 
-    $productDir = Get-TaskInputProductDir -BotRoot $BotRoot -TaskId $TaskId
+    # Always write to the main project's product dir, not the worktree's copy.
+    # Multiple tasks each write their Approve/Reject answer; routing to a worktree causes
+    # divergent patches on the shared JSON array → rebase_conflict on squash-merge.
+    $productDir = Join-Path (Join-Path $BotRoot "workspace") "product"
     if (-not (Test-Path -LiteralPath $productDir)) { return }
 
     $answersPath = Join-Path $productDir "interview-answers.json"
