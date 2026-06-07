@@ -557,7 +557,7 @@ function Test-DotbotMcpReadiness {
         # The dotbot MCP is a stdio server that imports the full runtime module
         # stack on startup; cold start can exceed the 5s default (measured ~8.3s).
         # Allow more time for the initialize handshake; env-tunable for slow hosts.
-        $mcpTimeoutMs = if ($env:DOTBOT_MCP_PREFLIGHT_TIMEOUT_MS) { [int]$env:DOTBOT_MCP_PREFLIGHT_TIMEOUT_MS } else { 20000 }
+        $mcpTimeoutMs = if ($env:DOTBOT_MCP_PREFLIGHT_TIMEOUT_MS) { [int]$env:DOTBOT_MCP_PREFLIGHT_TIMEOUT_MS } else { 30000 }
         $init = Read-DotbotMcpPreflightLine -Process $proc -TimeoutMs $mcpTimeoutMs
         if (-not $init.ok) { return @{ ok = $false; reason = 'initialize_failed'; message = $init.message } }
         if ($init.response.ContainsKey('error')) {

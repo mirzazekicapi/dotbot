@@ -204,6 +204,10 @@ function Invoke-ClaudeCodeAdapterStream {
         $mcpProjectRoot = if ($WorkingDirectory) { $WorkingDirectory } elseif ($psi.WorkingDirectory) { $psi.WorkingDirectory } else { $global:DotbotProjectRoot }
         if ($frameworkRootForMcp) { $psi.Environment["DOTBOT_HOME"] = $frameworkRootForMcp }
         if ($mcpProjectRoot) { $psi.Environment["DOTBOT_PROJECT_ROOT"] = $mcpProjectRoot }
+        # Dotbot's stdio MCP server cold-starts in 12-30s; Claude Code's default MCP_TIMEOUT (~5s) fires
+        # before the server is ready, making mcp__dotbot__* tools permanently unavailable for that session.
+        if (-not $psi.Environment.ContainsKey('MCP_TIMEOUT'))      { $psi.Environment['MCP_TIMEOUT']      = '60000' }
+        if (-not $psi.Environment.ContainsKey('MCP_TOOL_TIMEOUT')) { $psi.Environment['MCP_TOOL_TIMEOUT'] = '120000' }
 
         $claudeProc = New-Object System.Diagnostics.Process
         $claudeProc.StartInfo = $psi
