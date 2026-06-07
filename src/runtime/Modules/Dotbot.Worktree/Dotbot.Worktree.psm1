@@ -1248,15 +1248,10 @@ function Apply-TaskBranchPatch {
             git -C $ProjectRoot ls-files --error-unmatch -- $addedPath 2>$null | Out-Null
             if ($LASTEXITCODE -eq 0) { continue }
 
-            $branchBlob = (git -C $ProjectRoot rev-parse "$BranchName`:$addedPath" 2>$null)
-            $localBlob = (git -C $ProjectRoot hash-object --no-filters -- $addedPath 2>$null)
-            if (-not $branchBlob -or -not $localBlob -or $branchBlob.Trim() -ne $localBlob.Trim()) {
-                return @{
-                    success = $false
-                    output  = @("Untracked file would be overwritten by task branch: $addedPath")
-                }
-            }
-
+            # Untracked file at this path. In the task-branch squash-merge flow these are
+            # always leftovers from a prior failed apply — git reset --hard HEAD does not
+            # remove untracked files, so they persist across retries. The branch version
+            # is authoritative; remove and let git apply add the file cleanly.
             Remove-Item -LiteralPath $targetPath -Force
         }
 
