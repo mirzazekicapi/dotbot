@@ -486,6 +486,10 @@ function Read-DotbotMcpPreflightLine {
 function Test-DotbotMcpReadiness {
     param(
         [Parameter(Mandatory)] [string]$WorktreePath,
+        # Main project root (not the worktree). Used as DOTBOT_PROJECT_ROOT so the MCP
+        # server finds runtime.json at <main>/.bot/.control/ directly, without relying on
+        # the .control junction in the worktree (which can become stale on task retry).
+        [string]$ProjectRoot,
         [string[]]$RequiredTools = @('task_get_context','task_set_status','task_update','decision_create','decision_list')
     )
 
@@ -534,7 +538,7 @@ function Test-DotbotMcpReadiness {
         $psi.StandardErrorEncoding = [System.Text.Encoding]::UTF8
         $psi.WorkingDirectory = $WorktreePath
         $psi.Environment['DOTBOT_HOME'] = $frameworkRoot
-        $psi.Environment['DOTBOT_PROJECT_ROOT'] = $WorktreePath
+        $psi.Environment['DOTBOT_PROJECT_ROOT'] = if ($ProjectRoot) { $ProjectRoot } else { $WorktreePath }
         $psi.Environment['__DOTBOT_MANAGED'] = '1'
 
         $proc = [System.Diagnostics.Process]::new()
@@ -1599,7 +1603,7 @@ try {
         }
 
         Write-Status "Checking dotbot MCP tools..." -Type Process
-        $mcpReady = Test-DotbotMcpReadiness -WorktreePath $worktreePath
+        $mcpReady = Test-DotbotMcpReadiness -WorktreePath $worktreePath -ProjectRoot $projectRoot
         if (-not $mcpReady.ok) {
             throw "dotbot MCP preflight failed ($($mcpReady.reason)): $($mcpReady.message)"
         }
