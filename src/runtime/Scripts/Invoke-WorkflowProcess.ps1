@@ -708,7 +708,15 @@ function Test-TaskOutput {
         if ($BaselineCount -ge 0) {
             $delta = $fileCount - $BaselineCount
             if ($delta -lt $minCount) {
-                return "Task output directory '$taskOutputsDir' produced $delta new file(s), expected at least $minCount"
+                # For product output dirs: if the required files already exist (absolute
+                # count >= minCount), pass validation. This handles resume-after-approval
+                # where the agent correctly writes nothing because outputs exist in the
+                # preserved worktree from a prior run. For tasks/ output dirs keep the
+                # strict delta requirement (manifest pre-creation makes absolute count
+                # meaningless there).
+                if ($isTasksOutput -or $fileCount -lt $minCount) {
+                    return "Task output directory '$taskOutputsDir' produced $delta new file(s), expected at least $minCount"
+                }
             }
         } elseif ($fileCount -lt $minCount) {
             return "Task output directory '$taskOutputsDir' has $fileCount file(s), expected at least $minCount"
