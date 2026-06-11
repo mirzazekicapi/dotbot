@@ -534,10 +534,11 @@ function Get-NextWorkflowTask {
     #>
     param(
         [Parameter(Mandatory)] [string]$BotRoot,
-        [string]$RunId
+        [string]$RunId,
+        [string]$WorkflowName
     )
 
-    $scopeLabel = if ($RunId) { "run $RunId" } else { "pending task set" }
+    $scopeLabel = if ($RunId) { "run $RunId" } elseif ($WorkflowName) { "workflow $WorkflowName" } else { "pending task set" }
     if ($RunId) {
         if (-not (Test-DotbotProcessOptionalCommand -CommandName 'Find-WorkflowRunDir' -ModuleName 'Dotbot.Workflow')) {
             return @{ success = $false; task = $null; message = "Dotbot.Workflow not loaded — Find-WorkflowRunDir unavailable." }
@@ -572,6 +573,10 @@ function Get-NextWorkflowTask {
             if ($RunId) {
                 $taskRunId = Get-DotbotTaskNestedProp -Object $content -Path @('provenance', 'run_id')
                 if ($taskRunId -and $taskRunId -ne $RunId) { continue }
+            }
+            if ($WorkflowName -and -not $RunId) {
+                $taskWorkflow = Get-DotbotTaskNestedProp -Object $content -Path @('provenance', 'workflow')
+                if ([string]$taskWorkflow -ne $WorkflowName) { continue }
             }
             $allTasks += @{ Content = $content; FilePath = $f.FullName }
         } catch {

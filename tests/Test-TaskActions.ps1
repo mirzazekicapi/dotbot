@@ -1502,6 +1502,168 @@ finally {
     }
 }
 
+# ─── Reset-InProgressTasks crash recovery (issue #470) ──────────────────────
+# Verifies that Reset-InProgressTasks resets in-progress tasks to todo via
+# in-place JSON field update (new workflow-runs layout). Tasks in other statuses
+# must not be touched. The function must handle both flat and recursive scan.
+
+$testProject = $null
+$savedDotbotProjectRoot = $global:DotbotProjectRoot
+try {
+    $testProject = New-SourceBackedTestProject -RepoRoot $repoRoot
+    Push-Location $testProject
+    $botDir   = Join-Path $testProject ".bot"
+    $runDir   = Join-Path $botDir "workspace\tasks\workflow-runs\test-run-001"
+    New-Item -ItemType Directory -Path $runDir -Force | Out-Null
+
+    $global:DotbotProjectRoot = $testProject
+
+    Import-Module (Join-Path $botDir "src/runtime/Modules/Dotbot.Task/Dotbot.Task.psd1") -Force -DisableNameChecking
+
+    function New-TaskFixture {
+        param(
+            [Parameter(Mandatory)][string]$TaskId,
+            [Parameter(Mandatory)][string]$Status,
+            [Parameter(Mandatory)][string]$Dir
+        )
+        $task = [ordered]@{
+            id          = $TaskId
+            name        = "Fixture $TaskId"
+            description = "Reset-InProgressTasks fixture for #470"
+            status      = $Status
+            started_at  = if ($Status -eq 'in-progress') { "2026-01-01T00:00:00Z" } else { $null }
+            updated_at  = "2026-01-01T00:00:00Z"
+            completed_at = $null
+        }
+        $task | ConvertTo-Json -Depth 10 | Set-Content -Path (Join-Path $Dir "$TaskId.json") -Encoding UTF8
+    }
+
+    # ── Scenario 1: in-progress task is reset to todo ──
+    New-TaskFixture -TaskId "rip-stuck"   -Status "in-progress" -Dir $runDir
+    New-TaskFixture -TaskId "rip-todo"    -Status "todo"         -Dir $runDir
+    New-TaskFixture -TaskId "rip-done"    -Status "done"         -Dir $runDir
+
+    $result = Reset-InProgressTasks -RunDir $runDir
+    if (-not $result) { $result = @() }
+    Assert-True -Name "Reset-InProgressTasks: returns one recovered entry (issue #470)" `
+        -Condition ($result.Count -eq 1) `
+        -Message "Expected 1 recovered task, got $($result.Count)"
+    Assert-True -Name "Reset-InProgressTasks: recovered entry has correct id" `
+        -Condition ($result[0].id -eq 'rip-stuck') `
+        -Message "Expected id 'rip-stuck', got '$($result[0].id)'"
+
+    $stuckContent = Get-Content -Path (Join-Path $runDir "rip-stuck.json") -Raw | ConvertFrom-Json
+    Assert-Equal -Name "Reset-InProgressTasks: stuck task status reset to todo" `
+        -Expected "todo" -Actual ([string]$stuckContent.status) `
+        -Message "Expected status 'todo', got '$($stuckContent.status)'"
+    Assert-True -Name "Reset-InProgressTasks: started_at cleared on reset" `
+        -Condition ($null -eq $stuckContent.started_at) `
+        -Message "Expected started_at to be null after reset"
+
+    $todoContent = Get-Content -Path (Join-Path $runDir "rip-todo.json") -Raw | ConvertFrom-Json
+    Assert-Equal -Name "Reset-InProgressTasks: todo task not touched" `
+        -Expected "todo" -Actual ([string]$todoContent.status) `
+        -Message "Expected todo task status unchanged"
+
+    $doneContent = Get-Content -Path (Join-Path $runDir "rip-done.json") -Raw | ConvertFrom-Json
+    Assert-Equal -Name "Reset-InProgressTasks: done task not touched" `
+        -Expected "done" -Actual ([string]$doneContent.status) `
+        -Message "Expected done task status unchanged"
+
+    # ── Scenario 2: no in-progress tasks — returns empty ──
+    $result2 = Reset-InProgressTasks -RunDir $runDir
+    Assert-True -Name "Reset-InProgressTasks: no-op when no in-progress tasks" `
+        -Condition ($result2.Count -eq 0) `
+        -Message "Expected 0 recovered tasks on second call, got $($result2.Count)"
+
+    # ── Scenario 3: Recurse flag scans nested dirs ──
+    $nestedDir = Join-Path $runDir "sub"
+    New-Item -ItemType Directory -Path $nestedDir -Force | Out-Null
+    New-TaskFixture -TaskId "rip-nested" -Status "in-progress" -Dir $nestedDir
+
+    $result3 = Reset-InProgressTasks -RunDir $runDir -Recurse
+    if (-not $result3) { $result3 = @() }
+    Assert-True -Name "Reset-InProgressTasks: Recurse finds nested in-progress task" `
+        -Condition ($result3.Count -eq 1 -and $result3[0].id -eq 'rip-nested') `
+        -Message "Expected 1 nested task recovered, got $($result3.Count)"
+}
+finally {
+    $global:DotbotProjectRoot = $savedDotbotProjectRoot
+    Pop-Location -ErrorAction SilentlyContinue
+    if ($testProject) {
+        Remove-TestProject -Path $testProject
+    }
+}
+
+# ─── Get-NextWorkflowTask WorkflowName scoping (issue #470) ─────────────────
+# Verifies that -WorkflowName filters tasks by provenance.workflow when RunId
+# is omitted, so a RESUME on one workflow never picks up tasks from another.
+
+$testProject2 = $null
+$savedDotbotProjectRoot2 = $global:DotbotProjectRoot
+try {
+    $testProject2 = New-SourceBackedTestProject -RepoRoot $repoRoot
+    Push-Location $testProject2
+    $botDir2  = Join-Path $testProject2 ".bot"
+    $tasksDir = Join-Path $botDir2 "workspace\tasks\workflow-runs"
+    $runDirA  = Join-Path $tasksDir "run-workflow-a"
+    $runDirB  = Join-Path $tasksDir "run-workflow-b"
+    New-Item -ItemType Directory -Path $runDirA -Force | Out-Null
+    New-Item -ItemType Directory -Path $runDirB -Force | Out-Null
+
+    $global:DotbotProjectRoot = $testProject2
+
+    Import-Module (Join-Path $botDir2 "src/runtime/Modules/Dotbot.Task/Dotbot.Task.psd1")    -Force -DisableNameChecking
+    Import-Module (Join-Path $botDir2 "src/runtime/Modules/Dotbot.Process/Dotbot.Process.psd1") -Force -DisableNameChecking
+
+    function New-ScopedTaskFixture {
+        param(
+            [Parameter(Mandatory)][string]$TaskId,
+            [Parameter(Mandatory)][string]$Status,
+            [Parameter(Mandatory)][string]$Dir,
+            [string]$WorkflowName
+        )
+        $task = [ordered]@{
+            id          = $TaskId
+            name        = "Fixture $TaskId"
+            description = "WorkflowName scoping fixture"
+            status      = $Status
+            priority    = 50
+            provenance  = [ordered]@{ workflow = $WorkflowName; run_id = (Split-Path $Dir -Leaf) }
+            updated_at  = "2026-01-01T00:00:00Z"
+        }
+        $task | ConvertTo-Json -Depth 10 | Set-Content -Path (Join-Path $Dir "$TaskId.json") -Encoding UTF8
+    }
+
+    New-ScopedTaskFixture -TaskId "wf-a-task" -Status "todo" -Dir $runDirA -WorkflowName "start-from-prompt"
+    New-ScopedTaskFixture -TaskId "wf-b-task" -Status "todo" -Dir $runDirB -WorkflowName "fast-prompt"
+
+    # ── Scenario 1: WorkflowName scopes to correct workflow ──
+    $next = Get-NextWorkflowTask -BotRoot $botDir2 -WorkflowName "start-from-prompt"
+    Assert-True -Name "Get-NextWorkflowTask: WorkflowName returns task from target workflow" `
+        -Condition ($next.success -and $next.task -and $next.task['id'] -eq 'wf-a-task') `
+        -Message "Expected task 'wf-a-task', got: $($next | ConvertTo-Json -Compress)"
+
+    # ── Scenario 2: WorkflowName excludes other workflow's tasks ──
+    $nextOther = Get-NextWorkflowTask -BotRoot $botDir2 -WorkflowName "fast-prompt"
+    Assert-True -Name "Get-NextWorkflowTask: WorkflowName excludes tasks from other workflows" `
+        -Condition ($nextOther.success -and $nextOther.task -and $nextOther.task['id'] -eq 'wf-b-task') `
+        -Message "Expected task 'wf-b-task', got: $($nextOther | ConvertTo-Json -Compress)"
+
+    # ── Scenario 3: WorkflowName with no matching tasks returns null task ──
+    $nextNone = Get-NextWorkflowTask -BotRoot $botDir2 -WorkflowName "nonexistent-workflow"
+    Assert-True -Name "Get-NextWorkflowTask: WorkflowName with no match returns success=true, task=null" `
+        -Condition ($nextNone.success -and $null -eq $nextNone.task) `
+        -Message "Expected success=true task=null, got: $($nextNone | ConvertTo-Json -Compress)"
+}
+finally {
+    $global:DotbotProjectRoot = $savedDotbotProjectRoot2
+    Pop-Location -ErrorAction SilentlyContinue
+    if ($testProject2) {
+        Remove-TestProject -Path $testProject2
+    }
+}
+
 # ─── task-get-next runtime condition evaluation ──────────────────────────────
 # task-get-next is a thin HTTP wrapper around GET /tasks/next. Condition
 # evaluation is covered by handler-level runtime tests.

@@ -11,6 +11,9 @@
     )
 
     FunctionsToExport = @(
+        'New-NotificationEnvelope'
+        'ConvertFrom-NotificationEnvelope'
+        'Get-NotificationEnvelopeAnswer'
         'Get-NotificationSettings'
         'Test-NotificationServer'
         'Send-TaskNotification'
