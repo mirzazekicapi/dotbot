@@ -378,7 +378,7 @@ try {
                     $foundWhileRunning = ($slowStreamJob.State -eq 'Running')
                     break
                 }
-                if ($slowStreamJob.State -ne 'Running') { break }
+                if ($slowStreamJob.State -in @('Completed', 'Failed', 'Stopped')) { break }
                 Start-Sleep -Milliseconds 100
             }
         }
