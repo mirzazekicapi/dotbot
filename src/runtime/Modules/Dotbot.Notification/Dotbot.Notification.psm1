@@ -11,6 +11,12 @@ to collect external responses.
 Required manifest dependencies: Dotbot.Core, Dotbot.Settings.
 #>
 
+# SPEC-029 envelope helpers (build + read) live in a dedicated script:
+# New-NotificationEnvelope (build), ConvertFrom-NotificationEnvelope (split into
+# sections), Get-NotificationEnvelopeAnswer (answer projection). The UI poller
+# consumes the read helpers via this module.
+. (Join-Path $PSScriptRoot 'Private/Envelope.ps1')
+
 function Get-NotificationSettings {
     <#
     .SYNOPSIS
@@ -130,7 +136,10 @@ function Send-ServerNotification {
         [Parameter(Mandatory)]
         [hashtable]$Template,
 
-        [object]$Settings
+        [object]$Settings,
+
+        # Originating outpost task short id - carried on the envelope (SPEC-029).
+        [string]$TaskId
     )
 
     # Shallow clone to avoid mutating the caller's hashtable (reference type).
@@ -192,7 +201,11 @@ function Send-ServerNotification {
     }
 
     try {
-        $templateJson = $Template | ConvertTo-Json -Depth 20
+        # SPEC-029: template publish body is { envelope, question }. The question block
+        # is the QuestionTemplate JSON itself (stored verbatim by the server).
+        $templateEnvelope = New-NotificationEnvelope -Settings $Settings -ProjectId $projectId -TaskId $TaskId
+        $templateBody = @{ envelope = $templateEnvelope; question = $Template }
+        $templateJson = $templateBody | ConvertTo-Json -Depth 20
         $null = Invoke-RestMethod -Uri "$baseUrl/api/templates" -Method Post `
             -Body $templateJson -ContentType 'application/json' -Headers $headers -TimeoutSec 15
     } catch {
@@ -206,28 +219,29 @@ function Send-ServerNotification {
     $recipientEmails = @($recipients | Where-Object { $_ -match '@' })
     $recipientIds = @($recipients | Where-Object { $_ -notmatch '@' })
 
-    $instanceReq = @{
-        InstanceId      = $InstanceId
-        projectId       = $projectId
-        questionId      = $questionId
-        questionVersion = 1
-        channel         = $channel
-        recipients      = @{}
+    # SPEC-029: recipients is an array of { email|aadObjectId|slackUserId, channel }.
+    $recipientsArray = @()
+    foreach ($email in $recipientEmails) {
+        $recipientsArray += @{ email = "$email"; channel = $channel }
     }
-
-    if ($recipientEmails.Count -gt 0) {
-        $instanceReq.recipients.emails = $recipientEmails
-    }
-    if ($recipientIds.Count -gt 0) {
+    foreach ($id in $recipientIds) {
         if ($channel -eq "slack") {
-            $instanceReq.recipients.slackUserIds = $recipientIds
+            $recipientsArray += @{ slackUserId = "$id"; channel = $channel }
         } else {
-            $instanceReq.recipients.userObjectIds = $recipientIds
+            $recipientsArray += @{ aadObjectId = "$id"; channel = $channel }
         }
     }
 
-    if ($channel -eq "jira" -and $Settings.jira_issue_key) {
-        $instanceReq.jiraIssueKey = "$($Settings.jira_issue_key)"
+    # Instance body is { envelope, question: { questionId, version }, recipients }.
+    # jiraIssueKey (when delivering on the jira channel) rides on the envelope as
+    # routing metadata.
+    $jiraKey = if ($channel -eq "jira" -and $Settings.jira_issue_key) { "$($Settings.jira_issue_key)" } else { $null }
+    $instanceEnvelope = New-NotificationEnvelope -Settings $Settings -ProjectId $projectId `
+        -TaskId $TaskId -QuestionInstanceId $InstanceId -JiraIssueKey $jiraKey
+    $instanceReq = @{
+        envelope   = $instanceEnvelope
+        question   = @{ questionId = $questionId; version = 1 }
+        recipients = $recipientsArray
     }
 
     try {
@@ -263,9 +277,8 @@ function Send-TaskNotification {
     Optional notification settings. If not provided, reads from config.
 
     .PARAMETER Type
-    PRD Section 4.6 question type — singleChoice (default) | approval |
-    documentReview | freeText | priorityRanking. Drives card rendering and
-    response parsing.
+    PRD Section 4.6 question type — singleChoice (default) | approval | freeText
+    | priorityRanking. Drives card rendering and response parsing.
 
     .PARAMETER DeliverableSummary
     Optional 1-3 line summary shown in channel notifications (PRD Section 5.2).
@@ -366,7 +379,7 @@ function Send-TaskNotification {
         }
     }
 
-    return Send-ServerNotification -CompositeKey $compositeKey -Template $template -Settings $Settings
+    return Send-ServerNotification -CompositeKey $compositeKey -Template $template -Settings $Settings -TaskId "$($TaskContent.id)"
 }
 
 function Send-SplitProposalNotification {
@@ -448,7 +461,7 @@ function Send-SplitProposalNotification {
         responseSettings = @{ allowFreeText = $false }
     }
 
-    return Send-ServerNotification -CompositeKey $compositeKey -Template $template -Settings $Settings
+    return Send-ServerNotification -CompositeKey $compositeKey -Template $template -Settings $Settings -TaskId "$($TaskContent.id)"
 }
 
 function Get-TaskNotificationResponse {
@@ -518,10 +531,14 @@ function Get-TaskNotificationResponse {
 function Resolve-NotificationAnswer {
     <#
     .SYNOPSIS
-    Extracts the answer text from a Teams response and downloads any attached files.
+    Extracts the answer text from a server response, downloads any attached files,
+    and surfaces type-specific fields (comment, ranked_items, reviewed_attachment_ids)
+    so the runtime can persist them on the resolved questions_resolved entry.
 
     .PARAMETER Response
-    The response object returned by Get-TaskNotificationResponse.
+    The response object returned by Get-TaskNotificationResponse. Mirrors the
+    server-side ResponseRecordV2 shape (selectedKey, freeText, approvalDecision,
+    comment, rankedItems, reviewedAttachmentIds, attachments).
 
     .PARAMETER Settings
     Notification settings (needs server_url, api_key).
@@ -530,9 +547,14 @@ function Resolve-NotificationAnswer {
     Local directory to save attachment files into (created if needed).
 
     .OUTPUTS
-    Hashtable with keys:
-      answer      - resolved answer string (with paths appended if attachments present)
-      attachments - array of @{ name, size, path } metadata (empty array if none)
+    Hashtable with keys (only the type-specific keys are present when relevant):
+      answer                  - resolved answer string (with paths appended if attachments present).
+                                For approval, this is the decision value ("approved" / "rejected").
+      attachments             - array of @{ name, size, path } metadata (empty array if none)
+      comment                 - optional reviewer comment (approval responses)
+      ranked_items            - optional array of ranked items (priorityRanking responses)
+      reviewed_attachment_ids - optional array of attachment ids the reviewer ticked
+                                (approval with attached documents)
     Returns $null if no valid answer found in the response.
     #>
     param(
@@ -541,22 +563,24 @@ function Resolve-NotificationAnswer {
         [Parameter(Mandatory)] [string]$AttachDir
     )
 
-    $answer = if ($Response.selectedKey) { $Response.selectedKey }
-              elseif ($Response.freeText)  { $Response.freeText }
-              else                         { $null }
+    # SPEC-029 enveloped response. The pure parse (type + answer fields) is shared
+    # with the UI poller via Get-NotificationEnvelopeAnswer (Private/Envelope.ps1).
+    $parsed = Get-NotificationEnvelopeAnswer -Response $Response
 
-    $hasAttachments = $Response.attachments -and @($Response.attachments).Count -gt 0
+    $answer = $parsed.answerString
+    $responseAttachments = $parsed.attachments
+    $hasAttachments = @($responseAttachments).Count -gt 0
     if (-not $answer -and -not $hasAttachments) { return $null }
-    if (-not $answer) { $answer = '' }  # attachments-only — paths will be appended below
+    if (-not $answer) { $answer = '' }  # attachments-only — paths appended below
 
     $attachmentMeta = @()
 
-    if ($Response.attachments -and @($Response.attachments).Count -gt 0) {
+    if ($hasAttachments) {
         if (-not (Test-Path $AttachDir)) {
             New-Item -ItemType Directory -Force -Path $AttachDir | Out-Null
         }
 
-        foreach ($att in @($Response.attachments)) {
+        foreach ($att in @($responseAttachments)) {
             try {
                 # URL-encode the blob path to handle spaces and special chars in filenames
                 $encodedPath = [System.Uri]::EscapeUriString("$($Settings.server_url.TrimEnd('/'))/api/attachments/$($att.blobPath)")
@@ -582,10 +606,26 @@ function Resolve-NotificationAnswer {
         }
     }
 
-    return @{
+    $result = @{
         answer      = $answer
         attachments = $attachmentMeta
     }
+
+    # Surface type-specific fields from the parsed answer so the runtime can write
+    # them onto the resolved questions_resolved entry. Each is passed through only when
+    # the server actually populated it; the local resolver at the runtime layer decides
+    # which fields make sense for the question type.
+    if ($parsed.comment) {
+        $result['comment'] = "$($parsed.comment)"
+    }
+    if (@($parsed.rankedItems).Count -gt 0) {
+        $result['ranked_items'] = @($parsed.rankedItems)
+    }
+    if (@($parsed.reviewedAttachmentIds).Count -gt 0) {
+        $result['reviewed_attachment_ids'] = @($parsed.reviewedAttachmentIds)
+    }
+
+    return $result
 }
 
 function Send-AttachmentUpload {
@@ -798,7 +838,8 @@ function Get-AllTaskNotificationResponse {
     Optional notification settings hashtable. If not provided, reads from Get-NotificationSettings.
 
     .OUTPUTS
-    Array of ResponseRecordV2-shaped objects sorted ascending by submittedAt.
+    Array of SPEC-029 enveloped response objects ({ envelope, question, answer,
+    responder }) sorted ascending by envelope.submittedAt.
     Returns @() when notifications are not configured or on any HTTP error.
     #>
     param(
@@ -873,7 +914,8 @@ function Send-LocalApprovalResponse {
     The GUID string identifying the task/workflow instance.
 
     .PARAMETER ApprovalDecision
-    The decision value: "approved", "rejected", or "abstained".
+    The decision value: "approved" or "rejected" (the server-side ApprovalDecisions
+    taxonomy was narrowed under [#445]; sending other values fails validation).
 
     .PARAMETER Comment
     Optional free-text comment. Required by convention when Decision = "rejected".
@@ -899,6 +941,7 @@ function Send-LocalApprovalResponse {
         [string]$Comment          = $null,
         [string]$ResponderEmail   = $null,
         [int]$QuestionVersion     = 1,
+        [string]$TaskId           = $null,
         [object]$Settings         = $null
     )
 
@@ -923,18 +966,23 @@ function Send-LocalApprovalResponse {
     $guidBytes[8] = ($guidBytes[8] -band 0x3F) -bor 0x80
     $responseId   = ([System.Guid]::new([byte[]]$guidBytes)).ToString()
 
+    # SPEC-029 enveloped push-back: { envelope, answer, responder }. The server derives
+    # the question from the instance, so questionId/version are not sent in the body.
+    $submittedAt = (Get-Date).ToUniversalTime().ToString("yyyy-MM-dd'T'HH:mm:ss'Z'")
+    $envelope = New-NotificationEnvelope -Settings $Settings -ProjectId $ProjectId -TaskId $TaskId `
+        -QuestionInstanceId $InstanceId -ResponseId $responseId -SubmittedAt $submittedAt -AnsweredVia 'outpost'
+
+    $answer = @{ approvalDecision = $ApprovalDecision; status = 'submitted' }
+    if ($Comment) { $answer['comment'] = $Comment }
+
+    $responder = @{}
+    if ($ResponderEmail) { $responder['email'] = $ResponderEmail }
+
     $body = @{
-        responseId       = $responseId
-        instanceId       = $InstanceId
-        questionId       = $QuestionId
-        questionVersion  = $QuestionVersion
-        projectId        = $ProjectId
-        approvalDecision = $ApprovalDecision
-        answeredVia      = 'outpost'
-        submittedAt      = (Get-Date).ToUniversalTime().ToString("yyyy-MM-dd'T'HH:mm:ss'Z'")
+        envelope  = $envelope
+        answer    = $answer
+        responder = $responder
     }
-    if ($Comment)        { $body['comment']         = $Comment }
-    if ($ResponderEmail) { $body['responderEmail']  = $ResponderEmail }
 
     try {
         $result = Invoke-RestMethod -Uri "$baseUrl/api/responses" -Method Post `
@@ -947,6 +995,9 @@ function Send-LocalApprovalResponse {
 }
 
 Export-ModuleMember -Function @(
+    'New-NotificationEnvelope'
+    'ConvertFrom-NotificationEnvelope'
+    'Get-NotificationEnvelopeAnswer'
     'Get-NotificationSettings'
     'Test-NotificationServer'
     'Send-TaskNotification'

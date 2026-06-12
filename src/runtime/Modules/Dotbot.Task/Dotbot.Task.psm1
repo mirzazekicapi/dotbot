@@ -399,82 +399,94 @@ function Test-TaskCompletion {
 function Reset-InProgressTasks {
     <#
     .SYNOPSIS
-    Reset all in-progress tasks to todo status
-    
-    .PARAMETER TasksBaseDir
-    Base directory containing task subdirectories (todo, in-progress, done)
-    
+    Reset in-progress tasks to todo status for crash recovery.
+
+    .DESCRIPTION
+    Scans $RunDir for task JSON files whose status field is 'in-progress' and
+    resets them to 'todo' via an atomic in-place write. Designed for the current
+    workflow-runs layout where files never move between directories — status is
+    a JSON field. Called at process startup to recover tasks left in-progress by
+    a previously killed runner.
+
+    .PARAMETER RunDir
+    Directory to scan. For a workflow run: the resolved run dir
+    (workspace/tasks/workflow-runs/<runId>). For the pending-task-scope (no RunId):
+    the tasks base dir scanned recursively.
+
+    .PARAMETER Recurse
+    When set, scans $RunDir recursively. Used for the no-RunId (pending-task-scope)
+    case where tasks may be nested under workflow-runs/ and standalone/.
+
+    .PARAMETER ExcludeRunIds
+    Run IDs whose in-progress tasks must not be reset. Pass the run_id values of
+    all currently active processes so their tasks are left untouched.
+
+    .PARAMETER WorkflowName
+    When set, only reset tasks whose provenance.workflow matches this value.
+    Use when the runner is scoped to a specific workflow (RESUME by workflow name).
+
     .OUTPUTS
-    Array of hashtables with reset task information
+    Array of hashtables @{ id; name; file } for each recovered task.
     #>
     param(
         [Parameter(Mandatory = $true)]
-        [string]$TasksBaseDir
+        [string]$RunDir,
+
+        [switch]$Recurse,
+
+        [string[]]$ExcludeRunIds = @(),
+
+        [string]$WorkflowName = ''
     )
-    
+
     $resetTasks = @()
-    $inProgressDir = Join-Path $TasksBaseDir "in-progress"
-    
-    if (-not (Test-Path $inProgressDir)) {
-        return $resetTasks
+
+    if (-not (Test-Path -LiteralPath $RunDir)) {
+        return ,$resetTasks
     }
-    
-    $inProgressTasks = @(Get-ChildItem -Path $inProgressDir -Filter "*.json" -File -ErrorAction SilentlyContinue)
-    
-    if ($inProgressTasks.Count -eq 0) {
-        return $resetTasks
-    }
-    
-    foreach ($taskFile in $inProgressTasks) {
+
+    $taskFiles = @(Get-ChildItem -LiteralPath $RunDir -Filter '*.json' -File -Recurse:$Recurse -ErrorAction SilentlyContinue |
+                    Where-Object { $_.Name -ne 'run.json' })
+
+    foreach ($taskFile in $taskFiles) {
         try {
-            # Re-verify file exists (may have been moved by concurrent process)
-            if (-not (Test-Path $taskFile.FullName)) { continue }
+            if (-not (Test-Path -LiteralPath $taskFile.FullName)) { continue }
 
-            $taskContent = Get-Content -Path $taskFile.FullName -Raw | ConvertFrom-Json
-            $taskId = $taskContent.id
-            $taskName = $taskContent.name
+            $taskContent = Get-Content -LiteralPath $taskFile.FullName -Raw | ConvertFrom-Json
+            if ([string]$taskContent.status -ne 'in-progress') { continue }
 
-            # Check if this task was already completed — if so, just delete the orphan
-            $doneFile = Join-Path $TasksBaseDir "done" $taskFile.Name
-            if (Test-Path $doneFile) {
-                Remove-TaskFileAtomic -Path $taskFile.FullName -TaskId $taskId
-                continue
+            # Skip tasks whose owning run has a live process.
+            if ($ExcludeRunIds.Count -gt 0) {
+                $taskRunId = if ($taskContent.PSObject.Properties['provenance'] -and $taskContent.provenance) {
+                    [string]$taskContent.provenance.run_id
+                } else { $null }
+                if ($taskRunId -and $ExcludeRunIds -contains $taskRunId) { continue }
             }
 
-            $targetDir = Join-Path $TasksBaseDir "todo"
-            $targetStatus = "todo"
-
-            # Ensure target directory exists
-            if (-not (Test-Path $targetDir)) {
-                New-Item -ItemType Directory -Path $targetDir -Force | Out-Null
+            # Scope to a specific workflow when the runner was started for one.
+            if ($WorkflowName) {
+                $taskWorkflow = if ($taskContent.PSObject.Properties['provenance'] -and $taskContent.provenance) {
+                    [string]$taskContent.provenance.workflow
+                } else { $null }
+                if ($taskWorkflow -ne $WorkflowName) { continue }
             }
 
-            $targetPath = Join-Path $targetDir $taskFile.Name
+            $taskId   = [string]$taskContent.id
+            $taskName = if ($taskContent.PSObject.Properties['name'] -and $taskContent.name) { [string]$taskContent.name } else { $taskId }
 
-            # Update status
-            $taskContent.status = $targetStatus
-            $taskContent.started_at = $null
-            $taskContent.updated_at = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+            $taskContent.status = 'todo'
+            if ($taskContent.PSObject.Properties['started_at'])  { $taskContent.started_at  = $null }
+            if ($taskContent.PSObject.Properties['updated_at'])  { $taskContent.updated_at   = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ') }
 
-            # Atomic move: write target first, then delete source. A crash between
-            # the two steps leaves a duplicate (recoverable) instead of losing the task.
-            Move-TaskFileAtomic -SourcePath $taskFile.FullName `
-                                -TargetPath $targetPath `
-                                -Content $taskContent `
-                                -Depth 10 `
-                                -TaskId $taskId
+            Write-TaskFileAtomic -Path $taskFile.FullName -Content $taskContent -Depth 20 -TaskId $taskId
 
-            $resetTasks += @{
-                id = $taskId
-                name = $taskName
-                file = $taskFile.Name
-            }
+            $resetTasks += @{ id = $taskId; name = $taskName; file = $taskFile.Name }
         } catch {
-            Write-BotLog -Level Warn -Message "Error processing task: $($taskFile.Name)" -Exception $_
+            Write-BotLog -Level Warn -Message "Reset-InProgressTasks: error processing '$($taskFile.Name)'" -Exception $_
         }
     }
-    
-    return $resetTasks
+
+    return ,$resetTasks
 }
 
 function Reset-SkippedTasks {

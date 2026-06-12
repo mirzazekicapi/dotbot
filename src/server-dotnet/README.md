@@ -112,7 +112,7 @@ server/
 ├── src/Dotbot.Server/        # C# bot application
 │   ├── DotbotAgent.cs          # Core bot logic
 │   ├── Services/               # Card builder, response storage, convo refs
-│   └── Models/                 # QuestionOption, ResponseRecordV2
+│   └── Models/                 # QuestionOption, StoredResponse, Envelope/ (SPEC-029 wire)
 ├── terraform/                  # Azure infrastructure
 ├── teams-app/                  # Teams app icons (color.png, outline.png)
 ├── scripts/                    # Deploy, icon generation
@@ -121,21 +121,29 @@ server/
 
 ## Answer Format
 
-Each answer is persisted as a `ResponseRecordV2` JSON blob in Azure Blob Storage (container `answers`):
+Each answer is persisted as a minimal, **flat** `ResponseRecordV2` JSON blob in Azure
+Blob Storage (container `answers`). The question and recipients are NOT duplicated on
+the response blob, and the storage record is deliberately decoupled from the SPEC-029
+wire DTOs - answer/responder fields sit at the top level, and wire-only concerns
+(`status`, `agreesWithFirst`) are never persisted:
 
 ```json
 {
   "responseId": "00000000-0000-0000-0000-000000000001",
   "instanceId": "00000000-0000-0000-0000-000000000002",
   "questionId": "00000000-0000-0000-0000-000000000003",
-  "questionVersion": 1,
   "projectId": "dotbot",
-  "responderEmail": "andre@example.com",
-  "responderAadObjectId": "abc-123",
+  "submittedAt": "2026-04-16T19:30:00Z",
+  "answeredVia": "mothership",
   "selectedKey": "A",
   "selectedOptionTitle": "PostgreSQL",
-  "freeText": null,
-  "submittedAt": "2026-04-16T19:30:00Z",
-  "status": "submitted"
+  "responderEmail": "andre@example.com",
+  "responderAadObjectId": "abc-123"
 }
 ```
+
+On read, `GET /api/instances/{projectId}/{questionId}/{questionInstanceId}/responses`
+assembles each blob into the full SPEC-029 envelope
+(`{ envelope, question, answer, responder }`) via `EnvelopeAssembler` - mapping the flat
+fields into the nested `answer`/`responder` sections, adding `answer.status`, and
+deriving `envelope.agreesWithFirst` per record for dual-surface conflict detection.

@@ -427,21 +427,83 @@ function Get-ActionRequired {
     }
 }
 
+function Assert-TaskAnswerSubmissionShape {
+    <#
+    .SYNOPSIS
+    Type-specific contract validation for a local Submit-TaskAnswer payload.
+
+    .DESCRIPTION
+    Each question type has its own wire-shape contract from the local UI.
+    Centralised here so Submit-TaskAnswer stays focused on attachment handling
+    and the runtime transition call. Throws a descriptive error on contract
+    violation; returns silently on success.
+
+    Approval contract (mirrors the local Decisions card in actions.js and the
+    server-side ApprovalDecisions enum):
+      - $Answer must be exactly "approved" or "rejected" (empty is allowed
+        and falls through; callers that require a non-empty answer enforce
+        that separately).
+      - "rejected" requires a non-empty $Comment.
+      - $Attachments cannot be present — the approval card has no dropzone,
+        so a non-empty $Attachments here means a misbehaving caller.
+
+    Other types (singleChoice / freeText / priorityRanking) have no extra
+    shape constraints here; the server validates the response payload on
+    its side.
+    #>
+    param(
+        [string]$Type,
+        $Answer,
+        $Attachments,
+        [string]$Comment
+    )
+
+    switch ($Type) {
+        'approval' {
+            $answerValue = if ($Answer -is [array]) { @($Answer)[0] } else { [string]$Answer }
+            if ($answerValue -and $answerValue -notin @('approved', 'rejected')) {
+                throw "Submit-TaskAnswer: approval answer must be 'approved' or 'rejected' (got: '$answerValue')"
+            }
+            if ($answerValue -eq 'rejected' -and [string]::IsNullOrWhiteSpace($Comment)) {
+                throw "Submit-TaskAnswer: approval 'rejected' requires a non-empty Comment"
+            }
+            if ($Attachments -and @($Attachments).Count -gt 0) {
+                throw "Submit-TaskAnswer: approval submissions cannot carry attachments"
+            }
+        }
+        default {
+            # No additional shape constraints for singleChoice / freeText /
+            # priorityRanking today.
+        }
+    }
+}
+
 function Submit-TaskAnswer {
     param(
         [Parameter(Mandatory)] [string]$TaskId,
-        $Answer,
+        [string]$Type,       # Question type — "approval" / "singleChoice" / "freeText" /
+                             # "priorityRanking". Drives approval-specific validation
+                             # (canonical decision values, no attachments) and the
+                             # dual-surface push-back call to Send-LocalApprovalResponse.
+        $Answer,             # For approval, this is the decision string ("approved" / "rejected").
+                             # For singleChoice, the option key or custom text.
+                             # For freeText, the response text.
         [string]$CustomText,
-        $Attachments,  # array of { name, size, content (base64) } from frontend
-        [string]$QuestionId,  # Optional: specific question ID for pending_questions batch
-        [string]$Decision,    # approval decision: "approved" | "rejected" | "abstained"
-        [string]$Comment      # required when Decision = "rejected"
+        $Attachments,        # array of { name, size, content (base64) } from frontend
+        [string]$QuestionId, # Optional: specific question ID for pending_questions batch
+        [string]$Comment     # Required when Type='approval' and Answer='rejected'
     )
+
+    $isApproval = ($Type -eq 'approval')
 
     # Use custom text as answer when no option selected
     if ((-not $Answer -or ($Answer -is [array] -and $Answer.Count -eq 0)) -and $CustomText) {
         $Answer = $CustomText
     }
+
+    # Type-specific contract checks (approval decision value, no-attachments
+    # on approval, reject-needs-comment). See Assert-TaskAnswerSubmissionShape.
+    Assert-TaskAnswerSubmissionShape -Type $Type -Answer $Answer -Attachments $Attachments -Comment $Comment
 
     # Always resolve the question ID so it is used consistently for both attachment
     # placement and the answer submission — not only when attachments are present.
@@ -509,7 +571,10 @@ function Submit-TaskAnswer {
         }
     }
 
-    # If attachments were saved, embed their paths in the answer so the AI can locate them
+    # Embed attachment disk paths in the answer text so the AI agent reading
+    # questions_resolved later can find them. Approval submissions cannot
+    # reach this block — the validation above throws on attachments-with-
+    # approval, so $isApproval implies $attachmentMeta is empty.
     if ($attachmentMeta.Count -gt 0) {
         $pathList = ($attachmentMeta | ForEach-Object { $_.path }) -join ', '
         $pathNote = "Attached: $pathList"
@@ -537,12 +602,17 @@ function Submit-TaskAnswer {
         -AnsweredVia 'ui' `
         -Actor $actorName
 
-    # Dual-surface approval push-back: if the UI submitted an approval Decision
-    # (approved/rejected/abstained), mirror it to the Mothership so the server-side
+    # Dual-surface approval push-back: if the UI submitted an approval answer
+    # (approved / rejected), mirror it to the Mothership so the server-side
     # /respond surface and the local UI converge on the same answer. Best-effort;
     # a failure here is logged but doesn't fail the user-visible submission since
     # the local task has already transitioned.
-    if ($Decision) {
+    # NOTE: the full dual-surface contract (first-by-timestamp resolution,
+    # agreement / disagreement flag derivation, dashboard rendering) is tracked
+    # separately in #416. The wiring here is a stop-gap that pushes the
+    # decision string to the server using a deterministic ResponseId so retries
+    # are idempotent.
+    if ($isApproval) {
         $taskContent = $foundTask.Content
         $runner = $null
         if ($taskContent.PSObject.Properties['extensions'] -and $taskContent.extensions -and
@@ -571,13 +641,16 @@ function Submit-TaskAnswer {
             $qvRaw = if ($notifSource.PSObject.Properties['question_version']) { "$($notifSource.question_version)" } else { '' }
             $qvTest = 0
             $qv = if ([int]::TryParse($qvRaw, [ref]$qvTest) -and $qvTest -gt 0) { $qvTest } else { 1 }
+            # The approval answer carries the decision string verbatim, so pass it
+            # through as ApprovalDecision unchanged.
             $pushResult = Send-LocalApprovalResponse `
                 -ProjectId        "$($notifSource.project_id)" `
                 -QuestionId       "$($notifSource.question_id)" `
                 -InstanceId       "$($notifSource.instance_id)" `
-                -ApprovalDecision $Decision `
+                -ApprovalDecision "$Answer" `
                 -Comment          $Comment `
-                -QuestionVersion  $qv
+                -QuestionVersion  $qv `
+                -TaskId           "$($taskContent.id)"
             if (-not $pushResult.success -and (Get-Command Write-BotLog -ErrorAction SilentlyContinue)) {
                 Write-BotLog -Level Warn -Message "Approval push to Mothership failed: $($pushResult.reason)"
             }
@@ -912,6 +985,7 @@ Export-ModuleMember -Function @(
     'Initialize-TaskAPI',
     'Get-TaskPlan',
     'Get-ActionRequired',
+    'Assert-TaskAnswerSubmissionShape',
     'Submit-TaskAnswer',
     'Submit-SplitApproval',
     'Submit-TaskReview',

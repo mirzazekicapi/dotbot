@@ -3,9 +3,12 @@
 .SYNOPSIS
     Layer 5: Mothership web UI E2E — Playwright against live server + Azurite.
 .DESCRIPTION
-    Runs Playwright specs that navigate the magic-link respond flow for all six
-    question types: singleChoice, multiChoice, freeText, approval,
-    documentReview, priorityRanking.
+    Runs Playwright specs that navigate the magic-link respond flow for all
+    question types: singleChoice, multiChoice, freeText, approval (with and
+    without attachments), priorityRanking. The approval-with-attachments
+    scenario uploads a template attachment via POST /api/attachments, embeds
+    it on the template payload, and asserts the per-attachment confirmation
+    checklist + reviewedAttachmentIds round-trip on submit.
 
     For each question type the script:
       1. POST /api/templates  — creates a template
@@ -173,25 +176,33 @@ $questionTypes = @(
         Submit  = @{ selectedKey = "opt_a" }
     }
     @{
-        Type               = "approval"
-        Title              = "Playwright E2E: approval"
-        DeliverableSummary = "Playwright E2E test deliverable for approval"
+        Type    = "approval"
+        Variant = "no-attachments"
+        Title   = "Playwright E2E: approval"
         Options = @(
             @{ key = "approve"; label = "Approve" }
             @{ key = "reject";  label = "Reject"  }
-            @{ key = "abstain"; label = "Abstain" }
         )
-        Submit  = @{ approvalDecision = "approve" }
+        Submit  = @{ approvalDecision = "approved" }
     }
     @{
-        Type               = "documentReview"
-        Title              = "Playwright E2E: documentReview"
-        DeliverableSummary = "Playwright E2E test deliverable for documentReview"
-        Options = @(
+        Type        = "approval"
+        Variant     = "with-attachments"
+        Title       = "Playwright E2E: approval with attachments"
+        Options     = @(
             @{ key = "approve"; label = "Approve" }
             @{ key = "reject";  label = "Reject"  }
         )
-        Submit  = @{ approvalDecision = "approve" }
+        # Each entry becomes a single template attachment via POST /api/attachments.
+        # Content is inline so the test does not depend on any on-disk file under
+        # the project root (Send-AttachmentUpload guards against that, but this
+        # test uploads directly with X-Api-Key so it just needs a tmp file).
+        Attachments = @(
+            @{ name = 'playwright-design.txt'; content = 'Sample design document body for E2E approval review.' }
+        )
+        # reviewedAttachmentIds is filled in after uploads complete so the
+        # injected response matches the per-attachment confirmation checklist.
+        Submit      = @{ approvalDecision = "approved" }
     }
     @{
         Type   = "freeText"
@@ -214,8 +225,36 @@ $questionTypes = @(
 # HELPERS
 # ═══════════════════════════════════════════════════════════════════
 
+function New-Attachment {
+    <#
+    .SYNOPSIS
+    Uploads a single in-memory blob to POST /api/attachments and returns the
+    server-issued metadata in the QuestionAttachment wire shape.
+
+    .OUTPUTS
+    Hashtable: @{ attachmentId; name; blobPath; sizeBytes }.
+    #>
+    param([string]$Name, [string]$Content, [string]$Url, [string]$Key)
+
+    $tmpFile = Join-Path ([System.IO.Path]::GetTempPath()) "dotbot-mothership-e2e-$([guid]::NewGuid().ToString('N').Substring(0,8))-$Name"
+    Set-Content -LiteralPath $tmpFile -Value $Content -Encoding UTF8 -NoNewline
+    try {
+        $form = @{ file = Get-Item -LiteralPath $tmpFile }
+        $resp = Invoke-RestMethod -Uri "$($Url.TrimEnd('/'))/api/attachments" -Method Post `
+            -Form $form -Headers @{ "X-Api-Key" = $Key } -TimeoutSec 30
+        return @{
+            attachmentId = "$($resp.attachmentId)"
+            name         = "$($resp.name)"
+            blobPath     = "$($resp.storageRef)"
+            sizeBytes    = [int64]$resp.sizeBytes
+        }
+    } finally {
+        Remove-Item -LiteralPath $tmpFile -Force -ErrorAction SilentlyContinue
+    }
+}
+
 function New-Template {
-    param([hashtable]$Qt, [string]$Url, [string]$Key)
+    param([hashtable]$Qt, [string]$Url, [string]$Key, [array]$Attachments = @())
 
     $options = @()
     if ($Qt.ContainsKey('Options')) {
@@ -243,8 +282,31 @@ function New-Template {
         status             = "published"
     }
 
+    if ($Attachments -and @($Attachments).Count -gt 0) {
+        $body['attachments'] = @(foreach ($att in @($Attachments)) {
+            @{
+                attachmentId = "$($att.attachmentId)"
+                name         = "$($att.name)"
+                blobPath     = "$($att.blobPath)"
+                sizeBytes    = [int64]$att.sizeBytes
+            }
+        })
+    }
+
+    # SPEC-029: publish body is { envelope, question }.
+    $payload = @{
+        envelope = @{
+            outpostInstanceId  = [guid]::NewGuid().ToString()
+            taskId             = "e2e-task"
+            mothershipUrl      = $Url.TrimEnd('/')
+            questionInstanceId = "00000000-0000-0000-0000-000000000000"
+            projectId          = $projectId
+        }
+        question = $body
+    }
+
     $response = Invoke-RestMethod -Uri "$($Url.TrimEnd('/'))/api/templates" -Method Post `
-        -Body ($body | ConvertTo-Json -Depth 10) -ContentType "application/json" `
+        -Body ($payload | ConvertTo-Json -Depth 12) -ContentType "application/json" `
         -Headers @{ "X-Api-Key" = $Key } -TimeoutSec 10
 
     return @{
@@ -260,12 +322,17 @@ function New-Instance {
     # Use 'teams' channel — always registered even without Bot Framework config.
     # Delivery will fail gracefully but the instance record is persisted first,
     # so /respond can still render it.
+    # SPEC-029: instance body is { envelope, question:{questionId,version}, recipients:[...] }.
     $body = @{
-        projectId       = $projectId
-        questionId      = $QuestionId
-        questionVersion = $Version
-        channel         = "teams"
-        recipients      = @{ emails = @($testRecipient) }
+        envelope   = @{
+            outpostInstanceId  = [guid]::NewGuid().ToString()
+            taskId             = "e2e-task"
+            mothershipUrl      = $Url.TrimEnd('/')
+            questionInstanceId = "00000000-0000-0000-0000-000000000000"
+            projectId          = $projectId
+        }
+        question   = @{ questionId = $QuestionId; version = $Version }
+        recipients = @( @{ email = $testRecipient; channel = "teams" } )
     }
 
     $response = Invoke-RestMethod -Uri "$($Url.TrimEnd('/'))/api/instances" -Method Post `
@@ -309,11 +376,30 @@ try {
     $scenarios = @()
 
     foreach ($qt in $questionTypes) {
-        $label = $qt.Type
+        $label = if ($qt.ContainsKey('Variant')) { "$($qt.Type)-$($qt.Variant)" } else { $qt.Type }
         Write-Host "  SEEDING: $label" -ForegroundColor Cyan
 
+        # Upload any template-level attachments before template creation so the
+        # template payload can reference the server-issued attachmentId + blobPath.
+        $uploadedAttachments = @()
+        if ($qt.ContainsKey('Attachments') -and @($qt.Attachments).Count -gt 0) {
+            $attUploadFailed = $false
+            foreach ($att in @($qt.Attachments)) {
+                try {
+                    $uploaded = New-Attachment -Name $att.name -Content $att.content -Url $serverUrl -Key $apiKey
+                    $uploadedAttachments += $uploaded
+                } catch {
+                    Write-TestResult -Name "Mothership[$label]: attachment uploaded ($($att.name))" -Status Fail -Message $_.Exception.Message
+                    $attUploadFailed = $true
+                    break
+                }
+            }
+            if ($attUploadFailed) { continue }
+            Write-TestResult -Name "Mothership[$label]: $($uploadedAttachments.Count) attachment(s) uploaded" -Status Pass
+        }
+
         try {
-            $tmpl = New-Template -Qt $qt -Url $serverUrl -Key $apiKey
+            $tmpl = New-Template -Qt $qt -Url $serverUrl -Key $apiKey -Attachments $uploadedAttachments
             Write-TestResult -Name "Mothership[$label]: template created" -Status Pass
         } catch {
             Write-TestResult -Name "Mothership[$label]: template created" -Status Fail -Message $_.Exception.Message
@@ -350,8 +436,17 @@ try {
             }
         }
 
+        # Approval-with-attachments: thread the server-issued attachmentIds onto
+        # the injected response so the Playwright assertion can verify the
+        # round-trip and the form's per-attachment confirmation requirement is
+        # satisfied when the spec ticks all checkboxes.
+        if ($qt.Type -eq 'approval' -and $uploadedAttachments.Count -gt 0) {
+            $submit.reviewedAttachmentIds = @($uploadedAttachments | ForEach-Object { $_.attachmentId })
+        }
+
         $scenarios += @{
             type         = $qt.Type
+            variant      = if ($qt.ContainsKey('Variant')) { $qt.Variant } else { $null }
             title        = $qt.Title
             questionId   = $tmpl.QuestionId
             instanceId   = $instanceId
