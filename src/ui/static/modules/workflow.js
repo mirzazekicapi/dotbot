@@ -625,7 +625,7 @@ function renderWorkflowDetailPanel(workflows) {
 
     // Skip re-render if data hasn't changed (compare serialized)
     const dirCount = discoveredDirectories ? discoveredDirectories.length : 0;
-    const dataKey = JSON.stringify({ d: dirCount, w: workflows?.map(w => `${w.name}:${w.status}:${w.tasks?.done}:${w.tasks?.total}`) });
+    const dataKey = JSON.stringify({ d: dirCount, w: workflows?.map(w => `${w.name}:${w.status}:${w.tasks?.done}:${w.tasks?.skipped}:${w.tasks?.total}`) });
     if (dataKey === lastWorkflowNavData) return;
     lastWorkflowNavData = dataKey;
 
@@ -648,7 +648,7 @@ function renderWorkflowDetailPanel(workflows) {
         const isExpanded = expandedWfs.has(wf.name);
         const isRunning = wf.status === 'running' || wf.has_running_process;
         const ledClass = isRunning ? 'led pulse' : 'led off';
-        const done = wf.tasks?.done || 0;
+        const done = (wf.tasks?.done || 0) + (wf.tasks?.skipped || 0);
         const total = wf.tasks?.total || 0;
         const pct = total > 0 ? Math.round((done / total) * 100) : 0;
 
@@ -753,7 +753,7 @@ function renderWorkflowDetailPanel(workflows) {
                     if (authorName) html += `<div class="wf-meta-row"><span class="wf-meta-label">Author</span><span class="wf-meta-value">${escapeHtml(authorName)}</span></div>`;
                 }
                 if (wf.license) html += `<div class="wf-meta-row"><span class="wf-meta-label">License</span><span class="wf-meta-value">${escapeHtml(wf.license)}</span></div>`;
-                if (wf.tasks && wf.tasks.total > 0) html += `<div class="wf-meta-row"><span class="wf-meta-label">Tasks</span><span class="wf-meta-value">${wf.tasks.done}/${wf.tasks.total}</span></div>`;
+                if (wf.tasks && wf.tasks.total > 0) html += `<div class="wf-meta-row"><span class="wf-meta-label">Tasks</span><span class="wf-meta-value">${(wf.tasks.done || 0) + (wf.tasks.skipped || 0)}/${wf.tasks.total}</span></div>`;
                 html += '</div>';
             }
             if (wf.tags && wf.tags.length > 0) {
