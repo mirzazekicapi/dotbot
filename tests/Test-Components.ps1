@@ -2087,6 +2087,109 @@ if (Test-Path $notifModule) {
             -Condition ($templateCapture.question.responseSettings.allowFreeText -eq $false) `
             -Message "Expected allowFreeText=false for split proposal, got: $($templateCapture.question.responseSettings.allowFreeText)"
     }
+
+    # ── Send-ReviewNotification tests (issue #468) ───────────────────
+    $mockReviewTask = [PSCustomObject]@{
+        id         = "review-task-7"
+        name       = "Wire payment gateway"
+        extensions = [PSCustomObject]@{
+            review = [PSCustomObject]@{ requested_at = "2026-06-17T09:00:00Z" }
+        }
+    }
+
+    # No-op when notifications are disabled (reuses Send-TaskNotification gates).
+    $reviewDisabled = Send-ReviewNotification -TaskContent $mockReviewTask -Settings $settings -Reason "Ready"
+    Assert-True -Name "Send-ReviewNotification no-ops when disabled" `
+        -Condition ($reviewDisabled.success -eq $false) `
+        -Message "Expected success=false when disabled, got: $($reviewDisabled.success)"
+
+    # Template shape with enabled settings (mock REST to capture the wire payload).
+    $reviewCapture = $null
+    function global:Invoke-RestMethod {
+        param([string]$Method = 'Get', [string]$Uri, [string]$Body, $Headers, $ContentType, $TimeoutSec)
+        if ($Uri -match '/api/templates$') {
+            $global:reviewCapture = $Body | ConvertFrom-Json
+            return @{}
+        }
+        if ($Uri -match '/api/instances$') { return @{} }
+        throw "Unexpected URI: $Uri"
+    }
+    $reviewResult = try {
+        Send-ReviewNotification -TaskContent $mockReviewTask -Settings $enabledSettings `
+            -Reason "Implementation complete, needs sign-off" -Actor "alice@example.com" `
+            -ReviewLinks @(@{ title = "Open review dashboard"; url = "https://cp.example.com/review" })
+    } finally {
+        Remove-Item -Path 'function:global:Invoke-RestMethod' -ErrorAction SilentlyContinue
+    }
+    $reviewCapture = $global:reviewCapture
+
+    Assert-True -Name "Send-ReviewNotification returns success with mock server" `
+        -Condition ($reviewResult.success -eq $true) `
+        -Message "Expected success=true, got: $($reviewResult | ConvertTo-Json -Depth 5)"
+
+    if ($reviewCapture) {
+        Assert-True -Name "Review template uses informational 'freeText' type" `
+            -Condition ($reviewCapture.question.type -eq 'freeText') `
+            -Message "Expected type=freeText (informational; no Approve/Reject decision card), got: $($reviewCapture.question.type)"
+
+        Assert-True -Name "Review template renders no decision options" `
+            -Condition (@($reviewCapture.question.options).Count -eq 0) `
+            -Message "Expected empty options (no Approve/Reject buttons — no dotbot-side consumer for needs-review), got: $($reviewCapture.question.options | ConvertTo-Json -Compress)"
+
+        Assert-True -Name "Review template directs the reviewer to the dashboard" `
+            -Condition ($reviewCapture.question.context -match "dashboard") `
+            -Message "Expected context to point the reviewer at the dashboard, got: $($reviewCapture.question.context)"
+
+        Assert-True -Name "Review template title identifies the task" `
+            -Condition ($reviewCapture.question.title -match "Wire payment gateway") `
+            -Message "Expected title to contain task name, got: $($reviewCapture.question.title)"
+
+        Assert-True -Name "Review template context identifies task id" `
+            -Condition ($reviewCapture.question.context -match "review-task-7") `
+            -Message "Expected context to contain task id, got: $($reviewCapture.question.context)"
+
+        Assert-True -Name "Review template context names the submitting actor" `
+            -Condition ($reviewCapture.question.context -match "alice@example.com") `
+            -Message "Expected context to name the actor, got: $($reviewCapture.question.context)"
+
+        Assert-True -Name "Review template carries deliverable summary from reason" `
+            -Condition ($reviewCapture.question.deliverableSummary -match "sign-off") `
+            -Message "Expected deliverableSummary from reason, got: $($reviewCapture.question.deliverableSummary)"
+
+        Assert-True -Name "Review template carries the review reference link" `
+            -Condition ($reviewCapture.question.referenceLinks.Count -ge 1 -and $reviewCapture.question.referenceLinks[0].url -eq "https://cp.example.com/review") `
+            -Message "Expected referenceLinks with the review URL, got: $($reviewCapture.question.referenceLinks | ConvertTo-Json -Compress)"
+    }
+
+    # Idempotency: same requested_at -> same deterministic questionId; a fresh
+    # request timestamp -> a different questionId (new card after a reject cycle).
+    $reviewIdA = $null; $reviewIdB = $null
+    function global:Invoke-RestMethod {
+        param([string]$Method = 'Get', [string]$Uri, [string]$Body, $Headers, $ContentType, $TimeoutSec)
+        if ($Uri -match '/api/templates$') { $script:__qid = ($Body | ConvertFrom-Json).question.questionId; return @{} }
+        if ($Uri -match '/api/instances$') { return @{} }
+        throw "Unexpected URI: $Uri"
+    }
+    try {
+        $null = Send-ReviewNotification -TaskContent $mockReviewTask -Settings $enabledSettings -Reason "r"
+        $reviewIdA = $script:__qid
+        $null = Send-ReviewNotification -TaskContent $mockReviewTask -Settings $enabledSettings -Reason "r"
+        $reviewIdB = $script:__qid
+        $mockReviewTask2 = [PSCustomObject]@{
+            id = "review-task-7"; name = "Wire payment gateway"
+            extensions = [PSCustomObject]@{ review = [PSCustomObject]@{ requested_at = "2026-06-18T09:00:00Z" } }
+        }
+        $null = Send-ReviewNotification -TaskContent $mockReviewTask2 -Settings $enabledSettings -Reason "r"
+        $reviewIdC = $script:__qid
+    } finally {
+        Remove-Item -Path 'function:global:Invoke-RestMethod' -ErrorAction SilentlyContinue
+    }
+    Assert-True -Name "Send-ReviewNotification questionId is stable per requested_at" `
+        -Condition ($reviewIdA -eq $reviewIdB) `
+        -Message "Expected same questionId for same requested_at, got A=$reviewIdA B=$reviewIdB"
+    Assert-True -Name "Send-ReviewNotification questionId changes on new requested_at" `
+        -Condition ($reviewIdA -ne $reviewIdC) `
+        -Message "Expected different questionId for new requested_at, got A=$reviewIdA C=$reviewIdC"
 } else {
     Write-TestResult -Name "NotificationClient module exists" -Status Fail -Message "Module not found at $notifModule"
 }
