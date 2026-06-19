@@ -2087,10 +2087,11 @@ function Remove-OrphanWorktrees {
         $dirPath = Join-Path $tasksBaseDir $dir
         if (-not (Test-Path $dirPath)) { continue }
         Get-ChildItem -Path $dirPath -Filter '*.json' -File -ErrorAction SilentlyContinue | ForEach-Object {
+            $filePath = $_.FullName
             try {
-                $c = Get-Content -Path $_.FullName -Raw | ConvertFrom-Json
+                $c = Get-Content -Path $filePath -Raw | ConvertFrom-Json
                 if ($c.id) { $null = $activeIds.Add([string]$c.id) }
-            } catch { Write-BotLog -Level Debug -Message "Failed to read task file $($_.FullName)" -Exception $_ }
+            } catch { Write-BotLog -Level Debug -Message "Failed to read task file $filePath" -Exception $_ }
         }
     }
 
@@ -2106,12 +2107,13 @@ function Remove-OrphanWorktrees {
         Get-ChildItem -Path $canonPath -Filter '*.json' -File -Recurse -ErrorAction SilentlyContinue |
             Where-Object { $_.Name -ne 'run.json' } |
             ForEach-Object {
+                $filePath = $_.FullName
                 try {
-                    $c = Get-Content -Path $_.FullName -Raw | ConvertFrom-Json
+                    $c = Get-Content -Path $filePath -Raw | ConvertFrom-Json
                     if ($c.id -and $canonicalActiveStatuses.Contains([string]$c.status)) {
                         $null = $activeIds.Add([string]$c.id)
                     }
-                } catch { Write-BotLog -Level Debug -Message "Failed to read task file $($_.FullName)" -Exception $_ }
+                } catch { Write-BotLog -Level Debug -Message "Failed to read task file $filePath" -Exception $_ }
             }
     }
 
