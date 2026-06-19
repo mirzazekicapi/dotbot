@@ -25,6 +25,7 @@
         'Build-TaskPrompt'
         'Test-TaskCompletion'
         'Reset-InProgressTasks'
+        'Get-NeedsInputTasksInScope'
         'Reset-SkippedTasks'
         'Invoke-PostScript'
         'Invoke-PostScriptFailureEscalation'
