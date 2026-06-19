@@ -309,6 +309,76 @@ if (Test-Path $worktreeManagerModule) {
         Remove-TestProject -Path $resolveMainRepo
     }
 
+    # Resolve-DotbotBaseBranch (#466): configurable base branch with fail-fast on a
+    # configured-but-missing trunk. Group A exercises the no-config fallback (no BotRoot
+    # -> the Get-Command guard skips Get-MergedSettings -> deterministic main/master/null).
+    $rdbbNoCfg = New-TestProject -Prefix 'dotbot-test-rdbb-nocfg'
+    try {
+        Push-Location $rdbbNoCfg
+        & git branch -M main 2>&1 | Out-Null
+        Pop-Location
+        Assert-Equal -Name "#466: Resolve-DotbotBaseBranch defaults to 'main' (no config)" `
+            -Expected "main" -Actual (Resolve-DotbotBaseBranch -ProjectRoot $rdbbNoCfg)
+
+        Push-Location $rdbbNoCfg
+        & git branch -m main master 2>&1 | Out-Null
+        Pop-Location
+        Assert-Equal -Name "#466: Resolve-DotbotBaseBranch falls back to 'master' (no config)" `
+            -Expected "master" -Actual (Resolve-DotbotBaseBranch -ProjectRoot $rdbbNoCfg)
+
+        Push-Location $rdbbNoCfg
+        & git branch -m master legacy-trunk 2>&1 | Out-Null
+        Pop-Location
+        Assert-True -Name "#466: Resolve-DotbotBaseBranch returns null when neither main nor master exists" `
+            -Condition ($null -eq (Resolve-DotbotBaseBranch -ProjectRoot $rdbbNoCfg)) `
+            -Message "Expected null when no main/master and no configured base"
+    } finally {
+        Remove-TestProject -Path $rdbbNoCfg
+    }
+
+    # Group B exercises a configured git.base_branch (read via Get-MergedSettings). A real
+    # .bot is required so the .control/settings.json override layer resolves; import the
+    # settings loader -Global (mirrors the user-settings block below) so the resolver's
+    # Get-Command Get-MergedSettings guard passes.
+    Import-Module (Join-Path $botDir "src/runtime/Modules/Dotbot.Core/Dotbot.Core.psd1") -Force -DisableNameChecking -Global | Out-Null
+    Import-Module (Join-Path $botDir "src/runtime/Modules/Dotbot.Settings/Dotbot.Settings.psd1") -Force -DisableNameChecking -Global | Out-Null
+    $rdbbCfg = New-TestProjectFromGolden -Flavor 'default' -Prefix 'dotbot-test-rdbb-cfg'
+    try {
+        Push-Location $rdbbCfg.ProjectRoot
+        & git branch -M main 2>&1 | Out-Null
+        & git branch develop 2>&1 | Out-Null
+        Pop-Location
+
+        $rdbbControl = Join-Path $rdbbCfg.ControlDir "settings.json"
+        '{ "git": { "base_branch": "develop" } }' | Set-Content -Path $rdbbControl -Encoding UTF8
+
+        Assert-Equal -Name "#466: Resolve-DotbotBaseBranch honours configured git.base_branch" `
+            -Expected "develop" `
+            -Actual (Resolve-DotbotBaseBranch -ProjectRoot $rdbbCfg.ProjectRoot -BotRoot $rdbbCfg.BotDir)
+        Assert-Equal -Name "#466: Resolve-MainBranch delegates and honours git.base_branch" `
+            -Expected "develop" `
+            -Actual (Resolve-MainBranch -ProjectRoot $rdbbCfg.ProjectRoot -BotRoot $rdbbCfg.BotDir)
+
+        # Configured-but-missing trunk must fail fast — no silent fallback to main.
+        '{ "git": { "base_branch": "nonexistent-trunk" } }' | Set-Content -Path $rdbbControl -Encoding UTF8
+        $rdbbThrew = $false
+        $rdbbErr = ""
+        try {
+            Resolve-DotbotBaseBranch -ProjectRoot $rdbbCfg.ProjectRoot -BotRoot $rdbbCfg.BotDir | Out-Null
+        } catch {
+            $rdbbThrew = $true
+            $rdbbErr = $_.Exception.Message
+        }
+        Assert-True -Name "#466: Resolve-DotbotBaseBranch throws when configured base branch is missing" `
+            -Condition $rdbbThrew `
+            -Message "Expected fail-fast throw for a configured-but-missing base branch"
+        Assert-True -Name "#466: Resolve-DotbotBaseBranch fail-fast message names the configured branch" `
+            -Condition ($rdbbErr -match 'nonexistent-trunk') `
+            -Message "Expected error to mention the configured branch, got: $rdbbErr"
+    } finally {
+        Remove-TestProject -Path $rdbbCfg.ProjectRoot
+    }
+
     Assert-True -Name "Dotbot.Worktree has no Get-BaseBranch function (replaced by Resolve-MainBranch for #317)" `
         -Condition (-not (Select-String -Path $worktreeManagerModule -Pattern 'function Get-BaseBranch' -Quiet)) `
         -Message "Get-BaseBranch read HEAD and caused #317 — it must remain deleted"
@@ -683,6 +753,86 @@ if (Test-Path $promptBuilderScript) {
     Assert-True -Name "Build-TaskPrompt keeps full INSTANCE_ID available" `
         -Condition ($promptResult -match '\[bot-full:A1B2C3D4-1111-2222-3333-444455556666\]') `
         -Message "Expected full INSTANCE_ID replacement"
+
+    # Reviewer feedback injection: when review_feedback is present, the
+    # {{REVIEWER_FEEDBACK}} block must carry the mandate + each comment; when
+    # absent the placeholder collapses to empty (no leftover token).
+    $feedbackTemplate = "BEGIN`n{{REVIEWER_FEEDBACK}}`nEND"
+
+    $feedbackTask = [PSCustomObject]@{
+        id = "7b012fb8-d6fa-45e8-b89e-062b4bcb16ae"
+        name = "Feedback Task"
+        category = "feature"
+        priority = 10
+        description = "x"
+        applicable_standards = @(); applicable_agents = @(); acceptance_criteria = @(); steps = @()
+        questions_resolved = @()
+        review_feedback = @(
+            [PSCustomObject]@{ comment = "Fix the header copy"; what_was_wrong = "Used wrong product name"; timestamp = "2026-06-15T00:00:00Z" }
+            [PSCustomObject]@{ comment = "Tighten the spacing"; what_was_wrong = ""; timestamp = "2026-06-15T01:00:00Z" }
+        )
+    }
+    $feedbackResult = Build-TaskPrompt -PromptTemplate $feedbackTemplate -Task $feedbackTask -SessionId "sess-1" -InstanceId "A1B2C3D4-1111-2222-3333-444455556666"
+
+    Assert-True -Name "Build-TaskPrompt injects reviewer feedback mandate" `
+        -Condition ($feedbackResult -match 'MUST\*\* address each item') `
+        -Message "Expected the feedback mandate text in the prompt"
+    Assert-True -Name "Build-TaskPrompt injects each feedback comment" `
+        -Condition (($feedbackResult -match 'Fix the header copy') -and ($feedbackResult -match 'Tighten the spacing')) `
+        -Message "Expected every feedback comment in the prompt"
+    Assert-True -Name "Build-TaskPrompt injects what_was_wrong when present" `
+        -Condition ($feedbackResult -match 'Used wrong product name') `
+        -Message "Expected what_was_wrong detail in the prompt"
+    Assert-True -Name "Build-TaskPrompt leaves no REVIEWER_FEEDBACK placeholder" `
+        -Condition ($feedbackResult -notmatch '\{\{REVIEWER_FEEDBACK\}\}') `
+        -Message "Expected the placeholder to be replaced"
+
+    $noFeedbackTask = [PSCustomObject]@{
+        id = "7b012fb8-d6fa-45e8-b89e-062b4bcb16ae"
+        name = "No Feedback Task"
+        category = "feature"; priority = 10; description = "x"
+        applicable_standards = @(); applicable_agents = @(); acceptance_criteria = @(); steps = @()
+        questions_resolved = @(); review_feedback = @()
+    }
+    $noFeedbackResult = Build-TaskPrompt -PromptTemplate $feedbackTemplate -Task $noFeedbackTask -SessionId "sess-1" -InstanceId "A1B2C3D4-1111-2222-3333-444455556666"
+    Assert-True -Name "Build-TaskPrompt yields empty feedback block when none" `
+        -Condition ($noFeedbackResult -match "BEGIN`n`nEND") `
+        -Message "Expected an empty feedback block (placeholder replaced with empty string)"
+
+    # Resolve-TaskReviewDecision: shared decision logic for reject vs revise.
+    $reviewTask = [PSCustomObject]@{
+        name = "Review Decision Task"
+        extensions = [PSCustomObject]@{
+            review = [PSCustomObject]@{ feedback = @([PSCustomObject]@{ comment = "old"; what_was_wrong = ""; timestamp = "2026-06-14T00:00:00Z" }) }
+        }
+    }
+
+    $rejectDecision = Resolve-TaskReviewDecision -Task $reviewTask -Decision 'reject' -Comment 'Please redo' -WhatWasWrong 'broken' -Now '2026-06-15T00:00:00Z'
+    Assert-True -Name "Resolve-TaskReviewDecision reject sets rejected status" `
+        -Condition ($rejectDecision.success -and $rejectDecision.reviewReplacement.status -eq 'rejected') `
+        -Message "Reject must set review status to rejected"
+    Assert-True -Name "Resolve-TaskReviewDecision reject discards worktree" `
+        -Condition ($rejectDecision.resetWorktree -eq $true) `
+        -Message "Reject must request worktree reset"
+    Assert-True -Name "Resolve-TaskReviewDecision reject accumulates feedback" `
+        -Condition ($rejectDecision.feedbackCount -eq 2) `
+        -Message "Reject must append to existing feedback (1 existing + 1 new = 2)"
+
+    $reviseDecision = Resolve-TaskReviewDecision -Task $reviewTask -Decision 'revise' -Comment 'Tweak it' -WhatWasWrong '' -Now '2026-06-15T00:00:00Z'
+    Assert-True -Name "Resolve-TaskReviewDecision revise sets revision_requested status" `
+        -Condition ($reviseDecision.success -and $reviseDecision.reviewReplacement.status -eq 'revision_requested') `
+        -Message "Revise must set review status to revision_requested"
+    Assert-True -Name "Resolve-TaskReviewDecision revise preserves worktree" `
+        -Condition ($reviseDecision.resetWorktree -eq $false) `
+        -Message "Revise must NOT request worktree reset"
+    Assert-True -Name "Resolve-TaskReviewDecision revise returns task to todo" `
+        -Condition ($reviseDecision.targetStatus -eq 'todo') `
+        -Message "Revise must return the task to todo"
+
+    $missingComment = Resolve-TaskReviewDecision -Task $reviewTask -Decision 'revise' -Comment '   ' -Now '2026-06-15T00:00:00Z'
+    Assert-True -Name "Resolve-TaskReviewDecision requires a comment" `
+        -Condition (-not $missingComment.success -and $missingComment.error -match 'required') `
+        -Message "A blank comment must be rejected with an error"
 } else {
     Write-TestResult -Name "Dotbot.Task module exists" -Status Fail -Message "Module not found at $promptBuilderScript"
 }
@@ -1485,6 +1635,33 @@ if ($harnessLoaded) {
         -Condition ($registered -contains 'Copilot') `
         -Message "Adapters registered: $($registered -join ', ')"
 
+    # Failure classifier (#467): auth-expiry text must classify as AuthError so
+    # the consumer can park to needs-input instead of burning retries.
+    $authReason = Get-FailureReason -ExitCode 1 -Stdout 'OAuth token expired. Please run /login.' -Stderr '' -TimedOut $false
+    Assert-True -Name "Get-FailureReason classifies oauth expiry as AuthError" `
+        -Condition ($authReason.type -eq 'AuthError') `
+        -Message "Expected AuthError, got '$($authReason.type)'"
+
+    $http401Reason = Get-FailureReason -ExitCode 1 -Stdout 'Request failed: HTTP 401 Unauthorized' -Stderr '' -TimedOut $false
+    Assert-True -Name "Get-FailureReason classifies 401 as AuthError (word-bounded)" `
+        -Condition ($http401Reason.type -eq 'AuthError') `
+        -Message "Expected AuthError, got '$($http401Reason.type)'"
+
+    $not401Reason = Get-FailureReason -ExitCode 1 -Stdout 'request returned 4012 items' -Stderr '' -TimedOut $false
+    Assert-True -Name "Get-FailureReason does not treat 4012 as a 401 auth error" `
+        -Condition ($not401Reason.type -ne 'AuthError') `
+        -Message "Expected non-AuthError, got '$($not401Reason.type)'"
+
+    $emptyReason = Get-FailureReason -ExitCode 1 -Stdout '' -Stderr '' -TimedOut $false
+    Assert-True -Name "Get-FailureReason falls through to Crash on empty text" `
+        -Condition ($emptyReason.type -eq 'Crash') `
+        -Message "Expected Crash, got '$($emptyReason.type)'"
+
+    $timeoutReason = Get-FailureReason -ExitCode 1 -Stdout 'unauthorized' -Stderr '' -TimedOut $true
+    Assert-True -Name "Get-FailureReason gives Timeout precedence over auth text" `
+        -Condition ($timeoutReason.type -eq 'Timeout') `
+        -Message "Expected Timeout, got '$($timeoutReason.type)'"
+
     # Test Get-HarnessConfig for Claude (default)
     $claudeConfig = $null
     try { $claudeConfig = Get-HarnessConfig -Name "claude" } catch { Write-Verbose "Settings operation failed: $_" }
@@ -1980,6 +2157,109 @@ if (Test-Path $notifModule) {
             -Condition ($templateCapture.question.responseSettings.allowFreeText -eq $false) `
             -Message "Expected allowFreeText=false for split proposal, got: $($templateCapture.question.responseSettings.allowFreeText)"
     }
+
+    # ── Send-ReviewNotification tests (issue #468) ───────────────────
+    $mockReviewTask = [PSCustomObject]@{
+        id         = "review-task-7"
+        name       = "Wire payment gateway"
+        extensions = [PSCustomObject]@{
+            review = [PSCustomObject]@{ requested_at = "2026-06-17T09:00:00Z" }
+        }
+    }
+
+    # No-op when notifications are disabled (reuses Send-TaskNotification gates).
+    $reviewDisabled = Send-ReviewNotification -TaskContent $mockReviewTask -Settings $settings -Reason "Ready"
+    Assert-True -Name "Send-ReviewNotification no-ops when disabled" `
+        -Condition ($reviewDisabled.success -eq $false) `
+        -Message "Expected success=false when disabled, got: $($reviewDisabled.success)"
+
+    # Template shape with enabled settings (mock REST to capture the wire payload).
+    $reviewCapture = $null
+    function global:Invoke-RestMethod {
+        param([string]$Method = 'Get', [string]$Uri, [string]$Body, $Headers, $ContentType, $TimeoutSec)
+        if ($Uri -match '/api/templates$') {
+            $global:reviewCapture = $Body | ConvertFrom-Json
+            return @{}
+        }
+        if ($Uri -match '/api/instances$') { return @{} }
+        throw "Unexpected URI: $Uri"
+    }
+    $reviewResult = try {
+        Send-ReviewNotification -TaskContent $mockReviewTask -Settings $enabledSettings `
+            -Reason "Implementation complete, needs sign-off" -Actor "alice@example.com" `
+            -ReviewLinks @(@{ title = "Open review dashboard"; url = "https://cp.example.com/review" })
+    } finally {
+        Remove-Item -Path 'function:global:Invoke-RestMethod' -ErrorAction SilentlyContinue
+    }
+    $reviewCapture = $global:reviewCapture
+
+    Assert-True -Name "Send-ReviewNotification returns success with mock server" `
+        -Condition ($reviewResult.success -eq $true) `
+        -Message "Expected success=true, got: $($reviewResult | ConvertTo-Json -Depth 5)"
+
+    if ($reviewCapture) {
+        Assert-True -Name "Review template uses informational 'freeText' type" `
+            -Condition ($reviewCapture.question.type -eq 'freeText') `
+            -Message "Expected type=freeText (informational; no Approve/Reject decision card), got: $($reviewCapture.question.type)"
+
+        Assert-True -Name "Review template renders no decision options" `
+            -Condition (@($reviewCapture.question.options).Count -eq 0) `
+            -Message "Expected empty options (no Approve/Reject buttons — no dotbot-side consumer for needs-review), got: $($reviewCapture.question.options | ConvertTo-Json -Compress)"
+
+        Assert-True -Name "Review template directs the reviewer to the dashboard" `
+            -Condition ($reviewCapture.question.context -match "dashboard") `
+            -Message "Expected context to point the reviewer at the dashboard, got: $($reviewCapture.question.context)"
+
+        Assert-True -Name "Review template title identifies the task" `
+            -Condition ($reviewCapture.question.title -match "Wire payment gateway") `
+            -Message "Expected title to contain task name, got: $($reviewCapture.question.title)"
+
+        Assert-True -Name "Review template context identifies task id" `
+            -Condition ($reviewCapture.question.context -match "review-task-7") `
+            -Message "Expected context to contain task id, got: $($reviewCapture.question.context)"
+
+        Assert-True -Name "Review template context names the submitting actor" `
+            -Condition ($reviewCapture.question.context -match "alice@example.com") `
+            -Message "Expected context to name the actor, got: $($reviewCapture.question.context)"
+
+        Assert-True -Name "Review template carries deliverable summary from reason" `
+            -Condition ($reviewCapture.question.deliverableSummary -match "sign-off") `
+            -Message "Expected deliverableSummary from reason, got: $($reviewCapture.question.deliverableSummary)"
+
+        Assert-True -Name "Review template carries the review reference link" `
+            -Condition ($reviewCapture.question.referenceLinks.Count -ge 1 -and $reviewCapture.question.referenceLinks[0].url -eq "https://cp.example.com/review") `
+            -Message "Expected referenceLinks with the review URL, got: $($reviewCapture.question.referenceLinks | ConvertTo-Json -Compress)"
+    }
+
+    # Idempotency: same requested_at -> same deterministic questionId; a fresh
+    # request timestamp -> a different questionId (new card after a reject cycle).
+    $reviewIdA = $null; $reviewIdB = $null
+    function global:Invoke-RestMethod {
+        param([string]$Method = 'Get', [string]$Uri, [string]$Body, $Headers, $ContentType, $TimeoutSec)
+        if ($Uri -match '/api/templates$') { $script:__qid = ($Body | ConvertFrom-Json).question.questionId; return @{} }
+        if ($Uri -match '/api/instances$') { return @{} }
+        throw "Unexpected URI: $Uri"
+    }
+    try {
+        $null = Send-ReviewNotification -TaskContent $mockReviewTask -Settings $enabledSettings -Reason "r"
+        $reviewIdA = $script:__qid
+        $null = Send-ReviewNotification -TaskContent $mockReviewTask -Settings $enabledSettings -Reason "r"
+        $reviewIdB = $script:__qid
+        $mockReviewTask2 = [PSCustomObject]@{
+            id = "review-task-7"; name = "Wire payment gateway"
+            extensions = [PSCustomObject]@{ review = [PSCustomObject]@{ requested_at = "2026-06-18T09:00:00Z" } }
+        }
+        $null = Send-ReviewNotification -TaskContent $mockReviewTask2 -Settings $enabledSettings -Reason "r"
+        $reviewIdC = $script:__qid
+    } finally {
+        Remove-Item -Path 'function:global:Invoke-RestMethod' -ErrorAction SilentlyContinue
+    }
+    Assert-True -Name "Send-ReviewNotification questionId is stable per requested_at" `
+        -Condition ($reviewIdA -eq $reviewIdB) `
+        -Message "Expected same questionId for same requested_at, got A=$reviewIdA B=$reviewIdB"
+    Assert-True -Name "Send-ReviewNotification questionId changes on new requested_at" `
+        -Condition ($reviewIdA -ne $reviewIdC) `
+        -Message "Expected different questionId for new requested_at, got A=$reviewIdA C=$reviewIdC"
 } else {
     Write-TestResult -Name "NotificationClient module exists" -Status Fail -Message "Module not found at $notifModule"
 }
@@ -2409,6 +2689,19 @@ if (Test-Path $settingsApiModule) {
         Assert-True -Name "#309: Set-EditorConfig success" -Condition ($r.success -eq $true)
         Assert-Equal -Name "#309: EditorConfig writes to .control overrides" -Expected "custom" -Actual (Get-OverridesJson).editor.name
         Assert-Equal -Name "#309: EditorConfig custom_command persisted" -Expected "vi {path}" -Actual (Get-OverridesJson).editor.custom_command
+
+        # --- Get/Set-GitConfig (#466) ---
+        Assert-True -Name "#466: Get-GitConfig base_branch defaults to null (no git section seeded)" `
+            -Condition ($null -eq (Get-GitConfig).base_branch)
+        $r = Set-GitConfig -Body ([PSCustomObject]@{ base_branch = "develop" })
+        Assert-True -Name "#466: Set-GitConfig success" -Condition ($r.success -eq $true)
+        Assert-Equal -Name "#466: GitConfig writes base_branch to .control overrides" -Expected "develop" -Actual (Get-OverridesJson).git.base_branch
+        Assert-Equal -Name "#466: GitConfig merged read returns override" -Expected "develop" -Actual (Get-GitConfig).base_branch
+        # Blank/whitespace clears the override back to null.
+        $r = Set-GitConfig -Body ([PSCustomObject]@{ base_branch = "   " })
+        Assert-True -Name "#466: Set-GitConfig clear success" -Condition ($r.success -eq $true)
+        Assert-True -Name "#466: GitConfig blank base_branch persists null in .control" -Condition ($null -eq (Get-OverridesJson).git.base_branch)
+        Assert-True -Name "#466: GitConfig merged read returns null after clear" -Condition ($null -eq (Get-GitConfig).base_branch)
 
         # --- Set-ActiveProvider (top-level scalar) ---
         $r = Set-ActiveProvider -Body ([PSCustomObject]@{ provider = "claude" })
@@ -5881,6 +6174,8 @@ try {
 
     $phase4GoPortFile = Join-Path $phase4GoProject ".bot/.control/ui-port"
     $phase4GoRuntimeFile = Join-Path $phase4GoProject ".bot/.control/runtime.json"
+    # 30 s: macOS GitHub Actions runners have wider scheduling jitter than
+    # ubuntu/windows; 12 s proved too tight and caused intermittent flakes (#474).
     $deadline = [DateTime]::UtcNow.AddSeconds(30)
     while ([DateTime]::UtcNow -lt $deadline -and
            ((-not (Test-Path $phase4GoPortFile)) -or (-not (Test-Path $phase4GoRuntimeFile))) -and

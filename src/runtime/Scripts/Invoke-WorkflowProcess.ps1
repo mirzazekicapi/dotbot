@@ -121,7 +121,8 @@ function Initialize-DotbotTaskWorktreeForProcess {
         [Parameter(Mandatory)] $Task,
         [Parameter(Mandatory)] [string]$ProjectRoot,
         [Parameter(Mandatory)] [string]$BotRoot,
-        [Parameter(Mandatory)] [string]$ProcessId
+        [Parameter(Mandatory)] [string]$ProcessId,
+        [string]$BaseBranch
     )
 
     Write-Diag "Worktree: required category=$($Task.category)"
@@ -137,11 +138,13 @@ function Initialize-DotbotTaskWorktreeForProcess {
         }
     }
 
-    try { Assert-OnBaseBranch -ProjectRoot $ProjectRoot | Out-Null } catch {
+    $guardArgs = @{ ProjectRoot = $ProjectRoot }
+    if (-not [string]::IsNullOrWhiteSpace($BaseBranch)) { $guardArgs.BranchName = $BaseBranch }
+    try { Assert-OnBaseBranch @guardArgs | Out-Null } catch {
         Write-Status "Branch guard warning: $($_.Exception.Message)" -Type Warn
     }
     $wtResult = New-TaskWorktree -TaskId $Task.id -TaskName $Task.name `
-        -ProjectRoot $ProjectRoot -BotRoot $BotRoot
+        -ProjectRoot $ProjectRoot -BotRoot $BotRoot -BaseBranch $BaseBranch
     if ($wtResult.success) {
         Write-Status "Worktree: $($wtResult.worktree_path)" -Type Info
         return @{
@@ -976,7 +979,7 @@ Instructions:
             if ($ShowVerbose) { $adjustArgs['ShowVerbose'] = $true }
             if ($PermissionMode) { $adjustArgs['PermissionMode'] = $PermissionMode }
             if ($ProjectRoot) { $adjustArgs['WorkingDirectory'] = $ProjectRoot }
-            Invoke-HarnessStream @adjustArgs
+            Invoke-HarnessStream @adjustArgs | Out-Null
             Write-Status "Post-answer adjustment complete for $($Task.name)" -Type Complete
         } catch {
             $adjustErr = $_.Exception.Message
@@ -1189,6 +1192,28 @@ if ($LASTEXITCODE -ne 0) {
 # Update process status to running
 $processData.status = 'running'
 Write-ProcessFile -Id $procId -Data $processData
+
+$integrationBranch = $null
+$resolvedBase = $null
+if ($RunId) {
+    $resolvedBase = Resolve-DotbotBaseBranch -ProjectRoot $projectRoot -BotRoot $botRoot
+    if (-not $resolvedBase) {
+        Write-ProcessActivity -Id $procId -ActivityType "text" -Message "No base branch yet (unborn repo); skipping integration branch — first task uses an orphan worktree."
+    } else {
+        $integrationSlug  = ConvertTo-WorktreeSlug -Text $WorkflowName
+        $integrationShort = Get-ShortId -Id $RunId
+        $integrationBranch = Get-WorktreeBranchName -Slug $integrationSlug -ShortId $integrationShort
+        git -C $projectRoot rev-parse --verify $integrationBranch 2>$null | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            git -C $projectRoot branch $integrationBranch $resolvedBase 2>&1 | Out-Null
+            if ($LASTEXITCODE -ne 0) {
+                throw "Failed to create integration branch '$integrationBranch' off '$resolvedBase' in $projectRoot."
+            }
+        }
+        Write-Status "Integration branch: $integrationBranch (off $resolvedBase)" -Type Info
+        Write-ProcessActivity -Id $procId -ActivityType "text" -Message "Integration branch $integrationBranch created off $resolvedBase; tasks will squash-merge into it."
+    }
+}
 
 $loopIteration = 0
 try {
@@ -1432,7 +1457,7 @@ try {
             $worktreePath = $null
             $branchName = $null
             $worktreeSetup = Initialize-DotbotTaskWorktreeForProcess -Task $task `
-                -ProjectRoot $projectRoot -BotRoot $botRoot -ProcessId $procId
+                -ProjectRoot $projectRoot -BotRoot $botRoot -ProcessId $procId -BaseBranch $integrationBranch
             if ($worktreeSetup) {
                 $worktreePath = $worktreeSetup.worktree_path
                 $branchName = $worktreeSetup.branch_name
@@ -1658,7 +1683,7 @@ try {
         $worktreePath = $null
         $branchName = $null
         $worktreeSetup = Initialize-DotbotTaskWorktreeForProcess -Task $task `
-            -ProjectRoot $projectRoot -BotRoot $botRoot -ProcessId $procId
+            -ProjectRoot $projectRoot -BotRoot $botRoot -ProcessId $procId -BaseBranch $integrationBranch
         if ($worktreeSetup) {
             $worktreePath = $worktreeSetup.worktree_path
             $branchName = $worktreeSetup.branch_name
@@ -1825,6 +1850,8 @@ Work on this task autonomously. When complete, ensure you call ``task_set_status
             }
 
             Write-Header "Execution Phase"
+            $streamResult = $null
+            $execErrorText = ''
             try {
                 $streamArgs = @{
                     Prompt = $fullExecutionPrompt
@@ -1847,10 +1874,11 @@ Work on this task autonomously. When complete, ensure you call ``task_set_status
                 $streamArgs['StopReason'] = "task '$($task.id)' reached a terminal state"
                 $streamArgs['StopGraceSeconds'] = $providerCompletionGraceSeconds
                 $streamArgs['StopCheckIntervalSeconds'] = $providerStopCheckIntervalSeconds
-                Invoke-HarnessStream @streamArgs
-                $exitCode = 0
+                $streamResult = Invoke-HarnessStream @streamArgs
+                $exitCode = if ($streamResult -and $streamResult.PSObject.Properties['ExitCode']) { [int]$streamResult.ExitCode } else { 0 }
             } catch {
-                Write-Status "Execution error: $($_.Exception.Message)" -Type Error
+                $execErrorText = $_.Exception.Message
+                Write-Status "Execution error: $execErrorText" -Type Error
                 $exitCode = 1
             }
 
@@ -1920,8 +1948,29 @@ Work on this task autonomously. When complete, ensure you call ``task_set_status
                 Write-ProcessActivity -Id $procId -ActivityType "text" -Message "Completion check failed (attempt $attemptNumber): '$($task.name)' is not in-progress or done (unexpected state)."
             }
 
-            # Task not completed - handle failure
-            $failureReason = Get-FailureReason -ExitCode $exitCode -Stdout "" -Stderr "" -TimedOut $false
+            # Task not completed - handle failure. Feed the classifier the real
+            # harness error text (stream-json error event and/or caught exception)
+            # so type-aware rules like AuthError can match instead of always
+            # falling through to the generic Crash default.
+            $harnessErrText = @($streamResult.ErrorText, $execErrorText | Where-Object { $_ }) -join "`n"
+            $failureReason = Get-FailureReason -ExitCode $exitCode -Stdout $harnessErrText -Stderr $harnessErrText -TimedOut $false
+
+            # Auth expiry mid-run: park to needs-input (worktree retained, no
+            # merge, retry budget not consumed) and prompt the operator to
+            # re-authenticate, instead of burning retries against the same wall.
+            if ($failureReason.type -eq 'AuthError') {
+                $authDetail = if ($harnessErrText.Length -gt 1000) { $harnessErrText.Substring(0, 1000) + " … [truncated, showing 1000 of $($harnessErrText.Length) chars]" } else { $harnessErrText }
+                $authContext = "$($failureReason.description). $($failureReason.suggested_action). Detail: $authDetail"
+                Write-Status "Auth expiry detected — parking for re-authentication: $($task.name)" -Type Warn
+                Write-ProcessActivity -Id $procId -ActivityType "text" -Message "Task '$($task.name)' parked (needs-input): re-authentication required"
+                Set-WorkflowTaskNeedsInput -Task $task -RunDir $runDir `
+                    -QuestionId "auth-expiry-$($task.id)" `
+                    -Question "Re-authentication required for task '$($task.name)'" `
+                    -Context $authContext | Out-Null
+                $taskParked = $true
+                break
+            }
+
             if (-not $failureReason.recoverable) {
                 Write-Status "Non-recoverable failure - skipping" -Type Error
                 try {
@@ -2346,6 +2395,39 @@ Work on this task autonomously. When complete, ensure you call ``task_set_status
             Write-BotLog -Level Warn -Message "Failed to update WorkflowRun live status for $RunId" -Exception $_
         }
     }
+
+    if ($integrationBranch) {
+        try {
+            $integrationRemote = git -C $projectRoot remote get-url origin 2>$null
+            if ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace($integrationRemote)) {
+                $pushOutput = git -C $projectRoot push -u origin $integrationBranch 2>&1
+                if ($LASTEXITCODE -eq 0) {
+                    Write-Status "Integration branch pushed: $integrationBranch" -Type Complete
+                    Write-ProcessActivity -Id $procId -ActivityType "text" -Message "Integration branch $integrationBranch pushed to $($integrationRemote.Trim()). Open a PR into $resolvedBase."
+                } else {
+                    $pushError = ($pushOutput | Out-String).Trim()
+                    Write-Status "Integration branch push failed; branch preserved locally." -Type Warn
+                    Write-ProcessActivity -Id $procId -ActivityType "error" -Message "Failed to push integration branch $integrationBranch (preserved locally): $pushError. Push manually with: git push -u origin $integrationBranch"
+                }
+            } else {
+                Write-ProcessActivity -Id $procId -ActivityType "text" -Message "No remote configured; integration branch $integrationBranch preserved locally. Push it and open a PR into $resolvedBase when ready."
+            }
+        } catch {
+            Write-ProcessActivity -Id $procId -ActivityType "error" -Message "Integration branch push step failed (branch $integrationBranch preserved locally): $($_.Exception.Message)"
+        }
+
+        if ($resolvedBase) {
+            try {
+                git -C $projectRoot checkout $resolvedBase 2>&1 | Out-Null
+                if ($LASTEXITCODE -ne 0) {
+                    Write-BotLog -Level Warn -Message "Failed to restore working copy to base branch '$resolvedBase' after run $RunId"
+                }
+            } catch {
+                Write-BotLog -Level Warn -Message "Failed to restore working copy to base branch '$resolvedBase'" -Exception $_
+            }
+        }
+    }
+
     Write-ProcessFile -Id $procId -Data $processData
     Write-ProcessActivity -Id $procId -ActivityType "text" -Message "Process $procId finished ($($processData.status), tasks_completed: $tasksProcessed)"
     Write-Information "process_end: id=$procId status=$($processData.status) tasks_completed=$tasksProcessed" -Tags @('dotbot', 'process', 'lifecycle')

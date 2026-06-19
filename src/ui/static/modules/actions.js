@@ -303,7 +303,7 @@ function renderQuestionItem(item) {
 
     if (questionType === 'approval') {
         return `
-        <div class="action-item" data-task-id="${escapeHtml(item.task_id)}" data-type="question" data-question-type="approval">
+        <div class="action-item" data-task-id="${escapeAttr(item.task_id)}" data-type="question" data-question-type="approval">
             <div class="action-item-header">
                 <span class="action-item-type question">Approval</span>
                 <span class="action-item-task">${escapeHtml(item.task_name)}</span>
@@ -347,8 +347,8 @@ function renderQuestionItem(item) {
                 <div class="answer-options" data-multi-select="${isMultiSelect}">
                     ${options.map(opt => `
                         <div class="answer-option"
-                             data-key="${escapeHtml(opt.key)}"
-                             data-label="${escapeHtml(opt.label)}">
+                             data-key="${escapeAttr(opt.key)}"
+                             data-label="${escapeAttr(opt.label)}">
                             <span class="answer-key">${escapeHtml(opt.key)}</span>
                             <div class="answer-content">
                                 <div class="answer-label">${escapeHtml(opt.label)}</div>
@@ -365,7 +365,7 @@ function renderQuestionItem(item) {
 
                 <div class="answer-attachments-section">
                     <div class="answer-attachments-label">Attach files (optional)</div>
-                    <div class="answer-dropzone" data-task-id="${escapeHtml(item.task_id)}">
+                    <div class="answer-dropzone" data-task-id="${escapeAttr(item.task_id)}">
                         <div class="dropzone-content">
                             <div class="dropzone-icon">&#9671;</div>
                             <div class="dropzone-text">Drop files here or click to browse</div>
@@ -511,7 +511,7 @@ function renderSplitItem(item) {
     const subTasks = proposal.sub_tasks || [];
 
     return `
-        <div class="action-item" data-task-id="${escapeHtml(item.task_id)}" data-type="split">
+        <div class="action-item" data-task-id="${escapeAttr(item.task_id)}" data-type="split">
             <div class="action-item-header">
                 <span class="action-item-type split">Split Proposal</span>
                 <span class="action-item-task">${escapeHtml(item.task_name)}</span>
@@ -549,7 +549,7 @@ function renderWorkflowLaunchQuestionsItem(item) {
     const roundLabel = round > 1 ? ` (Round ${round})` : '';
 
     return `
-        <div class="action-item" data-process-id="${escapeHtml(item.process_id)}" data-type="workflow-launch-questions">
+        <div class="action-item" data-process-id="${escapeAttr(item.process_id)}" data-type="workflow-launch-questions">
             <div class="action-item-header">
                 <span class="action-item-type workflow-launch">Project Interview${escapeHtml(roundLabel)}</span>
                 <span class="action-item-task">${escapeHtml(item.description || 'Project Setup')}</span>
@@ -557,15 +557,15 @@ function renderWorkflowLaunchQuestionsItem(item) {
             <div class="action-item-body">
                 ${questions.map((q, idx) => `
                     ${idx > 0 ? '<div class="question-divider"></div>' : ''}
-                    <div class="workflow-launch-question" data-question-id="${escapeHtml(q.id)}">
+                    <div class="workflow-launch-question" data-question-id="${escapeAttr(q.id)}">
                         <div class="action-question-text"><span class="question-number">Q${idx + 1}.</span> ${escapeHtml(q.question)}</div>
                         ${q.context ? `<div class="action-question-context">${escapeHtml(q.context)}</div>` : ''}
                         <div class="answer-options" data-multi-select="false">
                             ${(q.options || []).map(opt => `
                                 <div class="answer-option"
-                                     data-key="${escapeHtml(opt.key)}"
-                                     data-label="${escapeHtml(opt.label)}"
-                                     data-question-key="${escapeHtml(q.id)}">
+                                     data-key="${escapeAttr(opt.key)}"
+                                     data-label="${escapeAttr(opt.label)}"
+                                     data-question-key="${escapeAttr(q.id)}">
                                     <span class="answer-key">${escapeHtml(opt.key)}</span>
                                     <div class="answer-content">
                                         <div class="answer-label">${escapeHtml(opt.label)}</div>
@@ -577,9 +577,9 @@ function renderWorkflowLaunchQuestionsItem(item) {
                         <div class="workflow-launch-question-freetext">
                             <textarea class="workflow-launch-freetext-input" placeholder="Or type a custom answer..."></textarea>
                         </div>
-                        <div class="answer-attachments-section" data-process-id="${escapeHtml(item.process_id)}" data-question-id="${escapeHtml(q.id)}">
+                        <div class="answer-attachments-section" data-process-id="${escapeAttr(item.process_id)}" data-question-id="${escapeAttr(q.id)}">
                             <div class="answer-attachments-label">Attach files (optional)</div>
-                            <div class="answer-dropzone" data-process-id="${escapeHtml(item.process_id)}" data-question-id="${escapeHtml(q.id)}">
+                            <div class="answer-dropzone" data-process-id="${escapeAttr(item.process_id)}" data-question-id="${escapeAttr(q.id)}">
                                 <div class="dropzone-content">
                                     <div class="dropzone-icon">&#9671;</div>
                                     <div class="dropzone-text">Drop files here or click to browse</div>
@@ -853,12 +853,17 @@ function attachActionHandlers(container) {
 
     // Approve review buttons
     container.querySelectorAll('.approve-review').forEach(btn => {
-        btn.addEventListener('click', () => handleReviewAction(btn, true));
+        btn.addEventListener('click', () => handleReviewAction(btn, 'approve'));
+    });
+
+    // Revise review buttons
+    container.querySelectorAll('.revise-review').forEach(btn => {
+        btn.addEventListener('click', () => handleReviewAction(btn, 'revise'));
     });
 
     // Reject review buttons
     container.querySelectorAll('.reject-review').forEach(btn => {
-        btn.addEventListener('click', () => handleReviewAction(btn, false));
+        btn.addEventListener('click', () => handleReviewAction(btn, 'reject'));
     });
 
     // Task batch questions: per-question option selection
@@ -993,7 +998,7 @@ function updateAnswerFileList(taskId, section) {
             <span class="answer-file-icon">&#9671;</span>
             <span class="answer-file-name">${escapeHtml(file.name)}</span>
             <span class="answer-file-size">${sizeStr}</span>
-            <button class="answer-file-remove" data-idx="${idx}" data-task-id="${escapeHtml(taskId)}" title="Remove">&times;</button>
+            <button class="answer-file-remove" data-idx="${idx}" data-task-id="${escapeAttr(taskId)}" title="Remove">&times;</button>
         </div>`;
     }).join('');
     container.querySelectorAll('.answer-file-remove').forEach(btn => {
@@ -1042,7 +1047,7 @@ function updateWorkflowLaunchFileList(key, section) {
             <span class="answer-file-icon">&#9671;</span>
             <span class="answer-file-name">${escapeHtml(file.name)}</span>
             <span class="answer-file-size">${sizeStr}</span>
-            <button class="answer-file-remove" data-idx="${idx}" data-key="${escapeHtml(key)}" title="Remove">&times;</button>
+            <button class="answer-file-remove" data-idx="${idx}" data-key="${escapeAttr(key)}" title="Remove">&times;</button>
         </div>`;
     }).join('');
     container.querySelectorAll('.answer-file-remove').forEach(btn => {
@@ -1354,7 +1359,7 @@ function renderReviewItem(item) {
     const feedback = Array.isArray(item.feedback) ? item.feedback : [];
     const shortSha = item.pending_commit ? String(item.pending_commit).slice(0, 7) : null;
     return `
-        <div class="action-item" data-task-id="${escapeHtml(item.task_id)}" data-type="review">
+        <div class="action-item" data-task-id="${escapeAttr(item.task_id)}" data-type="review">
             <div class="action-item-header">
                 <span class="action-item-type review">Review Required</span>
                 <span class="action-item-task">${escapeHtml(item.task_name)}</span>
@@ -1378,12 +1383,13 @@ function renderReviewItem(item) {
                 ` : ''}
 
                 <div class="review-reject-fields" style="display:none;">
-                    <textarea class="review-comment" placeholder="Reviewer comment (required for reject) — what should the implementor change?"></textarea>
+                    <textarea class="review-comment" placeholder="Reviewer comment (required for reject or revise) — what should the implementor change?"></textarea>
                     <textarea class="review-what-wrong" placeholder="(Optional) What was wrong with this attempt?"></textarea>
                 </div>
 
                 <div class="action-submit">
                     <button class="ctrl-btn reject-review">Reject &amp; restart</button>
+                    <button class="ctrl-btn revise-review">Revise</button>
                     <button class="ctrl-btn primary approve-review">Approve &amp; merge</button>
                 </div>
             </div>
@@ -1391,17 +1397,19 @@ function renderReviewItem(item) {
     `;
 }
 
-async function handleReviewAction(btn, approved) {
+async function handleReviewAction(btn, decision) {
     const actionItem = btn.closest('.action-item');
     const taskId = actionItem?.dataset.taskId;
     if (!taskId) return;
 
-    // First-click on Reject reveals the comment fields; second click submits.
-    if (!approved) {
-        const rejectFields = actionItem.querySelector('.review-reject-fields');
-        if (rejectFields && rejectFields.style.display === 'none') {
-            rejectFields.style.display = 'block';
-            btn.textContent = 'Confirm reject';
+    const needsComment = decision === 'reject' || decision === 'revise';
+
+    // First click on Reject/Revise reveals the comment fields; second click submits.
+    if (needsComment) {
+        const feedbackFields = actionItem.querySelector('.review-reject-fields');
+        if (feedbackFields && feedbackFields.style.display === 'none') {
+            feedbackFields.style.display = 'block';
+            btn.textContent = decision === 'revise' ? 'Confirm revise' : 'Confirm reject';
             return;
         }
     }
@@ -1409,13 +1417,17 @@ async function handleReviewAction(btn, approved) {
     const comment = actionItem.querySelector('.review-comment')?.value?.trim() || '';
     const whatWasWrong = actionItem.querySelector('.review-what-wrong')?.value?.trim() || '';
 
-    if (!approved && !comment) {
-        showToast('A comment is required when rejecting — describe what needs to change', 'warning');
+    if (needsComment && !comment) {
+        const verb = decision === 'revise' ? 'revising' : 'rejecting';
+        showToast(`A comment is required when ${verb} — describe what needs to change`, 'warning');
         return;
     }
 
+    const pendingText = { approve: 'Approving...', revise: 'Revising...', reject: 'Rejecting...' };
+    const restoreText = { approve: 'Approve & merge', revise: 'Confirm revise', reject: 'Confirm reject' };
+
     btn.disabled = true;
-    btn.textContent = approved ? 'Approving...' : 'Rejecting...';
+    btn.textContent = pendingText[decision];
 
     try {
         const response = await fetch(`${API_BASE}/api/task/submit-review`, {
@@ -1423,7 +1435,7 @@ async function handleReviewAction(btn, approved) {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
                 task_id: taskId,
-                approved: approved,
+                decision: decision,
                 comment: comment || null,
                 what_was_wrong: whatWasWrong || null
             })
@@ -1441,17 +1453,17 @@ async function handleReviewAction(btn, approved) {
                     '<div class="empty-state">No pending actions</div>';
             }
             if (typeof pollState === 'function') { pollState(); }
-            showToast(result.message || (approved ? 'Approved' : 'Rejected'), 'success');
+            showToast(result.message || 'Review submitted', 'success');
         } else {
             showToast('Failed to submit review: ' + (result.error || 'Unknown error'), 'error');
             btn.disabled = false;
-            btn.textContent = approved ? 'Approve & merge' : 'Confirm reject';
+            btn.textContent = restoreText[decision];
         }
     } catch (error) {
         console.error('Error submitting review:', error);
         showToast('Error submitting review', 'error');
         btn.disabled = false;
-        btn.textContent = approved ? 'Approve & merge' : 'Confirm reject';
+        btn.textContent = restoreText[decision];
     }
 }
 
