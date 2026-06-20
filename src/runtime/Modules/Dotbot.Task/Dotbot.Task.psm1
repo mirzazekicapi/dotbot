@@ -591,6 +591,49 @@ function Reset-InProgressTasks {
     return ,$resetTasks
 }
 
+function Get-NeedsInputTasksInScope {
+    <#
+    .SYNOPSIS
+    Returns task content objects for all tasks in needs-input status within the given scope.
+
+    .PARAMETER RunDir
+    Directory to scan (same semantics as Reset-InProgressTasks).
+
+    .PARAMETER Recurse
+    When set, scans recursively.
+
+    .OUTPUTS
+    Array of PSCustomObject task content. Empty array when none found.
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [string]$RunDir,
+
+        [switch]$Recurse,
+
+        [string]$WorkflowName = ''
+    )
+
+    if (-not (Test-Path -LiteralPath $RunDir)) { return @() }
+
+    @(Get-ChildItem -LiteralPath $RunDir -Filter '*.json' -File -Recurse:$Recurse -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -ne 'run.json' } |
+        ForEach-Object {
+            try {
+                $c = Get-Content -LiteralPath $_.FullName -Raw | ConvertFrom-Json
+                if ([string]$c.status -eq 'needs-input') {
+                    $matchesWorkflow = -not $WorkflowName -or (
+                        $c.PSObject.Properties['provenance'] -and $c.provenance -and
+                        [string]$c.provenance.workflow -eq $WorkflowName
+                    )
+                    if ($matchesWorkflow) { $c }
+                }
+            } catch {
+                Write-BotLog -Level Debug -Message "Get-NeedsInputTasksInScope: error reading '$($_.Name)'" -Exception $_
+            }
+        } | Where-Object { $_ })
+}
+
 function Reset-SkippedTasks {
     <#
     .SYNOPSIS
@@ -1685,6 +1728,7 @@ Export-ModuleMember -Function @(
     'Test-TaskCompletion'
     # State recovery
     'Reset-InProgressTasks'
+    'Get-NeedsInputTasksInScope'
     'Reset-SkippedTasks'
     # Post-script hooks
     'Invoke-PostScript'
