@@ -733,7 +733,19 @@ function Test-TaskOutput {
         if ($BaselineCount -ge 0) {
             $delta = $fileCount - $BaselineCount
             if ($delta -lt $minCount) {
-                return "Task output directory '$taskOutputsDir' produced $delta new file(s), expected at least $minCount"
+                # Resume-after-approval: on a resumed run the worktree already
+                # holds the artifact from the prior run, so the agent correctly
+                # calls task_set_status(done) without re-writing files that
+                # already exist — delta is 0 even though the required output is
+                # present and correct. For non-tasks/ outputs, fall back to the
+                # absolute file count: if the required files are already there
+                # (absolute count >= min), pass. tasks/ outputs keep strict
+                # delta enforcement because manifest pre-creation makes the
+                # absolute count always look satisfied, leaving delta the only
+                # meaningful signal.
+                if ($isTasksOutput -or $fileCount -lt $minCount) {
+                    return "Task output directory '$taskOutputsDir' produced $delta new file(s), expected at least $minCount"
+                }
             }
         } elseif ($fileCount -lt $minCount) {
             return "Task output directory '$taskOutputsDir' has $fileCount file(s), expected at least $minCount"
