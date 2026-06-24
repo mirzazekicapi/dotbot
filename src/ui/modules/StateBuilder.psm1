@@ -388,7 +388,9 @@ function Get-BotState {
     # Per-workflow task counts accumulator
     $workflowCounts = @{}
 
-    # Get recent completed tasks (last 100 for infinite scroll)
+    # Get recent completed tasks. The Roadmap "Done" column is a recent-history
+    # view, not an exhaustive archive — cap to the newest 20 to keep the state
+    # payload and the rendered column bounded (PR #502 review).
     $recentCompleted = @()
     if ($doneTasks.Count -gt 0) {
         $recentCompleted = $doneTasks |
@@ -435,7 +437,7 @@ function Get-BotState {
                 }
             } | Where-Object { $_ -ne $null } |
             Sort-Object { if ($_.completed_at) { [DateTime]$_.completed_at } else { [DateTime]::MinValue } } -Descending |
-            Select-Object -First 100
+            Select-Object -First 20
     }
 
     # Get skipped tasks list
@@ -473,7 +475,9 @@ function Get-BotState {
                 } catch {
                     $null
                 }
-            } | Where-Object { $_ -ne $null }
+            } | Where-Object { $_ -ne $null } |
+            Sort-Object { if ($_.updated_at) { [DateTime]$_.updated_at } else { [DateTime]::MinValue } } -Descending |
+            Select-Object -First 10
     }
 
     # Get analysing tasks list
@@ -515,6 +519,32 @@ function Get-BotState {
                         status = $taskContent.status
                         pending_question = $taskContent.pending_question
                         questions_resolved = $taskContent.questions_resolved
+                        workflow = $taskContent.workflow
+                        type = $taskContent.type
+                    }
+                } catch { $null }
+            } | Where-Object { $_ -ne $null }
+    }
+
+    # Get needs-review tasks list. These are parked on a human reviewer, so they
+    # join the "waiting on a person" view (Needs Input column) alongside
+    # needs-input tasks (#500). Review-specific metadata (commit, reason,
+    # feedback) is still served by the Review Required panel's own endpoint,
+    # which reads the raw task content; here we only need enough for the card.
+    $needsReviewTasksList = @()
+    if ($needsReviewTasks.Count -gt 0) {
+        $needsReviewTasksList = $needsReviewTasks |
+            ForEach-Object {
+                try {
+                    $taskContent = $_
+                    @{
+                        id = $taskContent.id
+                        name = $taskContent.name
+                        description = $taskContent.description
+                        category = $taskContent.category
+                        priority = $taskContent.priority
+                        effort = $taskContent.effort
+                        status = $taskContent.status
                         workflow = $taskContent.workflow
                         type = $taskContent.type
                     }
@@ -950,6 +980,7 @@ function Get-BotState {
             todo = $todoTasks.Count
             analysing = $analysingTasks.Count
             needs_input = $needsInputTasks.Count
+            needs_review = $needsReviewTasks.Count
             analysed = $analysedTasks.Count
             split = $splitTasks.Count
             in_progress = $inProgressTasks.Count
@@ -961,6 +992,7 @@ function Get-BotState {
             upcoming_total = if ($todoTasks.Count) { $todoTasks.Count } else { 0 }
             analysing_list = @($analysingTasksList)
             needs_input_list = @($needsInputTasksList)
+            needs_review_list = @($needsReviewTasksList)
             analysed_list = @($analysedTasksList)
             in_progress_list = @($inProgressTasksList)
             recent_completed = @($recentCompleted)

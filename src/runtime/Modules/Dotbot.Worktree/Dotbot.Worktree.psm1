@@ -1281,10 +1281,25 @@ function Apply-TaskBranchPatch {
             git -C $ProjectRoot ls-files --error-unmatch -- $addedPath 2>$null | Out-Null
             if ($LASTEXITCODE -eq 0) { continue }
 
-            # Untracked file at this path. In the task-branch squash-merge flow these are
-            # always leftovers from a prior failed apply — git reset --hard HEAD does not
-            # remove untracked files, so they persist across retries. The branch version
-            # is authoritative; remove and let git apply add the file cleanly.
+            # Compare against the branch blob using git's own normalization
+            # (clean filter + autocrlf), NOT raw bytes. On Windows with
+            # core.autocrlf=true a leftover from a prior failed apply is written
+            # to the working tree with CRLF while the branch blob is stored LF,
+            # so a raw (--no-filters) hash never matches even when the content
+            # is byte-identical modulo EOL — that false "divergence" permanently
+            # blocked squash-merge retries (issue #517). hash-object WITHOUT
+            # --no-filters yields the OID git would store, so an EOL-only-stale
+            # leftover hashes equal and is cleaned below; genuinely divergent
+            # local content still differs and is preserved by the guard.
+            $branchBlob = (git -C $ProjectRoot rev-parse "$BranchName`:$addedPath" 2>$null)
+            $localBlob = (git -C $ProjectRoot hash-object -- $addedPath 2>$null)
+            if (-not $branchBlob -or -not $localBlob -or $branchBlob.Trim() -ne $localBlob.Trim()) {
+                return @{
+                    success = $false
+                    output  = @("Untracked file would be overwritten by task branch: $addedPath")
+                }
+            }
+
             Remove-Item -LiteralPath $targetPath -Force
         }
 
@@ -1359,6 +1374,23 @@ function Apply-TaskBranchPatch {
             }
 
             $conflictFiles = @($unresolvedConflicts)
+
+            # Roll back untracked files this apply wrote. The guard above
+            # returns early on any pre-existing divergent untracked file at an
+            # added path, so once `git apply` runs, every still-untracked file
+            # at an added path is an artifact of THIS attempt. Left on disk it
+            # would block the next retry's guard as a stale leftover and park
+            # the task in needs-input forever (issue #517). Tracked/unmerged
+            # entries (3-way conflict files surfaced above) are left for the
+            # caller's `git reset --hard HEAD`.
+            foreach ($addedPath in $addedPaths) {
+                $targetPath = Join-Path $ProjectRoot $addedPath
+                if (-not (Test-Path -LiteralPath $targetPath)) { continue }
+                git -C $ProjectRoot ls-files --error-unmatch -- $addedPath 2>$null | Out-Null
+                if ($LASTEXITCODE -eq 0) { continue }
+                Remove-Item -LiteralPath $targetPath -Force -ErrorAction SilentlyContinue
+            }
+
             return @{
                 success        = $false
                 output         = @($applyOutput | ForEach-Object { "$_" })
@@ -2118,58 +2150,49 @@ function Remove-OrphanWorktrees {
     if ($map.Count -eq 0) { return }
 
     $tasksBaseDir = Join-Path $BotRoot "workspace/tasks"
-    # A task's worktree is kept while the task is in an active (non-terminal) status.
-    # 'done' is included: tasks that just completed execution may still have a live worktree
-    # pending squash-merge by Complete-TaskWorktree. Removing them here would race with that.
-    # Terminal statuses (done excepted) are reapable: failed/skipped/cancelled.
-    $activeStatuses = @('todo', 'needs-input', 'in-progress', 'needs-review', 'done')
     $orphanIds = @()
 
-    # v4 stores tasks as workspace/tasks/workflow-runs/<run>/<id>.json and
-    # workspace/tasks/standalone/<id>.json with the lifecycle in a 'status' FIELD —
-    # there are no per-status directories. Scan those locations (and, for v3.5
-    # back-compat, the legacy status directories) and collect the ids of tasks
-    # that are currently active. A worktree is an orphan only if its task is not
-    # in that active set.
-    $taskFileDirs = @()
-    $wfRunsDir = Join-Path $tasksBaseDir 'workflow-runs'
-    if (Test-Path $wfRunsDir) {
-        $taskFileDirs += @(Get-ChildItem -Path $wfRunsDir -Directory -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName })
-    }
-    foreach ($legacy in @('standalone', 'todo', 'needs-input', 'in-progress', 'needs-review', 'done')) {
-        $legacyDir = Join-Path $tasksBaseDir $legacy
-        if (Test-Path $legacyDir) { $taskFileDirs += $legacyDir }
-    }
+    # Build the set of active task IDs from all known layouts.
+    $activeIds = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
 
-    $activeIds = @{}
-    $sawAnyTaskFile = $false
-    foreach ($dir in $taskFileDirs) {
-        $files = Get-ChildItem -Path $dir -Filter "*.json" -File -ErrorAction SilentlyContinue
-        foreach ($f in $files) {
+    # Legacy flat status dirs. 'done' is included: tasks that just completed execution may
+    # still have a live worktree pending squash-merge by Complete-TaskWorktree.
+    $activeDirs = @('todo', 'needs-input', 'in-progress', 'needs-review', 'done')
+    foreach ($dir in $activeDirs) {
+        $dirPath = Join-Path $tasksBaseDir $dir
+        if (-not (Test-Path $dirPath)) { continue }
+        Get-ChildItem -Path $dirPath -Filter '*.json' -File -ErrorAction SilentlyContinue | ForEach-Object {
+            $filePath = $_.FullName
             try {
-                $content = Get-Content -Path $f.FullName -Raw | ConvertFrom-Json
-            } catch {
-                Write-BotLog -Level Debug -Message "Failed to read task file $($f.FullName)" -Exception $_
-                continue
-            }
-            if (-not $content.id) { continue }   # run.json / form-input / non-task files
-            $sawAnyTaskFile = $true
-            if ($activeStatuses -contains $content.status) {
-                $activeIds[$content.id] = $true
-            }
+                $c = Get-Content -Path $filePath -Raw | ConvertFrom-Json
+                if ($c.id) { $null = $activeIds.Add([string]$c.id) }
+            } catch { Write-BotLog -Level Debug -Message "Failed to read task file $filePath" -Exception $_ }
         }
     }
 
-    # Safety: if the scan found no task files at all (missing/unreadable task tree),
-    # do NOT treat every mapped worktree as an orphan — bail rather than mass-delete.
-    if (-not $sawAnyTaskFile) {
-        Write-BotLog -Level Warn -Message "Remove-OrphanWorktrees: no task files found under $tasksBaseDir — skipping orphan cleanup to avoid mass worktree removal"
-        return
+    # Canonical layout (workflow-runs/ and standalone/). Tasks store status as a JSON field
+    # rather than via directory placement, so filter by the same logical active-status set.
+    $canonicalActiveStatuses = [System.Collections.Generic.HashSet[string]]::new(
+        [string[]]@('todo', 'needs-input', 'in-progress', 'needs-review', 'done'),
+        [StringComparer]::OrdinalIgnoreCase
+    )
+    foreach ($canonDir in @('workflow-runs', 'standalone')) {
+        $canonPath = Join-Path $tasksBaseDir $canonDir
+        if (-not (Test-Path $canonPath)) { continue }
+        Get-ChildItem -Path $canonPath -Filter '*.json' -File -Recurse -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -ne 'run.json' } |
+            ForEach-Object {
+                $filePath = $_.FullName
+                try {
+                    $c = Get-Content -Path $filePath -Raw | ConvertFrom-Json
+                    if ($c.id -and $canonicalActiveStatuses.Contains([string]$c.status)) {
+                        $null = $activeIds.Add([string]$c.id)
+                    }
+                } catch { Write-BotLog -Level Debug -Message "Failed to read task file $filePath" -Exception $_ }
+            }
     }
 
-    foreach ($taskId in @($map.Keys)) {
-        if (-not $activeIds.ContainsKey($taskId)) { $orphanIds += $taskId }
-    }
+    $orphanIds = @($map.Keys | Where-Object { -not $activeIds.Contains($_) })
 
     foreach ($taskId in $orphanIds) {
         $entry = $map[$taskId]
