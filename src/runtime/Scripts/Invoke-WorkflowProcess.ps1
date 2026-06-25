@@ -490,9 +490,15 @@ function Read-DotbotMcpPreflightLine {
 function Test-DotbotMcpReadiness {
     param(
         [Parameter(Mandatory)] [string]$WorktreePath,
-        # Main project root (not the worktree). Used as DOTBOT_PROJECT_ROOT so the MCP
-        # server finds runtime.json at <main>/.bot/.control/ directly, without relying on
-        # the .control junction in the worktree (which can become stale on task retry).
+        # Stable main repo root, exported as DOTBOT_STATE_ROOT so the preflight
+        # MCP process resolves runtime.json against the main .control/ rather
+        # than the worktree's junction, which can be stale on task retry
+        # (teardown/re-create is not atomic) and would make the server exit
+        # before the handshake. This mirrors the real provider session, which
+        # also runs with cwd/DOTBOT_PROJECT_ROOT = worktree and
+        # DOTBOT_STATE_ROOT = main root — so preflight tests the same config the
+        # task actually runs under. Omitted → no state-root override (backward
+        # compatible). See #515.
         [string]$ProjectRoot,
         [string[]]$RequiredTools = @('task_get_context','task_set_status','task_update','decision_create','decision_list')
     )
@@ -542,7 +548,8 @@ function Test-DotbotMcpReadiness {
         $psi.StandardErrorEncoding = [System.Text.Encoding]::UTF8
         $psi.WorkingDirectory = $WorktreePath
         $psi.Environment['DOTBOT_HOME'] = $frameworkRoot
-        $psi.Environment['DOTBOT_PROJECT_ROOT'] = if ($ProjectRoot) { $ProjectRoot } else { $WorktreePath }
+        $psi.Environment['DOTBOT_PROJECT_ROOT'] = $WorktreePath
+        if ($ProjectRoot) { $psi.Environment['DOTBOT_STATE_ROOT'] = $ProjectRoot }
         $psi.Environment['__DOTBOT_MANAGED'] = '1'
 
         $maxAttempts = 2
