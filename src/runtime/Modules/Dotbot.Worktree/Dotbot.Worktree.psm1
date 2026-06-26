@@ -1487,6 +1487,14 @@ function New-TaskWorktree {
             Remove-Item -Path $worktreePath -Recurse -Force -ErrorAction SilentlyContinue
             # Also prune git's worktree list so it doesn't think it still exists
             git -C $ProjectRoot worktree prune 2>$null
+            if (Test-Path $worktreePath) {
+                return @{
+                    worktree_path = $worktreePath
+                    branch_name   = $branchName
+                    success       = $false
+                    message       = "Stale worktree directory could not be removed: $worktreePath"
+                }
+            }
         }
     }
 
@@ -1631,12 +1639,17 @@ function Complete-TaskWorktree {
 
     .OUTPUTS
     Hashtable with:
-      success        — $true on full merge+commit+cleanup, $false otherwise
+      success        — $true when merge+commit succeeded. NOTE: $true does NOT
+                       guarantee worktree cleanup succeeded — if the directory
+                       could not be removed (e.g. Windows open handles), success
+                       stays $true, failure_kind stays $null, and the cleanup
+                       failure is reported only via 'message' and an Error log.
       merge_commit   — SHA of the resulting commit (success only) or $null
       message        — human-readable summary
       conflict_files — array of conflicting paths (only populated for
                        failure_kind='rebase_conflict')
-      failure_kind   — one of: $null (on success), 'rebase_conflict',
+      failure_kind   — one of: $null (merge succeeded; see 'success' re: cleanup),
+                       'rebase_conflict',
                        'branch_missing', 'merge_command_failed', 'commit_failed',
                        'exception'. Drives the kind-specific pending_question
                        built by Move-TaskToMergeFailureNeedsInput.
@@ -1944,12 +1957,36 @@ function Complete-TaskWorktree {
             }
             git -C $ProjectRoot worktree remove $worktreePath 2>$null
         }
-        # Verify worktree is actually gone (Fix: silent removal failures)
-        if (Test-Path $worktreePath) {
-            Write-BotLog -Level Warn -Message "Worktree removal incomplete — path still exists: $worktreePath. Will be retried on next startup."
+        # Fallback: direct filesystem delete when git worktree remove leaves the dir
+        # behind (e.g. Windows open handles). Gated on junctions being gone — on
+        # Windows Remove-Item -Recurse follows junctions and would delete link
+        # targets (shared task state, product workspace). If junctions survived,
+        # skip the delete; the entry is kept below for manual cleanup.
+        $worktreeParentDir = Join-Path (Split-Path $ProjectRoot -Parent) "worktrees" (Split-Path $ProjectRoot -Leaf)
+        $rmErr = $null
+        if ((Test-Path $worktreePath) -and $junctionsClean -and -not (Test-JunctionsExist -WorktreePath $worktreePath)) {
+            Assert-PathWithinBounds -Path $worktreePath -ExpectedRoot $worktreeParentDir
+            Remove-Item -Path $worktreePath -Recurse -Force -ErrorAction SilentlyContinue -ErrorVariable rmErr
+            git -C $ProjectRoot worktree prune 2>$null
         }
-        git -C $ProjectRoot branch -D $branchName 2>$null
 
+        if (Test-Path $worktreePath) {
+            # Keep map entry to preserve tracking. NOTE: Remove-OrphanWorktrees skips done-status tasks,
+            # so no automatic retry fires. Manual cleanup required: remove $worktreePath and the map entry.
+            $rmDetail = if ($rmErr) { " Last delete error: $(($rmErr | Select-Object -First 1).Exception.Message)" } else { "" }
+            Write-BotLog -Level Error -Message "Worktree removal incomplete — path still exists: $worktreePath. Map entry kept. Manual cleanup required (Remove-OrphanWorktrees will not retry done-status tasks).$rmDetail"
+            return @{
+                success        = $true
+                merge_commit   = $mergeCommit
+                message        = "Squash-merged to $baseBranch (worktree directory cleanup failed — manual removal required: $worktreePath)"
+                conflict_files = @()
+                failure_kind   = $null
+                failure_detail = ""
+                push_result    = $pushResult
+            }
+        }
+
+        git -C $ProjectRoot branch -D $branchName 2>$null
         # Remove from registry (locked read-modify-write to prevent concurrent entry loss)
         Invoke-WorktreeMapLocked -BotRoot $BotRoot -Action {
             $lockedMap = Read-WorktreeMap -BotRoot $BotRoot
@@ -2208,6 +2245,7 @@ function Remove-OrphanWorktrees {
 
     $orphanIds = @($map.Keys | Where-Object { -not $activeIds.Contains($_) })
 
+    $failedOrphanIds = [System.Collections.Generic.List[string]]::new()
     foreach ($taskId in $orphanIds) {
         $entry = $map[$taskId]
         $worktreePath = $entry.worktree_path
@@ -2239,18 +2277,45 @@ function Remove-OrphanWorktrees {
             }
             git -C $ProjectRoot worktree remove $worktreePath 2>$null
         }
-        # Verify worktree is actually gone (Fix: silent removal failures)
-        if ($worktreePath -and (Test-Path $worktreePath)) {
-            Write-BotLog -Level Warn -Message "Orphan worktree removal incomplete — path still exists: $worktreePath"
+
+        # Fallback: direct filesystem delete when git worktree remove leaves the dir
+        # behind (e.g. Windows open handles). Gated on junctions being gone — on
+        # Windows Remove-Item -Recurse follows junctions and would delete link
+        # targets (shared task state, product workspace). If junctions survived,
+        # skip the delete; the entry is kept below for next-startup retry.
+        $worktreeParentDir = Join-Path (Split-Path $ProjectRoot -Parent) "worktrees" (Split-Path $ProjectRoot -Leaf)
+        $rmErr = $null
+        if ($worktreePath -and (Test-Path $worktreePath) -and $junctionsClean -and -not (Test-JunctionsExist -WorktreePath $worktreePath)) {
+            try {
+                Assert-PathWithinBounds -Path $worktreePath -ExpectedRoot $worktreeParentDir
+                Remove-Item -Path $worktreePath -Recurse -Force -ErrorAction SilentlyContinue -ErrorVariable rmErr
+                git -C $ProjectRoot worktree prune 2>$null
+            } catch {
+                # A bounds-check failure (e.g. a legacy/non-canonical map entry) must
+                # never abort the whole sweep or skip the map prune below — keep the
+                # entry and move on to the next orphan.
+                Write-BotLog -Level Error -Message "Orphan worktree cleanup error for $taskId ($worktreePath): $($_.Exception.Message). Entry kept in map."
+                $null = $failedOrphanIds.Add($taskId)
+                continue
+            }
         }
-        git -C $ProjectRoot branch -D $branchName 2>$null
+
+        if ($worktreePath -and (Test-Path $worktreePath)) {
+            # Directory survived all removal attempts — keep in map so next startup retries
+            $rmDetail = if ($rmErr) { " Last delete error: $(($rmErr | Select-Object -First 1).Exception.Message)" } else { "" }
+            Write-BotLog -Level Error -Message "Orphan worktree removal incomplete — path still exists: $worktreePath. Entry kept in map for next-startup retry.$rmDetail"
+            $null = $failedOrphanIds.Add($taskId)
+        } else {
+            git -C $ProjectRoot branch -D $branchName 2>$null
+        }
     }
 
-    if ($orphanIds.Count -gt 0) {
+    $removedOrphanIds = @($orphanIds | Where-Object { -not $failedOrphanIds.Contains($_) })
+    if ($removedOrphanIds.Count -gt 0) {
         # Locked read-modify-write — prevents concurrent processes from losing map entries
         Invoke-WorktreeMapLocked -BotRoot $BotRoot -Action {
             $lockedMap = Read-WorktreeMap -BotRoot $BotRoot
-            foreach ($id in $orphanIds) { $lockedMap.Remove($id) }
+            foreach ($id in $removedOrphanIds) { $lockedMap.Remove($id) }
             Write-WorktreeMap -Map $lockedMap -BotRoot $BotRoot
         }
     }
